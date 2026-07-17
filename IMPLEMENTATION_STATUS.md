@@ -37,10 +37,10 @@ behavior, native SDK artifacts, document support, or a stable release.
 
 ## 2026-07-17 — Milestone 2 partial checkpoint
 
-Assumption: this partial checkpoint establishes tested wrapper source, package layouts, and
-deterministic build definitions. It does not complete Milestone 2 without successful Android,
-Windows, and Apple artifact jobs, complete host services, cross-platform conformance evidence, and
-release-manifest records.
+Assumption: this partial checkpoint establishes tested wrapper source, verified prerelease SDK
+artifacts, deterministic build definitions, and exact source metadata. It does not complete
+Milestone 2 without complete host services, broader cross-platform conformance, sanitizer and fuzz
+evidence, symbol bundles, release-manifest records, and the remaining platform projections.
 
 Implemented:
 
@@ -102,23 +102,53 @@ Verified on this Linux host with Rust 1.93.0, GCC/G++ 14.2.0, and the local fake
   Apple and packaged Linux metadata JSON, `git diff --check`, and the complete intended-worktree
   credential-signature scan passed static validation.
 
+Verified remotely from clean source revision
+`1c204f50e73797a77c66b919063071176efcd706`:
+
+- Core CI run `29557243680` passed the Rust formatting, strict Clippy, 27-test, locked-build,
+  dependency-policy, and credential-signature gates.
+- Native SDK run `29557243604` passed Linux job `87811970748`, Windows job `87811970744`, Android
+  job `87811970762`, and Apple job `87811970791`.
+- Android artifact `8397932066` recorded the exact source revision, ABI major 1, protocol version 1,
+  and prerelease status. Its AAR SHA-256 is
+  `e659adbde0de708ea0d7c762545418a9e1d90afc88e135c5bc3a511d96f58e8d`. Independent inspection
+  verified the checksum manifest, required wrapper and generated Protobuf classes, six native
+  libraries across `arm64-v8a`, `armeabi-v7a`, and `x86_64`, expected FFI/JNI symbols, Android 26
+  ELF targets, and basename-only `liblinguamesh_ffi.so` dynamic dependencies without build-host
+  paths.
+- Linux artifact `8397909478` has archive SHA-256
+  `2b87c9a2e56955b6faf011895140e8f9d11ca7e441017a0b73a8226b47f76878`. Its outer and nine packaged
+  checksums, exact source/ABI/protocol metadata, headers, libraries, exported symbols, and
+  `x86_64-unknown-linux-gnu` target passed independent inspection.
+- Apple artifact `8397926235` has XCFramework ZIP and SwiftPM checksum
+  `cb5571ec602510300a80aaffbd2c68c158c5ed48f478a7509a2564ea5a799a9a`. Its checksum manifest,
+  exact source/ABI/protocol metadata, Swift wrapper tests, and universal macOS `arm64` plus `x86_64`
+  archive passed independent inspection.
+
+These expiring workflow artifacts are integration evidence, not published release artifacts.
+
 Not verified or not implemented:
 
-- Android platform 36 is installed locally and a Java 21 runtime is available, but `ANDROID_HOME`
-  is unset and the required NDK, Gradle executable, and `javac` are unavailable. Android unit tests,
-  lint, native cross-compilation, and AAR assembly therefore were not run locally.
-- Windows DLL/import-library, x64 and ARM64 coverage, NuGet packaging, C++/WinRT application
-  integration, a generated C++/WinRT projection, and debug symbols were not built because
-  Windows/MSVC is unavailable locally.
-- The XCFramework and Swift Package were not built because Swift and Xcode are unavailable locally;
-  Apple architecture slices and publishable symbols therefore remain unverified.
+- Android platform 36 and Java 21 are available locally, and an isolated non-native project copy
+  enumerated AGP 9.3 tasks and passed `testDebugUnitTest`. The required NDK is unavailable locally,
+  so local native cross-compilation, lint, and AAR assembly were not claimed; the canonical Android
+  job above supplies that evidence.
+- Windows/MSVC is unavailable locally. The remote Windows job validates the x64 DLL/import library
+  and C/C++ consumer, but ARM64, NuGet packaging, generated C++/WinRT projection, application
+  integration, and symbol packaging remain incomplete.
+- Swift and Xcode are unavailable locally. The remote Apple job validates the wrapper,
+  XCFramework, and universal archive, but client application linkage, signing, symbols,
+  notarization, and distribution remain separate gates.
 - Typed host secret brokerage, file leases, semantic-version/catalog/feature negotiation, generated
   Swift and C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol bundles, SBOMs,
   immutable release checksums, and cross-platform conformance remain incomplete.
 - Engine-handle forgery, stale-handle use, repeated destruction, and destruction racing unjoined
   raw callers remain outside the ABI-major-1 contract and lack sanitizer-backed misuse tests.
+- The Windows job emitted a non-blocking GitHub Actions annotation because the pinned
+  `ilammy/msvc-dev-cmd` action still declares Node.js 20; GitHub ran it under Node.js 24. The action
+  should be updated when an independently reviewed compatible revision is available.
 - `shellcheck`, `actionlint`, and `pwsh` are unavailable locally; their platform-specific checks were
   not run. Bash parsing and YAML parsing passed, but only GitHub Actions runs can validate runner
   behavior.
-- No package was published and no central release or compatibility manifest is claimed by this
-  uncommitted checkpoint.
+- No package was released. The central compatibility and release manifests remain unreleased and
+  require the compatible client checkpoints before they can record this source train.
