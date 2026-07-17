@@ -52,7 +52,7 @@ lipo -create \
     target/aarch64-apple-darwin/release/liblinguamesh_ffi.a \
     target/x86_64-apple-darwin/release/liblinguamesh_ffi.a \
     -output "$universal_library"
-lipo -verify_arch arm64 x86_64 "$universal_library"
+lipo "$universal_library" -verify_arch arm64 x86_64
 
 xcodebuild -create-xcframework \
     -library "$universal_library" \
