@@ -5,6 +5,13 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# 在生成任何构件前固定干净输入提交，避免构建输出污染来源元数据。
+source_revision="$(git rev-parse HEAD)"
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    printf '%s\n' 'Android AAR builds require a clean Git worktree.' >&2
+    exit 1
+fi
+
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
     printf '%s\n' 'ANDROID_NDK_HOME is required.' >&2
     exit 1
@@ -23,6 +30,10 @@ fi
 toolchain_root="$(find "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 if [[ -z "$toolchain_root" ]]; then
     printf '%s\n' 'Android NDK host toolchain was not found.' >&2
+    exit 1
+fi
+if [[ ! -x "$toolchain_root/bin/llvm-readelf" ]]; then
+    printf '%s\n' 'Android NDK llvm-readelf was not found.' >&2
     exit 1
 fi
 
@@ -75,6 +86,10 @@ if ! command -v sha256sum >/dev/null; then
     printf '%s\n' 'sha256sum is required to record the AAR checksum.' >&2
     exit 1
 fi
+if ! command -v unzip >/dev/null; then
+    printf '%s\n' 'unzip is required to verify the AAR contents.' >&2
+    exit 1
+fi
 gradle_version="$(gradle --version | sed -n 's/^Gradle //p' | head -n 1)"
 if [[ "$gradle_version" != "9.5.0" ]]; then
     printf 'Gradle 9.5.0 is required; found %s.\n' "${gradle_version:-unknown}" >&2
@@ -92,9 +107,59 @@ if [[ ! -f "$aar_path" ]]; then
     printf '%s\n' 'Android AAR was not produced at the expected path.' >&2
     exit 1
 fi
-source_revision="$(git rev-parse HEAD)"
-if [[ -n "$(git status --short)" ]]; then
-    source_revision="${source_revision}-dirty"
+
+# 从最终 AAR 验证关键类、三种架构的双库和可移植动态依赖名称。
+aar_entries="$(unzip -Z1 "$aar_path")"
+native_audit_directory="$(mktemp -d)"
+trap 'rm -rf -- "$native_audit_directory"' EXIT
+if ! grep -Fqx 'classes.jar' <<<"$aar_entries"; then
+    printf '%s\n' 'Android AAR is missing classes.jar.' >&2
+    exit 1
+fi
+classes_jar="$native_audit_directory/classes.jar"
+unzip -p "$aar_path" classes.jar > "$classes_jar"
+class_entries="$(unzip -Z1 "$classes_jar")"
+for required_class in \
+    org/linguamesh/core/LinguaMeshEngine.class \
+    org/linguamesh/core/NativeBridge.class \
+    org/linguamesh/core/protocol/Envelope.class \
+    org/linguamesh/core/protocol/TranslateTextCommand.class; do
+    if ! grep -Fqx "$required_class" <<<"$class_entries"; then
+        printf 'Android AAR is missing %s.\n' "$required_class" >&2
+        exit 1
+    fi
+done
+for android_abi in arm64-v8a armeabi-v7a x86_64; do
+    ffi_member="jni/$android_abi/liblinguamesh_ffi.so"
+    jni_member="jni/$android_abi/liblinguamesh_jni.so"
+    if ! grep -Fqx "$ffi_member" <<<"$aar_entries"; then
+        printf 'Android AAR is missing %s.\n' "$ffi_member" >&2
+        exit 1
+    fi
+    if ! grep -Fqx "$jni_member" <<<"$aar_entries"; then
+        printf 'Android AAR is missing %s.\n' "$jni_member" >&2
+        exit 1
+    fi
+    extracted_jni="$native_audit_directory/$android_abi-liblinguamesh_jni.so"
+    unzip -p "$aar_path" "$jni_member" > "$extracted_jni"
+    needed_libraries="$(
+        "$toolchain_root/bin/llvm-readelf" -d "$extracted_jni" |
+            sed -n 's/.*Shared library: \[\([^]]*\)\].*/\1/p'
+    )"
+    if grep -q '/' <<<"$needed_libraries"; then
+        printf 'JNI library for %s contains an absolute dependency path.\n' "$android_abi" >&2
+        exit 1
+    fi
+    if ! grep -Fqx 'liblinguamesh_ffi.so' <<<"$needed_libraries"; then
+        printf 'JNI library for %s does not depend on liblinguamesh_ffi.so.\n' "$android_abi" >&2
+        exit 1
+    fi
+done
+
+# 构建输出必须全部位于已忽略目录，避免掩盖意外工作树改动。
+if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+    printf '%s\n' 'Android AAR build produced unexpected Git worktree changes.' >&2
+    exit 1
 fi
 package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 abi_major="$(sed -n 's/^#define LM_ABI_VERSION_MAJOR UINT32_C(\([0-9][0-9]*\))$/\1/p' contracts/abi/linguamesh.h)"

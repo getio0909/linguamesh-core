@@ -6,10 +6,12 @@ if(NOT DEFINED LINGUAMESH_CORE_ROOT)
 endif()
 
 add_library(linguamesh_ffi SHARED IMPORTED)
+# 强制链接器记录库文件名，避免把构建机绝对路径写入 DT_NEEDED。
 set_target_properties(
     linguamesh_ffi
     PROPERTIES
         IMPORTED_LOCATION "${CMAKE_CURRENT_LIST_DIR}/../jniLibs/${ANDROID_ABI}/liblinguamesh_ffi.so"
+        IMPORTED_NO_SONAME TRUE
 )
 
 add_library(linguamesh_jni SHARED linguamesh_jni.cpp)
