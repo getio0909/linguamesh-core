@@ -2,6 +2,9 @@
 
 use prost::Message;
 
+/// 当前稳定原生 ABI 主版本。
+pub const ABI_VERSION_MAJOR: u32 = 1;
+
 /// 当前命令和事件协议版本。
 pub const PROTOCOL_VERSION: u32 = 1;
 

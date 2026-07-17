@@ -35,6 +35,20 @@ The command prints the exact endpoint and stays active until Ctrl+C. Desktop cli
 endpoint directly. For an Android emulator, run `adb reverse tcp:40123 tcp:40123` and configure
 the embedded core with `http://127.0.0.1:40123/v1/`; this preserves the loopback-only HTTP policy.
 
+## Secure provider foundation
+
+The `linguamesh-application` crate exposes a bounded, cancellable host-secret request channel and
+connects canonical non-secret provider profiles to the shared engine. Native hosts persist the
+credential itself in platform secure storage and return a one-time `SecretValue`; Core SQLite stores
+only its `SecretRef`. `linguamesh-engine::core_compatibility` reports the semantic, ABI, protocol,
+provider-catalog, and enabled-feature snapshot. A native client must validate every version
+dimension and its required feature subset before starting provider work.
+
+The Linux client will consume this typed Rust path directly; that integration is the next client
+checkpoint. The C ABI projection of the secret broker remains future work and must not be inferred
+from the Rust API. Rust consumers moving from alpha 1 must follow the
+[alpha-2 source migration](docs/migrations/core-alpha-1-to-alpha-2.md).
+
 ## Native SDK foundations
 
 The prerelease ABI now executes `translate_text` Protobuf commands through the real engine and

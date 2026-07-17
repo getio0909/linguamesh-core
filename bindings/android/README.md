@@ -23,9 +23,9 @@ does not contain credentials. Apps keep platform secrets in the Android Keystore
 send only versioned host responses to the wrapper.
 
 The release AAR is written to `core/build/outputs/aar/core-release.aar`. `build-metadata.json`
-records the source revision, ABI, protocol, selected ABIs, package version, and prerelease status;
-`SHA256SUMS` covers both files. The native SDK workflow uploads the complete set on pull requests,
-manual runs, and pushes to `main`.
+records the source revision, ABI, protocol, selected ABIs, embedded Core Rust workspace version in
+the `package_version` field, and prerelease status; `SHA256SUMS` covers both files. The native SDK
+workflow uploads the complete set on pull requests, manual runs, and pushes to `main`.
 
 Current gap: the ABI accepts and validates raw host-response envelopes, but typed secret and file
 lease request/response messages are not implemented yet. Do not claim those flows or background

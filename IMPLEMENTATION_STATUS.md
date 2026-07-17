@@ -139,9 +139,9 @@ Not verified or not implemented:
 - Swift and Xcode are unavailable locally. The remote Apple job validates the wrapper,
   XCFramework, and universal archive, but client application linkage, signing, symbols,
   notarization, and distribution remain separate gates.
-- Typed host secret brokerage, file leases, semantic-version/catalog/feature negotiation, generated
-  Swift and C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol bundles, SBOMs,
-  immutable release checksums, and cross-platform conformance remain incomplete.
+- C ABI projection of typed host secret brokerage and semantic/catalog/feature negotiation, file
+  leases, generated Swift and C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol
+  bundles, SBOMs, immutable release checksums, and cross-platform conformance remain incomplete.
 - Engine-handle forgery, stale-handle use, repeated destruction, and destruction racing unjoined
   raw callers remain outside the ABI-major-1 contract and lack sanitizer-backed misuse tests.
 - The Windows job emitted a non-blocking GitHub Actions annotation because the pinned
@@ -152,3 +152,77 @@ Not verified or not implemented:
   behavior.
 - No package was released. The central compatibility and release manifests remain unreleased and
   require the compatible client checkpoints before they can record this source train.
+
+## 2026-07-17 — Linux secure-provider Core prerequisite
+
+Change identifier: `LM-CHANGE-2026-07-LINUX-SECURE-PROVIDER-1`
+
+Assumption: this checkpoint supplies shared behavior required by the Linux-first client work. It
+does not resume Android, Windows, or macOS client implementation and does not claim complete
+Milestone 2 host-service support through the C ABI.
+
+Assumption: declaring `url` directly in `linguamesh-domain` is not a new third-party package
+introduction because the same locked version was already present through `reqwest`; it makes the
+shared endpoint parser's existing supply-chain edge explicit.
+
+Implemented:
+
+- The Rust workspace advances to `0.1.0-alpha.2` for this source-breaking prerelease API change;
+  alpha-1 consumer migration is documented. ABI major 1 and protocol version 1 remain unchanged.
+- A `CoreCompatibility` snapshot covering the four version/catalog dimensions (Core semantic
+  version, ABI major, protocol version, and provider-catalog version) plus stable enabled-feature
+  identifiers. Prerelease clients require exact equality for the four dimensions and require their
+  declared feature subset.
+- Canonical non-secret `ProviderProfileId`, closed-namespace and random-UUID `SecretRef`, validated
+  `EndpointConfiguration`, and `ProviderProfile` domain types. Embedded user information, queries,
+  fragments, credential-shaped paths/fields, remote HTTP, and raw credential-shaped references are
+  rejected. Profile and OpenAI adapter `Debug` output redact endpoints, display names, and
+  credential values.
+- SQLite schema version 2 with a transactional migration from schema 1, provider CRUD, active
+  provider selection, per-profile last-model state, enabled-state enforcement, and foreign-key
+  cascades. Untrusted alpha-1 references are cleared; `session:` references are rejected by
+  persistence. On-disk connections use WAL, `synchronous=NORMAL`, secure deletion, and a truncating
+  post-migration checkpoint. The actual migrated schema contains only a secret reference and no
+  credential value, and passes `PRAGMA foreign_key_check`. A busy truncating checkpoint fails the
+  open operation closed, and every later supported on-disk open retries cleanup even after the
+  schema-2 transaction committed.
+- A nontrivial `linguamesh-application` orchestration crate. Its bounded host-secret channel emits
+  correlated leases, accepts one zeroizing in-memory secret or a closed typed failure, rejects late
+  responses after cancellation, drains cancelled queue entries, validates endpoint policy before
+  asking for a secret, and performs cancellable model discovery. `ProviderManager` owns at most one
+  active credential-bearing engine, preserves it when a candidate fails, and on switch or
+  disconnect cancels retained and in-flight operations before clearing the shared credential slot.
+- An authenticated loopback fake-provider mode that proves the resolved Bearer canary reaches the
+  intended provider without appearing in host-request metadata, tested `Debug` output, the SQLite
+  database, or live WAL/SHM sidecar artifacts. A separate schema-1 fixture seeds a legacy credential
+  value and proves migration clearing, secure deletion, and checkpointing remove it from every
+  database artifact.
+
+Locally verified with Rust 1.93.0:
+
+- `cargo fmt --all --check` passed.
+- `cargo check --workspace --all-targets --all-features --locked` passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` passed.
+- `cargo test --workspace --all-targets --all-features --locked` passed: 56 tests, 0 failed,
+  0 ignored.
+- `cargo build --workspace --locked` passed.
+- `cargo deny check advisories bans licenses sources` passed all four checks with only the existing
+  allowed duplicate-version and unmatched-license warnings.
+- `bash tools/test-native-sdk.sh` and `bash tools/test-native-sdk-fake-provider.sh` passed the C,
+  C++, and standalone loopback-provider smoke tests.
+- `bash tools/verify-linux-sdk-package.sh` rebuilt the Linux SDK archive twice, verified its outer
+  and per-file manifests plus packaged C consumer, and reproduced SHA-256
+  `87968df64e1bd484076465f39f9e6173d9e3a47ec951ebe4810a30f3148d38d3` on the earlier dirty
+  development worktree. This hash is not release evidence and will be replaced after the
+  functional commit is clean.
+- The tracked-file CI credential-signature scan and a matching intended-worktree scan passed. The
+  credential canaries are assembled at compile time so the repository does not contain a literal
+  credential signature.
+
+Remaining for the Linux secure-provider checkpoint:
+
+- Wire the reviewed Core revision into the Linux client, use Secret Service for persistent
+  credentials, provide an explicit in-memory session fallback, and prove save/restart/translation
+  behavior in native CI.
+- The C ABI still rejects host-response messages and does not project semantic/catalog/feature
+  negotiation. File leases and other complete Milestone 2 host services remain unimplemented.

@@ -1,13 +1,52 @@
 #![doc = "提供有界事件流和取消传播的翻译引擎。"]
 
 use futures_util::StreamExt;
-use linguamesh_domain::{ErrorKind, ModelDescriptor, TranslationEvent, TranslationRequest};
+use linguamesh_domain::{
+    CoreCompatibility, ErrorKind, ModelDescriptor, TranslationError, TranslationEvent,
+    TranslationRequest,
+};
+use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
 use linguamesh_provider_api::ModelProvider;
+use linguamesh_provider_catalog::ProviderCatalog;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const EVENT_CAPACITY: usize = 32;
+
+/// 当前共享核心语义版本。
+pub const CORE_SEMANTIC_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 当前核心可供客户端协商的稳定功能集合。
+pub const CORE_FEATURES: &[&str] = &[
+    "cancellation_v1",
+    "compatibility_negotiation_v1",
+    "typed_rust_host_secret_broker_v1",
+    "model_discovery_v1",
+    "provider_profile_persistence_v1",
+    "streaming_text_v1",
+    "text_translation_v1",
+];
+
+/// 返回客户端启动时必须校验的完整共享契约描述。
+pub fn core_compatibility() -> Result<CoreCompatibility, TranslationError> {
+    let catalog = ProviderCatalog::bundled().map_err(|error| {
+        TranslationError::new(
+            ErrorKind::Internal,
+            format!("Bundled provider catalog is invalid: {error}"),
+        )
+    })?;
+    Ok(CoreCompatibility {
+        core_version: CORE_SEMANTIC_VERSION.into(),
+        abi_major: ABI_VERSION_MAJOR,
+        protocol_version: PROTOCOL_VERSION,
+        provider_catalog_version: catalog.catalog_version,
+        enabled_features: CORE_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect(),
+    })
+}
 
 /// 运行提供商无关的翻译操作。
 pub struct TranslationEngine {
@@ -138,12 +177,29 @@ async fn send_error_terminal(
 
 #[cfg(test)]
 mod tests {
-    use super::TranslationEngine;
+    use super::{CORE_FEATURES, CORE_SEMANTIC_VERSION, TranslationEngine, core_compatibility};
     use linguamesh_domain::{TranslationEvent, TranslationRequest};
+    use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
     use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
     use linguamesh_testkit::FakeProviderServer;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn compatibility_reports_every_required_contract_dimension() {
+        let compatibility = core_compatibility().expect("compatibility");
+        assert_eq!(compatibility.core_version, CORE_SEMANTIC_VERSION);
+        assert_eq!(compatibility.abi_major, ABI_VERSION_MAJOR);
+        assert_eq!(compatibility.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(compatibility.provider_catalog_version, "0.1.0");
+        assert_eq!(
+            compatibility.enabled_features,
+            CORE_FEATURES
+                .iter()
+                .map(|feature| (*feature).to_owned())
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[tokio::test]
     async fn real_http_stream_has_one_completed_terminal_event() {

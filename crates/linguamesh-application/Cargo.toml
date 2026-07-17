@@ -1,22 +1,21 @@
 [package]
-name = "linguamesh-engine"
+name = "linguamesh-application"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-futures-util.workspace = true
 linguamesh-domain.workspace = true
-linguamesh-provider-api.workspace = true
-linguamesh-provider-catalog.workspace = true
-linguamesh-protocol.workspace = true
+linguamesh-engine.workspace = true
+linguamesh-provider-openai.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
 [dev-dependencies]
-linguamesh-provider-openai.workspace = true
+linguamesh-storage.workspace = true
 linguamesh-testkit.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

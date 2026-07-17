@@ -5,44 +5,29 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
-    ErrorKind, ModelDescriptor, ModelSource, TranslationError, TranslationRequest,
+    EndpointConfiguration, ErrorKind, ModelDescriptor, ModelSource, SecretValue, TranslationError,
+    TranslationRequest,
 };
 use linguamesh_provider_api::{ModelProvider, TranslationStream};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
-use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::IpAddr;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// 包装不可调试输出的提供商凭据。
-#[derive(Clone)]
-pub struct ApiCredential(SecretString);
-
-impl ApiCredential {
-    /// 从仅驻留内存的秘密创建凭据。
-    #[must_use]
-    pub fn new(value: impl Into<Box<str>>) -> Self {
-        Self(SecretString::from(value.into()))
-    }
-}
-
-impl fmt::Debug for ApiCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ApiCredential([REDACTED])")
-    }
-}
+/// 兼容旧预发布调用方的凭据类型别名。
+#[deprecated(note = "Use linguamesh_domain::SecretValue.")]
+pub type ApiCredential = SecretValue;
 
 /// 配置通用 `OpenAI` 兼容端点。
-#[derive(Clone, Debug)]
 pub struct OpenAiConfig {
     /// 通常以 `/v1/` 结尾的基础地址。
     pub base_url: String,
     /// 可选的内存凭据。
-    pub credential: Option<ApiCredential>,
+    pub credential: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -57,66 +42,74 @@ impl OpenAiConfig {
             request_timeout: Duration::from_secs(30),
         }
     }
+
+    /// 创建携带一次性内存凭据的配置。
+    #[must_use]
+    pub fn with_credential(base_url: impl Into<String>, credential: SecretValue) -> Self {
+        Self {
+            base_url: base_url.into(),
+            credential: Some(credential),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl fmt::Debug for OpenAiConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenAiConfig")
+            .field("base_url", &"[REDACTED]")
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
 }
 
 /// 实现模型发现和 Chat Completions 流。
 pub struct OpenAiCompatibleProvider {
     client: Client,
     base_url: Url,
-    credential: Option<ApiCredential>,
+    credential: Mutex<CredentialState>,
+    session_cancellation: CancellationToken,
+}
+
+enum CredentialState {
+    NotRequired,
+    Available(SecretValue),
+    Cleared,
 }
 
 impl fmt::Debug for OpenAiCompatibleProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let credential_state =
+            self.credential
+                .lock()
+                .map_or("poisoned", |credential| match &*credential {
+                    CredentialState::NotRequired => "not_required",
+                    CredentialState::Available(_) => "available_redacted",
+                    CredentialState::Cleared => "cleared",
+                });
         formatter
             .debug_struct("OpenAiCompatibleProvider")
-            .field("base_url", &self.base_url)
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("base_url", &"[REDACTED]")
+            .field("credential_state", &credential_state)
+            .field("session_closed", &self.session_cancellation.is_cancelled())
             .finish_non_exhaustive()
     }
 }
 
 impl OpenAiCompatibleProvider {
+    /// 在请求宿主秘密之前验证不含秘密的端点策略。
+    pub fn validate_endpoint(base_url: &str) -> Result<(), TranslationError> {
+        validated_base_url(base_url).map(|_| ())
+    }
+
     /// 创建拒绝跨源重定向的适配器。
     pub fn new(config: OpenAiConfig) -> Result<Self, TranslationError> {
-        let mut base_url = Url::parse(&config.base_url).map_err(|_| {
-            TranslationError::new(ErrorKind::InvalidEndpoint, "Provider endpoint is invalid.")
-        })?;
-        if !base_url.username().is_empty() || base_url.password().is_some() {
-            return Err(TranslationError::new(
-                ErrorKind::InvalidEndpoint,
-                "Provider endpoint must not contain embedded credentials.",
-            ));
-        }
-        if base_url.query().is_some() || base_url.fragment().is_some() {
-            return Err(TranslationError::new(
-                ErrorKind::InvalidEndpoint,
-                "Provider endpoint must not contain a query or fragment.",
-            ));
-        }
-        match base_url.scheme() {
-            "https" => {}
-            "http" if is_loopback_endpoint(&base_url) => {}
-            "http" => {
-                return Err(TranslationError::new(
-                    ErrorKind::InvalidEndpoint,
-                    "Non-loopback HTTP endpoints require explicit host confirmation.",
-                ));
-            }
-            _ => {
-                return Err(TranslationError::new(
-                    ErrorKind::InvalidEndpoint,
-                    "Provider endpoint must use HTTPS or loopback HTTP.",
-                ));
-            }
-        }
-        if !base_url.path().ends_with('/') {
-            let path = format!("{}/", base_url.path());
-            base_url.set_path(&path);
-        }
+        let base_url = validated_base_url(&config.base_url)?;
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(config.request_timeout)
@@ -125,15 +118,54 @@ impl OpenAiCompatibleProvider {
         Ok(Self {
             client,
             base_url,
-            credential: config.credential,
+            credential: Mutex::new(
+                config
+                    .credential
+                    .map_or(CredentialState::NotRequired, CredentialState::Available),
+            ),
+            session_cancellation: CancellationToken::new(),
         })
     }
 
-    fn request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if let Some(credential) = &self.credential {
-            request.bearer_auth(credential.0.expose_secret())
-        } else {
-            request
+    /// 取消该会话的请求并立即清除所有共享引用使用的凭据。
+    pub fn close_session(&self) {
+        self.session_cancellation.cancel();
+        match self.credential.lock() {
+            Ok(mut credential) => {
+                if matches!(&*credential, CredentialState::Available(_)) {
+                    *credential = CredentialState::Cleared;
+                }
+            }
+            Err(poisoned) => {
+                *poisoned.into_inner() = CredentialState::Cleared;
+            }
+        }
+    }
+
+    fn request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, TranslationError> {
+        if self.session_cancellation.is_cancelled() {
+            return Err(TranslationError::cancelled());
+        }
+        let mut credential = self.credential.lock().map_err(|poisoned| {
+            *poisoned.into_inner() = CredentialState::Cleared;
+            TranslationError::new(
+                ErrorKind::Internal,
+                "The provider credential session is unavailable.",
+            )
+        })?;
+        if self.session_cancellation.is_cancelled() {
+            return Err(TranslationError::cancelled());
+        }
+        match &mut *credential {
+            CredentialState::NotRequired => Ok(request),
+            CredentialState::Available(secret) => Ok(request.bearer_auth(secret.expose_secret())),
+            CredentialState::Cleared => Err(TranslationError::new(
+                ErrorKind::SecretUnavailable,
+                "The provider credential session was cleared.",
+            )),
         }
     }
 
@@ -144,28 +176,39 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-fn is_loopback_endpoint(url: &Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
+fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
+    let endpoint = EndpointConfiguration::parse(base_url).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "Provider endpoint is invalid or unsafe.",
+        )
+    })?;
+    Url::parse(endpoint.as_str()).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "Provider endpoint is invalid or unsafe.",
+        )
     })
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, TranslationError> {
-        let response = self
-            .request(self.client.get(self.endpoint("models")?))
-            .send()
-            .await
-            .map_err(|error| map_reqwest_error(&error))?;
+        let request = self
+            .request(self.client.get(self.endpoint("models")?))?
+            .send();
+        let response = tokio::select! {
+            biased;
+            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            response = request => response.map_err(|error| map_reqwest_error(&error))?,
+        };
         let response = ensure_success(response)?;
-        let body: ModelListResponse = response
-            .json()
-            .await
-            .map_err(|error| map_reqwest_error(&error))?;
+        let body_request = response.json();
+        let body: ModelListResponse = tokio::select! {
+            biased;
+            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            body = body_request => body.map_err(|error| map_reqwest_error(&error))?,
+        };
         Ok(body
             .data
             .into_iter()
@@ -200,11 +243,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
             ],
         };
         let request = self
-            .request(self.client.post(self.endpoint("chat/completions")?))
+            .request(self.client.post(self.endpoint("chat/completions")?))?
             .json(&body)
             .send();
+        let session_cancellation = self.session_cancellation.clone();
         let response = tokio::select! {
+            biased;
             () = cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            () = session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
             response = request => response.map_err(|error| map_reqwest_error(&error))?,
         };
         let response = ensure_success(response)?;
@@ -214,13 +260,12 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let mut total_bytes = 0usize;
             let mut completed = false;
             loop {
-                let (cancelled, next) = tokio::select! {
-                    () = cancellation.cancelled() => (true, None),
-                    item = bytes.next() => (false, item),
-                };
-                if cancelled {
-                    Err(TranslationError::cancelled())?;
-                }
+                let next = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => Err(TranslationError::cancelled()),
+                    () = session_cancellation.cancelled() => Err(TranslationError::cancelled()),
+                    item = bytes.next() => Ok(item),
+                }?;
                 let Some(chunk) = next else {
                     break;
                 };
@@ -400,11 +445,26 @@ fn map_reqwest_error(error: &reqwest::Error) -> TranslationError {
 mod tests {
     use super::{OpenAiCompatibleProvider, OpenAiConfig, SseDecoder, SseMessage};
     use bytes::Bytes;
-    use linguamesh_domain::{ErrorKind, TranslationRequest};
+    use linguamesh_domain::{ErrorKind, SecretValue, TranslationRequest};
     use linguamesh_provider_api::ModelProvider;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn diagnostics_redact_endpoint_and_credential() {
+        const SECRET_CANARY: &str = concat!("s", "k", "-LM_PROVIDER_DEBUG_SECRET_1234567890");
+        const ENDPOINT: &str = "https://provider.example/v1/";
+        let config = OpenAiConfig::with_credential(ENDPOINT, SecretValue::new(SECRET_CANARY));
+        let config_debug = format!("{config:?}");
+        assert!(!config_debug.contains(SECRET_CANARY));
+        assert!(!config_debug.contains(ENDPOINT));
+
+        let provider = OpenAiCompatibleProvider::new(config).expect("provider");
+        let provider_debug = format!("{provider:?}");
+        assert!(!provider_debug.contains(SECRET_CANARY));
+        assert!(!provider_debug.contains(ENDPOINT));
+    }
 
     #[test]
     fn decoder_handles_fragmented_utf8_and_lines() {

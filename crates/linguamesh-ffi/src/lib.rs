@@ -6,7 +6,8 @@ use linguamesh_domain::{
 };
 use linguamesh_engine::{CancellationHandle, TranslationEngine, TranslationOperation};
 use linguamesh_protocol::{
-    Envelope, FailureEvent, PROTOCOL_VERSION, TextDeltaEvent, TranslateTextCommand, message_type,
+    ABI_VERSION_MAJOR, Envelope, FailureEvent, PROTOCOL_VERSION, TextDeltaEvent,
+    TranslateTextCommand, message_type,
 };
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use prost::Message;
@@ -19,7 +20,6 @@ use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
-const ABI_VERSION_MAJOR: u32 = 1;
 const EVENT_QUEUE_CAPACITY: usize = 64;
 const MAX_OUTSTANDING_BUFFERS: usize = 64;
 const MAX_PROTOCOL_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -500,6 +500,10 @@ const fn error_kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::MalformedResponse => "malformed_response",
         ErrorKind::Persistence => "persistence",
         ErrorKind::ProtocolIncompatible => "protocol_incompatible",
+        ErrorKind::InvalidConfiguration => "invalid_configuration",
+        ErrorKind::UnsupportedCapability => "unsupported_capability",
+        ErrorKind::SecretUnavailable => "secret_unavailable",
+        ErrorKind::SecureStorageUnavailable => "secure_storage_unavailable",
         ErrorKind::Internal => "internal",
     }
 }

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/linguamesh-application",
     "crates/linguamesh-cli",
     "crates/linguamesh-domain",
     "crates/linguamesh-engine",
@@ -14,7 +15,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
@@ -27,14 +28,15 @@ bytes = "1.10.1"
 clap = { version = "4.5.41", features = ["derive"] }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
-linguamesh-domain = { version = "0.1.0-alpha.1", path = "crates/linguamesh-domain" }
-linguamesh-engine = { version = "0.1.0-alpha.1", path = "crates/linguamesh-engine" }
-linguamesh-protocol = { version = "0.1.0-alpha.1", path = "crates/linguamesh-protocol" }
-linguamesh-provider-api = { version = "0.1.0-alpha.1", path = "crates/linguamesh-provider-api" }
-linguamesh-provider-catalog = { version = "0.1.0-alpha.1", path = "crates/linguamesh-provider-catalog" }
-linguamesh-provider-openai = { version = "0.1.0-alpha.1", path = "crates/linguamesh-provider-openai" }
-linguamesh-storage = { version = "0.1.0-alpha.1", path = "crates/linguamesh-storage" }
-linguamesh-testkit = { version = "0.1.0-alpha.1", path = "crates/linguamesh-testkit" }
+linguamesh-domain = { version = "0.1.0-alpha.2", path = "crates/linguamesh-domain" }
+linguamesh-application = { version = "0.1.0-alpha.2", path = "crates/linguamesh-application" }
+linguamesh-engine = { version = "0.1.0-alpha.2", path = "crates/linguamesh-engine" }
+linguamesh-protocol = { version = "0.1.0-alpha.2", path = "crates/linguamesh-protocol" }
+linguamesh-provider-api = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-api" }
+linguamesh-provider-catalog = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-catalog" }
+linguamesh-provider-openai = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-openai" }
+linguamesh-storage = { version = "0.1.0-alpha.2", path = "crates/linguamesh-storage" }
+linguamesh-testkit = { version = "0.1.0-alpha.2", path = "crates/linguamesh-testkit" }
 prost = "0.14.1"
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
@@ -47,6 +49,7 @@ tokio = { version = "1.46.1", features = ["macros", "net", "rt-multi-thread", "s
 tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = "0.7.15"
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
+url = "2.5.4"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

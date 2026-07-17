@@ -49,12 +49,14 @@ The command currently configures a generic OpenAI-compatible endpoint without a 
 is sufficient for the loopback fake-provider conformance path. Only loopback HTTP or remote HTTPS
 should be used. A second submit while an operation is active returns `LM_RESULT_BUSY`.
 
-Host-response envelopes are version checked but return `LM_RESULT_UNSUPPORTED_MESSAGE`: typed
-secret brokerage and file leases are not implemented. The ABI also does not yet report core semantic
-version, provider-catalog version, enabled features, or file-lease capabilities. These gaps block a
-complete Milestone 2 artifact and must not be hidden by platform wrappers. Engine handles still
-depend on the documented single-destroy and close-after-workers-stop contract; stale, forged, or
-concurrently destroyed handles are not protected by a handle registry in ABI major `1`.
+The direct Rust application layer now implements bounded, cancellable typed secret brokerage and a
+five-dimension compatibility snapshot for the Linux client. Those capabilities are not yet
+projected through this C ABI. Host-response envelopes remain version checked but return
+`LM_RESULT_UNSUPPORTED_MESSAGE`, and ABI calls still do not report Core semantic version,
+provider-catalog version, enabled features, or file-lease capabilities. These gaps block a complete
+Milestone 2 artifact and must not be hidden by platform wrappers. Engine handles still depend on
+the documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
+destroyed handles are not protected by a handle registry in ABI major `1`.
 
 ## Loopback conformance provider
 

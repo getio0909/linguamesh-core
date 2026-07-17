@@ -702,8 +702,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "linguamesh-application"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "linguamesh-domain",
+ "linguamesh-engine",
+ "linguamesh-provider-openai",
+ "linguamesh-storage",
+ "linguamesh-testkit",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "linguamesh-cli"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "clap",
  "linguamesh-domain",
@@ -716,20 +730,24 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-domain"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
+ "secrecy",
  "serde",
  "thiserror",
+ "url",
  "uuid",
 ]
 
 [[package]]
 name = "linguamesh-engine"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "futures-util",
  "linguamesh-domain",
+ "linguamesh-protocol",
  "linguamesh-provider-api",
+ "linguamesh-provider-catalog",
  "linguamesh-provider-openai",
  "linguamesh-testkit",
  "tokio",
@@ -738,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-ffi"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "linguamesh-domain",
  "linguamesh-engine",
@@ -751,14 +769,14 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-protocol"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "prost",
 ]
 
 [[package]]
 name = "linguamesh-provider-api"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -768,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-provider-catalog"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -777,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-provider-openai"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -786,7 +804,6 @@ dependencies = [
  "linguamesh-domain",
  "linguamesh-provider-api",
  "reqwest",
- "secrecy",
  "serde",
  "serde_json",
  "tokio",
@@ -795,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-storage"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "linguamesh-domain",
  "rusqlite",
@@ -804,10 +821,12 @@ dependencies = [
 
 [[package]]
 name = "linguamesh-testkit"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "async-stream",
  "axum",
+ "linguamesh-domain",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
