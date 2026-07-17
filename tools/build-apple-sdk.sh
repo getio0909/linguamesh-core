@@ -5,7 +5,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-for required_tool in cargo rustup xcodebuild swift zip shasum; do
+for required_tool in cargo rustup lipo xcodebuild swift zip shasum; do
     if ! command -v "$required_tool" >/dev/null; then
         printf 'Required tool is unavailable: %s\n' "$required_tool" >&2
         exit 1
@@ -44,10 +44,18 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo build --locked --release -p linguamesh-ffi --target aarch64-apple-darwin
 cargo build --locked --release -p linguamesh-ffi --target x86_64-apple-darwin
 
+# 同一平台的架构必须先合并为一个通用库再创建 XCFramework。
+universal_library_root="$artifact_root/universal-macos"
+mkdir -p "$universal_library_root"
+universal_library="$universal_library_root/liblinguamesh_ffi.a"
+lipo -create \
+    target/aarch64-apple-darwin/release/liblinguamesh_ffi.a \
+    target/x86_64-apple-darwin/release/liblinguamesh_ffi.a \
+    -output "$universal_library"
+lipo -verify_arch arm64 x86_64 "$universal_library"
+
 xcodebuild -create-xcframework \
-    -library target/aarch64-apple-darwin/release/liblinguamesh_ffi.a \
-    -headers "$header_root" \
-    -library target/x86_64-apple-darwin/release/liblinguamesh_ffi.a \
+    -library "$universal_library" \
     -headers "$header_root" \
     -output "$xcframework_path"
 
