@@ -212,12 +212,20 @@ Locally verified with Rust 1.93.0:
   C++, and standalone loopback-provider smoke tests.
 - `bash tools/verify-linux-sdk-package.sh` rebuilt the Linux SDK archive twice, verified its outer
   and per-file manifests plus packaged C consumer, and reproduced SHA-256
-  `87968df64e1bd484076465f39f9e6173d9e3a47ec951ebe4810a30f3148d38d3` on the earlier dirty
-  development worktree. This hash is not release evidence and will be replaced after the
-  functional commit is clean.
+  `e27b383620b26eae19d18c05b04bfaca21f7eb639157cb5e11e53bd0f64159aa` from clean functional
+  revision `c9a96da52e10554c8458f4d49600ec9336ea651b`. Packaged metadata records that exact revision,
+  workspace version `0.1.0-alpha.2`, ABI major 1, protocol version 1, and prerelease status.
 - The tracked-file CI credential-signature scan and a matching intended-worktree scan passed. The
   credential canaries are assembled at compile time so the repository does not contain a literal
   credential signature.
+
+Remote validation for functional revision `c9a96da52e10554c8458f4d49600ec9336ea651b`:
+
+- GitHub CI run `29564543164` passed Rust job `87834117833`, credential-signature job
+  `87834117836`, and dependency-policy job `87834117849`.
+- Native SDK run `29564543160` passed Linux job `87834118139`. The same automatic run also rebuilt
+  the frozen Apple, Windows, and Android wrappers successfully; no non-Linux client feature work
+  was introduced by this checkpoint.
 
 Remaining for the Linux secure-provider checkpoint:
 
