@@ -83,7 +83,7 @@ fi
 
 gradle --no-daemon --project-dir bindings/android \
     :core:clean \
-    :core:testReleaseUnitTest \
+    :core:testDebugUnitTest \
     :core:lintRelease \
     :core:assembleRelease
 aar_directory="$repo_root/bindings/android/core/build/outputs/aar"
