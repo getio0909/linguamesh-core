@@ -4,7 +4,7 @@ use linguamesh_domain::{
     ErrorKind, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
     ProviderProfileId, SecretRef, TranslationError, validate_model_identifier,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 
 const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_initial.sql");
@@ -24,7 +24,9 @@ pub struct Storage {
 impl Storage {
     /// 打开数据库并应用所有缺失迁移。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, TranslationError> {
-        let connection = Connection::open(path).map_err(|error| map_error(&error))?;
+        let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let connection =
+            Connection::open_with_flags(path, flags).map_err(|error| map_error(&error))?;
         if current_schema_version(&connection)? > LATEST_SCHEMA_VERSION {
             return Err(TranslationError::new(
                 ErrorKind::Persistence,
@@ -490,6 +492,8 @@ mod tests {
     use linguamesh_domain::{ErrorKind, ProviderProfile, ProviderProfileId, SecretRef};
     use rusqlite::Connection;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:88888888-8888-4888-8888-888888888888";
@@ -521,6 +525,30 @@ mod tests {
             Some("manual-model")
         );
         assert_eq!(storage.manual_models().expect("models").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbolic_link_database_is_rejected_before_migration() {
+        let directory = tempdir().expect("temp directory");
+        let target = directory.path().join("target.sqlite3");
+        let link = directory.path().join("link.sqlite3");
+        Connection::open(&target).expect("target database");
+        symlink(&target, &link).expect("database symbolic link");
+
+        let Err(error) = Storage::open(&link) else {
+            panic!("symbolic link was accepted");
+        };
+        assert_eq!(error.kind, ErrorKind::Persistence);
+        let connection = Connection::open(&target).expect("target database inspection");
+        let table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .expect("target schema count");
+        assert_eq!(table_count, 0);
     }
 
     #[test]

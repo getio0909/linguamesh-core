@@ -23,7 +23,9 @@ per-profile last-model selection. The migration is transactional, preserves sche
 metadata while clearing untrusted legacy secret references, enables WAL, secure deletion, and
 foreign-key enforcement for every connection, and never defines a credential-value column. Every
 supported on-disk open retries the truncating checkpoint so a busy post-migration attempt fails
-closed without abandoning cleanup. See
+closed without abandoning cleanup. SQLite's portable no-follow open flag rejects a symbolic-link
+database before migrations; native hosts still enforce private directories and leaf-file metadata.
+See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 
 `linguamesh-engine::core_compatibility` reports Core semantic version, ABI major, protocol version,

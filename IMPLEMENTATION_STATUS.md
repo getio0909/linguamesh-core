@@ -165,6 +165,10 @@ Assumption: declaring `url` directly in `linguamesh-domain` is not a new third-p
 introduction because the same locked version was already present through `reqwest`; it makes the
 shared endpoint parser's existing supply-chain edge explicit.
 
+Assumption: enabling rusqlite's existing `SQLITE_OPEN_NOFOLLOW` flag is a Linux persistence
+security prerequisite within the reviewed bundled SQLite dependency; it changes neither schema,
+ABI, protocol, nor the dependency graph.
+
 Implemented:
 
 - The Rust workspace advances to `0.1.0-alpha.2` for this source-breaking prerelease API change;
@@ -185,7 +189,8 @@ Implemented:
   post-migration checkpoint. The actual migrated schema contains only a secret reference and no
   credential value, and passes `PRAGMA foreign_key_check`. A busy truncating checkpoint fails the
   open operation closed, and every later supported on-disk open retries cleanup even after the
-  schema-2 transaction committed.
+  schema-2 transaction committed. Every on-disk open also uses SQLite's portable no-follow flag;
+  a symbolic-link database is rejected before any migration or journal mutation.
 - A nontrivial `linguamesh-application` orchestration crate. Its bounded host-secret channel emits
   correlated leases, accepts one zeroizing in-memory secret or a closed typed failure, rejects late
   responses after cancellation, drains cancelled queue entries, validates endpoint policy before
@@ -203,7 +208,7 @@ Locally verified with Rust 1.93.0:
 - `cargo fmt --all --check` passed.
 - `cargo check --workspace --all-targets --all-features --locked` passed.
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` passed.
-- `cargo test --workspace --all-targets --all-features --locked` passed: 56 tests, 0 failed,
+- `cargo test --workspace --all-targets --all-features --locked` passed: 57 tests, 0 failed,
   0 ignored.
 - `cargo build --workspace --locked` passed.
 - `cargo deny check advisories bans licenses sources` passed all four checks with only the existing
@@ -229,8 +234,7 @@ Remote validation for functional revision `c9a96da52e10554c8458f4d49600ec9336ea6
 
 Remaining for the Linux secure-provider checkpoint:
 
-- Wire the reviewed Core revision into the Linux client, use Secret Service for persistent
-  credentials, provide an explicit in-memory session fallback, and prove save/restart/translation
-  behavior in native CI.
+- Keep the Linux client pinned to the reviewed no-follow Core revision, implement Secret Service
+  for persistent credentials, and prove the Linux save/restart/translation path in native CI.
 - The C ABI still rejects host-response messages and does not project semantic/catalog/feature
   negotiation. File leases and other complete Milestone 2 host services remain unimplemented.
