@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "catalog_version": "0.1.0",
+  "providers": [
+    {
+      "id": "generic-openai-compatible",
+      "display_name": "Generic OpenAI-compatible",
+      "adapter": "openai_chat_completions",
+      "model_listing": "openai_models",
+      "documentation_url": "https://platform.openai.com/docs/api-reference"
+    },
+    {
+      "id": "local-loopback",
+      "display_name": "Local OpenAI-compatible server",
+      "adapter": "openai_chat_completions",
+      "model_listing": "openai_models",
+      "loopback_only": true
+    }
+  ]
+}

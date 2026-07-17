@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://linguamesh.dev/schemas/provider-catalog-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "catalog_version", "providers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "catalog_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "display_name", "adapter", "model_listing"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+          "display_name": { "type": "string", "minLength": 1 },
+          "adapter": { "type": "string", "minLength": 1 },
+          "model_listing": { "type": "string", "minLength": 1 },
+          "documentation_url": { "type": "string", "format": "uri" },
+          "loopback_only": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package linguamesh.protocol.v1;
+
+message Envelope {
+  uint32 protocol_version = 1;
+  string operation_id = 2;
+  string correlation_id = 3;
+  uint64 sequence = 4;
+  string message_type = 5;
+  bytes payload = 6;
+}
