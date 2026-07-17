@@ -21,10 +21,10 @@ compile.
 
 The Linux secure-provider prerequisite is covered by normal workspace tests. They verify every
 compatibility dimension, canonical profile validation and redacted `Debug`, schema-1-to-2 migration,
-on-disk reopen, active-profile and per-profile model persistence, cascade/disable behavior, and the
-rejection of a symbolic-link database before migration. They also prove the absence of a synthetic
-credential-shaped canary from every database-directory artifact after authenticated use. A
-schema-1 fixture starts with a credential value and proves the
+on-disk reopen, active-profile and per-profile model persistence, cascade/disable behavior, and on
+Unix, rejection of a symbolic-link database before migration. They also prove the absence of a
+synthetic credential-shaped canary from every database-directory artifact after authenticated use.
+A schema-1 fixture starts with a credential value and proves the
 secure-delete migration
 plus truncating checkpoint removes it from all database artifacts, including after a reader makes
 the first checkpoint busy and the next on-disk open retries it. The application tests run an

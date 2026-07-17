@@ -44,9 +44,10 @@ only its `SecretRef`. `linguamesh-engine::core_compatibility` reports the semant
 provider-catalog, and enabled-feature snapshot. A native client must validate every version
 dimension and its required feature subset before starting provider work.
 
-On-disk SQLite opens use SQLite's portable no-follow flag, so a symbolic-link database is rejected
-before migrations or journal configuration. Native hosts remain responsible for private parent
-directories, regular-file checks, and platform-specific file permissions.
+On Linux's default Unix VFS, on-disk SQLite opens use SQLite's no-follow flag, so any symbolic-link
+component in the database path is rejected before migrations or journal configuration. Other VFS
+implementations require platform-specific verification. Native hosts remain responsible for
+private parent directories, regular-file checks, and platform-specific file permissions.
 
 The Linux client consumes this typed Rust path directly. The C ABI projection of the secret broker
 remains future work and must not be inferred from the Rust API. Rust consumers moving from alpha 1

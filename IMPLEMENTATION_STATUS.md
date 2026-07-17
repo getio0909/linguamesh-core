@@ -166,8 +166,9 @@ introduction because the same locked version was already present through `reqwes
 shared endpoint parser's existing supply-chain edge explicit.
 
 Assumption: enabling rusqlite's existing `SQLITE_OPEN_NOFOLLOW` flag is a Linux persistence
-security prerequisite within the reviewed bundled SQLite dependency; it changes neither schema,
-ABI, protocol, nor the dependency graph.
+security prerequisite within the reviewed bundled SQLite dependency. Its enforcement is
+VFS-dependent, is tested only on Unix in this checkpoint, and changes neither schema, ABI,
+protocol, nor the dependency graph.
 
 Implemented:
 
@@ -189,8 +190,9 @@ Implemented:
   post-migration checkpoint. The actual migrated schema contains only a secret reference and no
   credential value, and passes `PRAGMA foreign_key_check`. A busy truncating checkpoint fails the
   open operation closed, and every later supported on-disk open retries cleanup even after the
-  schema-2 transaction committed. Every on-disk open also uses SQLite's portable no-follow flag;
-  a symbolic-link database is rejected before any migration or journal mutation.
+  schema-2 transaction committed. Every on-disk open requests SQLite's no-follow flag. On Linux's
+  default Unix VFS, any symbolic-link path component is rejected before migration or journal
+  mutation; other platform VFS behavior remains unclaimed.
 - A nontrivial `linguamesh-application` orchestration crate. Its bounded host-secret channel emits
   correlated leases, accepts one zeroizing in-memory secret or a closed typed failure, rejects late
   responses after cancellation, drains cancelled queue entries, validates endpoint policy before
@@ -217,18 +219,19 @@ Locally verified with Rust 1.93.0:
   C++, and standalone loopback-provider smoke tests.
 - `bash tools/verify-linux-sdk-package.sh` rebuilt the Linux SDK archive twice, verified its outer
   and per-file manifests plus packaged C consumer, and reproduced SHA-256
-  `e27b383620b26eae19d18c05b04bfaca21f7eb639157cb5e11e53bd0f64159aa` from clean functional
-  revision `c9a96da52e10554c8458f4d49600ec9336ea651b`. Packaged metadata records that exact revision,
+  `a22d5e4849b2c3cb0be36c86bd15e487749eba8939fdfae0d01ceef08471a6bf` from clean functional
+  revision `fbf3e9b5927049dccaa19f8c36013495ffebba12`. Packaged metadata records that exact revision,
   workspace version `0.1.0-alpha.2`, ABI major 1, protocol version 1, and prerelease status.
 - The tracked-file CI credential-signature scan and a matching intended-worktree scan passed. The
   credential canaries are assembled at compile time so the repository does not contain a literal
   credential signature.
 
-Remote validation for functional revision `c9a96da52e10554c8458f4d49600ec9336ea651b`:
+Remote validation for functional revision `fbf3e9b5927049dccaa19f8c36013495ffebba12`:
 
-- GitHub CI run `29564543164` passed Rust job `87834117833`, credential-signature job
-  `87834117836`, and dependency-policy job `87834117849`.
-- Native SDK run `29564543160` passed Linux job `87834118139`. The same automatic run also rebuilt
+- GitHub CI run `29572377637` passed Rust job `87858924329`, credential-signature job
+  `87858924323`, and dependency-policy job `87858924320`.
+- Native SDK run `29572377631` passed Linux job `87858924315` and produced Linux artifact
+  `8403635653`. The same automatic run also rebuilt
   the frozen Apple, Windows, and Android wrappers successfully; no non-Linux client feature work
   was introduced by this checkpoint.
 
