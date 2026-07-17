@@ -58,7 +58,9 @@ android {
 
     sourceSets {
         named("main") {
-            proto.srcDir("../../../contracts/proto")
+            proto {
+                srcDir("../../../contracts/proto")
+            }
         }
     }
 }
