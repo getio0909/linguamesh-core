@@ -1,0 +1,4 @@
+module CLinguaMeshCore {
+    header "linguamesh.h"
+    export *
+}

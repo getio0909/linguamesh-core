@@ -84,6 +84,19 @@ impl TranslationEngine {
     }
 }
 
+/// 提供可跨宿主控制线程复制的取消能力。
+#[derive(Clone)]
+pub struct CancellationHandle {
+    cancellation: CancellationToken,
+}
+
+impl CancellationHandle {
+    /// 请求底层提供商操作停止且不进行重试。
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
 /// 允许客户端接收事件和传播取消。
 pub struct TranslationOperation {
     events: mpsc::Receiver<TranslationEvent>,
@@ -91,6 +104,14 @@ pub struct TranslationOperation {
 }
 
 impl TranslationOperation {
+    /// 返回可由另一执行上下文持有的取消句柄。
+    #[must_use]
+    pub fn cancellation_handle(&self) -> CancellationHandle {
+        CancellationHandle {
+            cancellation: self.cancellation.clone(),
+        }
+    }
+
     /// 等待下一条按序事件。
     pub async fn next_event(&mut self) -> Option<TranslationEvent> {
         self.events.recv().await

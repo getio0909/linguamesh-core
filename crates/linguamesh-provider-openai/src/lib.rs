@@ -12,6 +12,7 @@ use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -84,6 +85,34 @@ impl OpenAiCompatibleProvider {
         let mut base_url = Url::parse(&config.base_url).map_err(|_| {
             TranslationError::new(ErrorKind::InvalidEndpoint, "Provider endpoint is invalid.")
         })?;
+        if !base_url.username().is_empty() || base_url.password().is_some() {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidEndpoint,
+                "Provider endpoint must not contain embedded credentials.",
+            ));
+        }
+        if base_url.query().is_some() || base_url.fragment().is_some() {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidEndpoint,
+                "Provider endpoint must not contain a query or fragment.",
+            ));
+        }
+        match base_url.scheme() {
+            "https" => {}
+            "http" if is_loopback_endpoint(&base_url) => {}
+            "http" => {
+                return Err(TranslationError::new(
+                    ErrorKind::InvalidEndpoint,
+                    "Non-loopback HTTP endpoints require explicit host confirmation.",
+                ));
+            }
+            _ => {
+                return Err(TranslationError::new(
+                    ErrorKind::InvalidEndpoint,
+                    "Provider endpoint must use HTTPS or loopback HTTP.",
+                ));
+            }
+        }
         if !base_url.path().ends_with('/') {
             let path = format!("{}/", base_url.path());
             base_url.set_path(&path);
@@ -113,6 +142,15 @@ impl OpenAiCompatibleProvider {
             TranslationError::new(ErrorKind::InvalidEndpoint, "Provider endpoint is invalid.")
         })
     }
+}
+
+fn is_loopback_endpoint(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
 }
 
 #[async_trait]
@@ -161,12 +199,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 },
             ],
         };
-        let response = self
+        let request = self
             .request(self.client.post(self.endpoint("chat/completions")?))
             .json(&body)
-            .send()
-            .await
-            .map_err(|error| map_reqwest_error(&error))?;
+            .send();
+        let response = tokio::select! {
+            () = cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            response = request => response.map_err(|error| map_reqwest_error(&error))?,
+        };
         let response = ensure_success(response)?;
         let mut bytes = response.bytes_stream();
         let stream = try_stream! {
@@ -358,8 +398,13 @@ fn map_reqwest_error(error: &reqwest::Error) -> TranslationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SseDecoder, SseMessage};
+    use super::{OpenAiCompatibleProvider, OpenAiConfig, SseDecoder, SseMessage};
     use bytes::Bytes;
+    use linguamesh_domain::{ErrorKind, TranslationRequest};
+    use linguamesh_provider_api::ModelProvider;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn decoder_handles_fragmented_utf8_and_lines() {
@@ -380,5 +425,83 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[0], SseMessage::Delta(text) if text == "你好"));
         assert!(matches!(messages[1], SseMessage::Done));
+    }
+
+    #[test]
+    fn endpoint_policy_allows_https_and_loopback_http_only() {
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "https://provider.example/v1/"
+            ))
+            .is_ok()
+        );
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "http://127.0.0.1:8080/v1/"
+            ))
+            .is_ok()
+        );
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "http://provider.example/v1/"
+            ))
+            .is_err()
+        );
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "https://user:secret@provider.example/v1/"
+            ))
+            .is_err()
+        );
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "https://provider.example/v1/?api_key=secret"
+            ))
+            .is_err()
+        );
+        assert!(
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(
+                "https://provider.example/v1/#fragment"
+            ))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_response_header_wait() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let stalled_server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("connection");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let provider = OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(format!(
+            "http://{address}/v1/"
+        )))
+        .expect("provider");
+        let cancellation = CancellationToken::new();
+        let cancellation_request = cancellation.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            cancellation_request.cancel();
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.translate_stream(
+                TranslationRequest::new("Hello", "zh-CN", "fake-translator"),
+                cancellation,
+            ),
+        )
+        .await
+        .expect("cancellation timeout");
+        let Err(error) = result else {
+            panic!("cancelled request returned a stream");
+        };
+        assert_eq!(error.kind, ErrorKind::Cancelled);
+        cancel_task.await.expect("cancel task");
+        stalled_server.abort();
+        let _ = stalled_server.await;
     }
 }

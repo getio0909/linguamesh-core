@@ -1,4 +1,10 @@
 /target/
+/dist/
+/bindings/android/.gradle/
+/bindings/android/build/
+/bindings/android/core/build/
+/bindings/android/core/src/main/jniLibs/
+/bindings/apple/Artifacts/
 /.idea/
 /.vscode/
 *.swp

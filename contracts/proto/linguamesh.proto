@@ -2,6 +2,10 @@ syntax = "proto3";
 
 package linguamesh.protocol.v1;
 
+option java_multiple_files = true;
+option java_package = "org.linguamesh.core.protocol";
+option java_outer_classname = "LinguaMeshProtocol";
+
 message Envelope {
   uint32 protocol_version = 1;
   string operation_id = 2;
@@ -9,4 +13,20 @@ message Envelope {
   uint64 sequence = 4;
   string message_type = 5;
   bytes payload = 6;
+}
+
+message TranslateTextCommand {
+  string endpoint = 1;
+  string model_id = 2;
+  string source_text = 3;
+  string target_locale = 4;
+}
+
+message TextDeltaEvent {
+  string text = 1;
+}
+
+message FailureEvent {
+  string error_kind = 1;
+  string message = 2;
 }

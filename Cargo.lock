@@ -740,8 +740,13 @@ dependencies = [
 name = "linguamesh-ffi"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "linguamesh-domain",
+ "linguamesh-engine",
  "linguamesh-protocol",
+ "linguamesh-provider-openai",
+ "linguamesh-testkit",
  "prost",
+ "tokio",
 ]
 
 [[package]]

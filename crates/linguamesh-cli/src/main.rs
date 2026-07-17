@@ -35,6 +35,15 @@ enum Command {
         )]
         cancel_after_ms: Option<u64>,
     },
+    #[command(about = "Run the loopback fake provider until interrupted")]
+    FakeProvider {
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Loopback port, or zero to choose an available port"
+        )]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -47,7 +56,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model,
             cancel_after_ms,
         } => run_demo(text, target, model, cancel_after_ms).await?,
+        Command::FakeProvider { port } => run_fake_provider(port).await?,
     }
+    Ok(())
+}
+
+async fn run_fake_provider(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let server = FakeProviderServer::start_on_port(port).await?;
+    println!("Fake provider endpoint: {}", server.base_url());
+    println!("Press Ctrl+C to stop.");
+    io::stdout().flush()?;
+    let signal_result = tokio::signal::ctrl_c().await;
+    server.shutdown().await;
+    signal_result?;
+    println!("Fake provider stopped.");
     Ok(())
 }
 

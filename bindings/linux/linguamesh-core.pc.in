@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: LinguaMesh Core
+Description: Stable native ABI for the LinguaMesh translation core
+Version: @VERSION@
+Libs: -L${libdir} -llinguamesh_ffi
+Libs.private: -ldl -lpthread -lm
+Cflags: -I${includedir}

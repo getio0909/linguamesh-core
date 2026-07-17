@@ -1,0 +1,1 @@
+-keep class org.linguamesh.core.NativeBridge { *; }

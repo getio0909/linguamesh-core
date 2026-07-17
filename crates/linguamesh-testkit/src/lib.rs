@@ -26,7 +26,12 @@ pub struct FakeProviderServer {
 impl FakeProviderServer {
     /// 启动兼容 `OpenAI` 模型和流式接口的服务。
     pub async fn start() -> std::io::Result<Self> {
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        Self::start_on_port(0).await
+    }
+
+    /// 在指定的 IPv4 回环端口启动服务，端口零表示由系统选择。
+    pub async fn start_on_port(port: u16) -> std::io::Result<Self> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let address = listener.local_addr()?;
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
@@ -132,6 +137,21 @@ mod tests {
     async fn server_uses_loopback_and_random_port() {
         let server = FakeProviderServer::start().await.expect("server");
         assert!(server.base_url().starts_with("http://127.0.0.1:"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn server_accepts_an_explicit_loopback_port() {
+        let reservation = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("reservation");
+        let port = reservation.local_addr().expect("address").port();
+        drop(reservation);
+
+        let server = FakeProviderServer::start_on_port(port)
+            .await
+            .expect("server");
+        assert_eq!(server.base_url(), format!("http://127.0.0.1:{port}/v1/"));
         server.shutdown().await;
     }
 }

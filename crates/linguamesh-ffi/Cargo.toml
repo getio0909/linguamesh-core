@@ -9,8 +9,15 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+linguamesh-domain.workspace = true
+linguamesh-engine.workspace = true
 linguamesh-protocol.workspace = true
+linguamesh-provider-openai.workspace = true
 prost.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+linguamesh-testkit.workspace = true
 
 [lints]
 workspace = true

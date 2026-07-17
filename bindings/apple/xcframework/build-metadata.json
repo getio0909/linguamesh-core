@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "package_version": "@PACKAGE_VERSION@",
+  "abi_major": 1,
+  "protocol_version": 1,
+  "rust_targets": [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin"
+  ],
+  "source_revision": "@SOURCE_REVISION@",
+  "artifact_status": "prerelease"
+}
