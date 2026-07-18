@@ -31,7 +31,7 @@ implementations require platform-specific enforcement and tests; native hosts st
 private directories and leaf-file metadata. See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 
-The `linguamesh-document` crate is the first bounded document-codec contract. It recognizes only
+The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes only
 UTF-8 TXT and Markdown names, enforces a 4 MiB input/output bound, strips an optional UTF-8 BOM,
 retains LF/CRLF/CR line endings, and represents Markdown fenced code and blank structure as
 verbatim segments. Prose segments can be completed independently and the job reconstructs the
