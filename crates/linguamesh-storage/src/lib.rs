@@ -31,7 +31,8 @@ const DOCUMENT_PACKAGES_MIGRATION: &str =
     include_str!("../../../migrations/0010_document_packages.sql");
 const DOCUMENT_PPTX_MIGRATION: &str = include_str!("../../../migrations/0011_document_pptx.sql");
 const DOCUMENT_XLSX_MIGRATION: &str = include_str!("../../../migrations/0012_document_xlsx.sql");
-const LATEST_SCHEMA_VERSION: u32 = 12;
+const DOCUMENT_EPUB_MIGRATION: &str = include_str!("../../../migrations/0013_document_epub.sql");
+const LATEST_SCHEMA_VERSION: u32 = 13;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -69,6 +70,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (10, DOCUMENT_PACKAGES_MIGRATION),
     (11, DOCUMENT_PPTX_MIGRATION),
     (12, DOCUMENT_XLSX_MIGRATION),
+    (13, DOCUMENT_EPUB_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1008,11 +1010,11 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
     }
     if matches!(
         job.format,
-        DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+        DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx | DocumentFormat::Epub
     ) != job.package.is_some()
     {
         return Err(document_configuration_error(
-            "The OOXML package payload is missing or attached to another format.",
+            "The package payload is missing or attached to another format.",
         ));
     }
     if job
@@ -1021,7 +1023,7 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
         .is_some_and(|package| package.len() > MAX_DOCUMENT_BYTES)
     {
         return Err(document_configuration_error(
-            "The OOXML package exceeds the local size limit.",
+            "The package exceeds the local size limit.",
         ));
     }
     let mut source_bytes = 0usize;
@@ -1118,6 +1120,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Docx => "docx",
         DocumentFormat::Pptx => "pptx",
         DocumentFormat::Xlsx => "xlsx",
+        DocumentFormat::Epub => "epub",
     }
 }
 
@@ -1133,6 +1136,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "docx" => Ok(DocumentFormat::Docx),
         "pptx" => Ok(DocumentFormat::Pptx),
         "xlsx" => Ok(DocumentFormat::Xlsx),
+        "epub" => Ok(DocumentFormat::Epub),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1567,7 +1571,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 12);
+        assert_eq!(storage.schema_version().expect("version"), 13);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1916,6 +1920,66 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [11, 12, 13]);
+    }
+
+    #[test]
+    fn epub_package_and_segments_survive_reopen() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer.start_file("mimetype", options).expect("mimetype");
+        writer
+            .write_all(b"application/epub+zip")
+            .expect("mimetype bytes");
+        writer
+            .start_file("META-INF/container.xml", options)
+            .expect("container");
+        writer
+            .write_all(br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/book.opf"/></rootfiles></container>"#)
+            .expect("container bytes");
+        writer.start_file("OEBPS/book.opf", options).expect("opf");
+        writer
+            .write_all(br#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:language>en</dc:language></metadata><manifest/><spine/></package>"#)
+            .expect("opf bytes");
+        writer
+            .start_file("OEBPS/chapter.xhtml", options)
+            .expect("chapter");
+        writer
+            .write_all(
+                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Hello</p></body></html>"#,
+            )
+            .expect("chapter bytes");
+        let package = writer.finish().expect("package").into_inner();
+
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("epub-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("book.epub", &package).expect("epub job");
+        storage
+            .save_document_job("epub-job", &job, DocumentJobState::Pending)
+            .expect("save epub job");
+        storage
+            .update_document_segment("epub-job", 0, "你好")
+            .expect("translate epub text");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("epub-job")
+            .expect("load epub job")
+            .expect("epub snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Epub);
+        let rebuilt = snapshot
+            .job
+            .reconstruct_bytes_with_target_locale(Some("zh-CN"))
+            .expect("reconstruct epub");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut chapter = String::new();
+        archive
+            .by_name("OEBPS/chapter.xhtml")
+            .expect("chapter entry")
+            .read_to_string(&mut chapter)
+            .expect("chapter xml");
+        assert!(chapter.contains("你好"));
     }
 
     #[test]
@@ -2328,7 +2392,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 12);
+        assert_eq!(storage.schema_version().expect("version"), 13);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2410,7 +2474,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 12);
+        assert_eq!(storage.schema_version().expect("version"), 13);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

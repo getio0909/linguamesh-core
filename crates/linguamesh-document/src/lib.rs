@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod docx;
+mod epub;
 
 /// 文本文档的受支持格式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -31,6 +32,8 @@ pub enum DocumentFormat {
     Pptx,
     /// OOXML XLSX 工作簿包。
     Xlsx,
+    /// EPUB 电子书包。
+    Epub,
 }
 
 impl DocumentFormat {
@@ -51,6 +54,7 @@ impl DocumentFormat {
             "docx" => Ok(Self::Docx),
             "pptx" => Ok(Self::Pptx),
             "xlsx" => Ok(Self::Xlsx),
+            "epub" => Ok(Self::Epub),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -146,8 +150,17 @@ impl DocumentJob {
         let source_name = source_name.into();
         if matches!(
             DocumentFormat::from_name(&source_name)?,
-            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+            DocumentFormat::Docx
+                | DocumentFormat::Pptx
+                | DocumentFormat::Xlsx
+                | DocumentFormat::Epub
         ) {
+            if matches!(
+                DocumentFormat::from_name(&source_name)?,
+                DocumentFormat::Epub
+            ) {
+                return Self::from_epub_bytes(source_name, contents);
+            }
             return Self::from_ooxml_bytes(source_name, contents);
         }
         Self::from_utf8_with_json_paths(source_name, contents, None, None)
@@ -175,6 +188,29 @@ impl DocumentJob {
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
         Self::from_ooxml_bytes(source_name, contents)
+    }
+
+    /// 从受限 EPUB 包创建可恢复文档任务。
+    pub fn from_epub_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
+        let source_name = source_name.into();
+        if !matches!(
+            DocumentFormat::from_name(&source_name)?,
+            DocumentFormat::Epub
+        ) {
+            return Err(DocumentError::UnsupportedFormat);
+        }
+        if contents.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Ok(Self {
+            format: DocumentFormat::Epub,
+            source_name,
+            segments: epub::inspect(contents)?,
+            package: Some(contents.to_vec()),
+        })
     }
 
     fn from_ooxml_bytes(
@@ -387,7 +423,10 @@ impl DocumentJob {
     pub fn reconstruct(&self) -> Result<String, DocumentError> {
         if matches!(
             self.format,
-            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+            DocumentFormat::Docx
+                | DocumentFormat::Pptx
+                | DocumentFormat::Xlsx
+                | DocumentFormat::Epub
         ) {
             let package = self
                 .package
@@ -397,6 +436,7 @@ impl DocumentJob {
                 DocumentFormat::Docx => docx::reconstruct(self, package)?,
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package)?,
                 DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package)?,
+                DocumentFormat::Epub => epub::reconstruct(self, package, None)?,
                 _ => unreachable!(),
             };
             return docx::preview(self);
@@ -415,11 +455,22 @@ impl DocumentJob {
         Ok(output)
     }
 
-    /// 重建 DOCX、PPTX 或 XLSX 二进制包，普通文本格式返回 UTF-8 输出字节。
+    /// 重建二进制文档包，普通文本格式返回 UTF-8 输出字节。
     pub fn reconstruct_bytes(&self) -> Result<Vec<u8>, DocumentError> {
+        self.reconstruct_bytes_with_target_locale(None)
+    }
+
+    /// 重建二进制文档包，并在 EPUB 包中更新 OPF 语言元数据。
+    pub fn reconstruct_bytes_with_target_locale(
+        &self,
+        target_locale: Option<&str>,
+    ) -> Result<Vec<u8>, DocumentError> {
         if matches!(
             self.format,
-            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+            DocumentFormat::Docx
+                | DocumentFormat::Pptx
+                | DocumentFormat::Xlsx
+                | DocumentFormat::Epub
         ) {
             let package = self
                 .package
@@ -429,6 +480,7 @@ impl DocumentJob {
                 DocumentFormat::Docx => docx::reconstruct(self, package),
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package),
                 DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package),
+                DocumentFormat::Epub => epub::reconstruct(self, package, target_locale),
                 _ => unreachable!(),
             };
         }
@@ -1557,6 +1609,38 @@ mod tests {
         writer.finish().expect("xlsx archive").into_inner()
     }
 
+    fn epub_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer.start_file("mimetype", options).expect("mimetype");
+        writer
+            .write_all(b"application/epub+zip")
+            .expect("mimetype bytes");
+        writer
+            .start_file("META-INF/container.xml", options)
+            .expect("container");
+        writer
+            .write_all(br#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#)
+            .expect("container bytes");
+        writer
+            .start_file("OEBPS/content.opf", options)
+            .expect("opf");
+        writer
+            .write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0"><metadata><dc:language>en</dc:language><dc:title>Book</dc:title></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/><item id="cover" href="cover.jpg" media-type="image/jpeg"/></manifest><spine><itemref idref="chapter"/></spine></package>"#)
+            .expect("opf bytes");
+        writer
+            .start_file("OEBPS/chapter.xhtml", options)
+            .expect("chapter");
+        writer
+            .write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Title</title><style>.keep{color:red}</style></head><body><h1>Hello &amp; world</h1><p>Body <em>text</em>.</p></body></html>"#)
+            .expect("chapter bytes");
+        writer
+            .start_file("OEBPS/cover.jpg", options)
+            .expect("cover");
+        writer.write_all(&[20, 21, 22]).expect("cover bytes");
+        writer.finish().expect("epub archive").into_inner()
+    }
+
     #[test]
     fn detects_supported_formats_case_insensitively() {
         assert_eq!(
@@ -1598,6 +1682,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("workbook.XLSX"),
             Ok(DocumentFormat::Xlsx)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("book.EPUB"),
+            Ok(DocumentFormat::Epub)
         );
     }
 
@@ -2095,6 +2183,51 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [8, 9, 10]);
+    }
+
+    #[test]
+    fn epub_preserves_package_parts_updates_language_and_rebuilds_xhtml() {
+        let source = epub_fixture();
+        let mut job = DocumentJob::from_utf8("book.epub", &source).expect("epub");
+        assert_eq!(job.format, DocumentFormat::Epub);
+        assert_eq!(job.pending_count(), 5);
+        for index in job
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.kind == DocumentSegmentKind::Prose)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+        {
+            job.apply_translation(index, "译文 & safe")
+                .expect("translation");
+        }
+        let rebuilt = job
+            .reconstruct_bytes_with_target_locale(Some("zh-CN"))
+            .expect("rebuild epub");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut chapter = String::new();
+        archive
+            .by_name("OEBPS/chapter.xhtml")
+            .expect("chapter entry")
+            .read_to_string(&mut chapter)
+            .expect("chapter xml");
+        assert!(chapter.contains("译文 &amp; safe"));
+        assert!(chapter.contains("<style>.keep{color:red}</style>"));
+        let mut opf = String::new();
+        archive
+            .by_name("OEBPS/content.opf")
+            .expect("opf entry")
+            .read_to_string(&mut opf)
+            .expect("opf xml");
+        assert!(opf.contains("<dc:language>zh-CN</dc:language>"));
+        let mut cover = Vec::new();
+        archive
+            .by_name("OEBPS/cover.jpg")
+            .expect("cover entry")
+            .read_to_end(&mut cover)
+            .expect("cover bytes");
+        assert_eq!(cover, [20, 21, 22]);
     }
 
     #[test]
