@@ -128,7 +128,7 @@ impl DocumentJob {
 
     /// 从受限 UTF-8 内容创建文档任务，并可为 CSV 指定要翻译的列。
     ///
-    /// `None` 表示 CSV 的所有列都可翻译；非 CSV 格式忽略该选项。
+    /// `None` 表示按表头和字段内容选择可翻译的文本列；非 CSV 格式忽略该选项。
     pub fn from_utf8_with_csv_columns(
         source_name: impl Into<String>,
         contents: &[u8],
@@ -512,7 +512,7 @@ fn from_csv_text(
             }
             sorted
         }
-        None => (0..max_columns).collect(),
+        None => default_csv_columns(&records, delimiter),
     };
     let mut segments = Vec::new();
     for record in records {
@@ -552,6 +552,52 @@ fn from_csv_text(
         source_name,
         segments,
     })
+}
+
+// 默认跳过标识符和纯数字列，避免在没有列选择器的宿主中误译结构字段。
+fn default_csv_columns(records: &[CsvRecord], delimiter: char) -> Vec<usize> {
+    let max_columns = records
+        .iter()
+        .map(|record| record.fields.len())
+        .max()
+        .unwrap_or(0);
+    (0..max_columns)
+        .filter(|column| {
+            let header = records
+                .first()
+                .and_then(|record| record.fields.get(*column))
+                .and_then(|field| decode_csv_field(field, delimiter).ok())
+                .unwrap_or_default();
+            if looks_like_identifier_header(&header) {
+                return false;
+            }
+            let mut has_value = false;
+            let all_numeric = records.iter().skip(1).all(|record| {
+                let Some(field) = record.fields.get(*column) else {
+                    return true;
+                };
+                let value = decode_csv_field(field, delimiter).unwrap_or_default();
+                if value.trim().is_empty() {
+                    return true;
+                }
+                has_value = true;
+                value.trim().parse::<f64>().is_ok()
+            });
+            !has_value || !all_numeric
+        })
+        .collect()
+}
+
+// 识别常见的 CSV 标识符表头。
+fn looks_like_identifier_header(header: &str) -> bool {
+    let normalized = header.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "id" | "key" | "code" | "uuid" | "identifier" | "number" | "no"
+    ) || normalized.ends_with("_id")
+        || normalized.ends_with("-id")
+        || normalized.ends_with("_key")
+        || normalized.ends_with("-key")
 }
 
 // 校验字幕时间戳的时钟字段和毫秒字段。
@@ -1000,6 +1046,19 @@ mod tests {
             job.reconstruct().unwrap(),
             "id;value-translated\r\n1;one-translated\r\n"
         );
+    }
+
+    #[test]
+    fn csv_default_selection_skips_identifier_and_numeric_columns() {
+        let job = DocumentJob::from_utf8("people.csv", b"id,name,amount\n1,Alice,42\n2,Bob,7\n")
+            .expect("csv");
+        let prose = job
+            .segments
+            .iter()
+            .filter(|segment| segment.kind == DocumentSegmentKind::Prose)
+            .map(|segment| segment.source_text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(prose, vec!["name", "Alice", "Bob"]);
     }
 
     #[test]
