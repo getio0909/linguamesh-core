@@ -16,6 +16,7 @@ const MAX_OOXML_ENTRIES: usize = 512;
 pub(crate) enum PackageKind {
     Docx,
     Pptx,
+    Xlsx,
 }
 
 impl PackageKind {
@@ -23,6 +24,7 @@ impl PackageKind {
         match self {
             Self::Docx => "word/document.xml",
             Self::Pptx => "ppt/presentation.xml",
+            Self::Xlsx => "xl/workbook.xml",
         }
     }
 
@@ -30,6 +32,7 @@ impl PackageKind {
         match self {
             Self::Docx => "</w:p>",
             Self::Pptx => "</a:p>",
+            Self::Xlsx => "",
         }
     }
 
@@ -37,6 +40,7 @@ impl PackageKind {
         match self {
             Self::Docx => "<w:t",
             Self::Pptx => "<a:t",
+            Self::Xlsx => "<t",
         }
     }
 }
@@ -84,11 +88,16 @@ fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, Docum
     if !seen.contains("[Content_Types].xml") || !seen.contains(kind.main_part()) {
         return Err(DocumentError::InvalidStructure);
     }
-    if matches!(kind, PackageKind::Pptx)
-        && !names
+    let has_required_child = match kind {
+        PackageKind::Pptx => names
             .iter()
-            .any(|name| name.starts_with("ppt/slides/slide") && has_xml_extension(name))
-    {
+            .any(|name| name.starts_with("ppt/slides/slide") && has_xml_extension(name)),
+        PackageKind::Xlsx => names
+            .iter()
+            .any(|name| name.starts_with("xl/worksheets/sheet") && has_xml_extension(name)),
+        PackageKind::Docx => true,
+    };
+    if !has_required_child {
         return Err(DocumentError::InvalidStructure);
     }
     Ok(names)
@@ -127,6 +136,10 @@ fn translatable_part(name: &str, kind: PackageKind) -> bool {
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix)),
+        PackageKind::Xlsx => {
+            name == "xl/sharedStrings.xml"
+                || (name.starts_with("xl/worksheets/sheet") && has_xml_extension(name))
+        }
     }
 }
 
@@ -152,7 +165,7 @@ fn validate_xml(xml: &str) -> Result<(), DocumentError> {
 }
 
 /// 在 XML 中定位 w:t 和 a:t 文本节点，同时保留原始标签和属性。
-fn text_spans(xml: &str) -> Result<Vec<TextSpan>, DocumentError> {
+fn text_spans(xml: &str, kind: PackageKind) -> Result<Vec<TextSpan>, DocumentError> {
     validate_xml(xml)?;
     let bytes = xml.as_bytes();
     let mut spans = Vec::new();
@@ -165,7 +178,12 @@ fn text_spans(xml: &str) -> Result<Vec<TextSpan>, DocumentError> {
             cursor = end;
             continue;
         };
-        if !matches!(name, "w:t" | "a:t") || raw.starts_with("</") || raw.ends_with("/>") {
+        let is_text = match kind {
+            PackageKind::Docx => name == "w:t",
+            PackageKind::Pptx => name == "a:t",
+            PackageKind::Xlsx => name == "t",
+        };
+        if !is_text || raw.starts_with("</") || raw.ends_with("/>") {
             cursor = end;
             continue;
         }
@@ -230,6 +248,10 @@ pub(crate) fn inspect_pptx(package: &[u8]) -> Result<Vec<DocumentSegment>, Docum
     inspect_kind(package, PackageKind::Pptx)
 }
 
+pub(crate) fn inspect_xlsx(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
+    inspect_kind(package, PackageKind::Xlsx)
+}
+
 fn inspect_kind(package: &[u8], kind: PackageKind) -> Result<Vec<DocumentSegment>, DocumentError> {
     let names = archive_names(package, kind)?;
     let mut archive =
@@ -243,19 +265,22 @@ fn inspect_kind(package: &[u8], kind: PackageKind) -> Result<Vec<DocumentSegment
         file.read_to_end(&mut data)
             .map_err(|_| DocumentError::InvalidStructure)?;
         let xml = std::str::from_utf8(&data).map_err(|_| DocumentError::InvalidStructure)?;
-        let spans = text_spans(xml)?;
+        let spans = text_spans(xml, kind)?;
         for span in spans {
             let raw = &xml[span.content_start..span.content_end];
             let text = unescape(raw)
                 .map_err(|_| DocumentError::InvalidStructure)?
                 .into_owned();
-            let line_ending = if xml[span.content_end..]
+            let line_ending = if matches!(kind, PackageKind::Xlsx) {
+                ""
+            } else if xml[span.content_end..]
                 .find(kind.paragraph_close())
                 .is_some_and(|paragraph_end| {
                     xml[span.content_end..]
                         .find(kind.text_open())
                         .is_none_or(|next_text| paragraph_end < next_text)
-                }) {
+                })
+            {
                 "\n"
             } else {
                 ""
@@ -295,8 +320,9 @@ fn rewrite_xml(
     xml: &str,
     segments: &[DocumentSegment],
     cursor: &mut usize,
+    kind: PackageKind,
 ) -> Result<Vec<u8>, DocumentError> {
-    let spans = text_spans(xml)?;
+    let spans = text_spans(xml, kind)?;
     let mut output = String::with_capacity(xml.len());
     let mut cursor_bytes = 0usize;
     for span in spans {
@@ -340,6 +366,13 @@ pub(crate) fn reconstruct_pptx(
     reconstruct_kind(job, package, PackageKind::Pptx)
 }
 
+pub(crate) fn reconstruct_xlsx(
+    job: &DocumentJob,
+    package: &[u8],
+) -> Result<Vec<u8>, DocumentError> {
+    reconstruct_kind(job, package, PackageKind::Xlsx)
+}
+
 fn reconstruct_kind(
     job: &DocumentJob,
     package: &[u8],
@@ -362,7 +395,7 @@ fn reconstruct_kind(
         drop(file);
         if translatable_part(&name, kind) {
             let xml = std::str::from_utf8(&data).map_err(|_| DocumentError::InvalidStructure)?;
-            data = rewrite_xml(xml, &job.segments, &mut segment_cursor)?;
+            data = rewrite_xml(xml, &job.segments, &mut segment_cursor, kind)?;
         }
         if is_dir {
             writer

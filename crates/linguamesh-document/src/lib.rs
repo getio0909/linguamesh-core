@@ -29,6 +29,8 @@ pub enum DocumentFormat {
     Docx,
     /// OOXML PPTX 演示文稿包。
     Pptx,
+    /// OOXML XLSX 工作簿包。
+    Xlsx,
 }
 
 impl DocumentFormat {
@@ -48,6 +50,7 @@ impl DocumentFormat {
             "json" => Ok(Self::Json),
             "docx" => Ok(Self::Docx),
             "pptx" => Ok(Self::Pptx),
+            "xlsx" => Ok(Self::Xlsx),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -129,7 +132,7 @@ pub struct DocumentJob {
     pub source_name: String,
     /// 按原始顺序排列的文档段。
     pub segments: Vec<DocumentSegment>,
-    /// DOCX 或 PPTX 原始包字节；普通文本任务不保存此字段。
+    /// DOCX、PPTX 或 XLSX 原始包字节；普通文本任务不保存此字段。
     #[serde(default)]
     pub package: Option<Vec<u8>>,
 }
@@ -143,7 +146,7 @@ impl DocumentJob {
         let source_name = source_name.into();
         if matches!(
             DocumentFormat::from_name(&source_name)?,
-            DocumentFormat::Docx | DocumentFormat::Pptx
+            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
         ) {
             return Self::from_ooxml_bytes(source_name, contents);
         }
@@ -166,6 +169,14 @@ impl DocumentJob {
         Self::from_ooxml_bytes(source_name, contents)
     }
 
+    /// 从受限 XLSX 包创建可恢复文档任务。
+    pub fn from_xlsx_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
+        Self::from_ooxml_bytes(source_name, contents)
+    }
+
     fn from_ooxml_bytes(
         source_name: impl Into<String>,
         contents: &[u8],
@@ -175,12 +186,16 @@ impl DocumentJob {
         }
         let source_name = source_name.into();
         let format = DocumentFormat::from_name(&source_name)?;
-        if !matches!(format, DocumentFormat::Docx | DocumentFormat::Pptx) {
+        if !matches!(
+            format,
+            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+        ) {
             return Err(DocumentError::UnsupportedFormat);
         }
         let segments = match format {
             DocumentFormat::Docx => docx::inspect(contents)?,
             DocumentFormat::Pptx => docx::inspect_pptx(contents)?,
+            DocumentFormat::Xlsx => docx::inspect_xlsx(contents)?,
             _ => return Err(DocumentError::UnsupportedFormat),
         };
         Ok(Self {
@@ -370,7 +385,10 @@ impl DocumentJob {
 
     /// 重建完整 UTF-8 文档；未完成的可翻译段会被拒绝。
     pub fn reconstruct(&self) -> Result<String, DocumentError> {
-        if matches!(self.format, DocumentFormat::Docx | DocumentFormat::Pptx) {
+        if matches!(
+            self.format,
+            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+        ) {
             let package = self
                 .package
                 .as_deref()
@@ -378,6 +396,7 @@ impl DocumentJob {
             let _ = match self.format {
                 DocumentFormat::Docx => docx::reconstruct(self, package)?,
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package)?,
+                DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package)?,
                 _ => unreachable!(),
             };
             return docx::preview(self);
@@ -396,9 +415,12 @@ impl DocumentJob {
         Ok(output)
     }
 
-    /// 重建 DOCX 或 PPTX 二进制包，普通文本格式返回 UTF-8 输出字节。
+    /// 重建 DOCX、PPTX 或 XLSX 二进制包，普通文本格式返回 UTF-8 输出字节。
     pub fn reconstruct_bytes(&self) -> Result<Vec<u8>, DocumentError> {
-        if matches!(self.format, DocumentFormat::Docx | DocumentFormat::Pptx) {
+        if matches!(
+            self.format,
+            DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+        ) {
             let package = self
                 .package
                 .as_deref()
@@ -406,6 +428,7 @@ impl DocumentJob {
             return match self.format {
                 DocumentFormat::Docx => docx::reconstruct(self, package),
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package),
+                DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package),
                 _ => unreachable!(),
             };
         }
@@ -1500,6 +1523,40 @@ mod tests {
         writer.finish().expect("pptx archive").into_inner()
     }
 
+    fn xlsx_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("xl/workbook.xml", options)
+            .expect("workbook");
+        writer
+            .write_all(
+                br#"<workbook xmlns="urn:x"><sheets><sheet name="Sheet1"/></sheets></workbook>"#,
+            )
+            .expect("workbook bytes");
+        writer
+            .start_file("xl/sharedStrings.xml", options)
+            .expect("shared strings");
+        writer
+            .write_all(br#"<sst xmlns="urn:x"><si><t>Hello &amp; world</t></si><si><t>Shared</t></si></sst>"#)
+            .expect("shared strings bytes");
+        writer
+            .start_file("xl/worksheets/sheet1.xml", options)
+            .expect("worksheet");
+        writer
+            .write_all(br#"<worksheet xmlns="urn:x"><sheetData><row><c t="inlineStr"><is><t>Inline</t></is></c><c t="s"><v>0</v></c></row></sheetData></worksheet>"#)
+            .expect("worksheet bytes");
+        writer
+            .start_file("xl/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[8, 9, 10]).expect("image bytes");
+        writer.finish().expect("xlsx archive").into_inner()
+    }
+
     #[test]
     fn detects_supported_formats_case_insensitively() {
         assert_eq!(
@@ -1537,6 +1594,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("slides.PPTX"),
             Ok(DocumentFormat::Pptx)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("workbook.XLSX"),
+            Ok(DocumentFormat::Xlsx)
         );
     }
 
@@ -1993,6 +2054,47 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [5, 6, 7]);
+    }
+
+    #[test]
+    fn xlsx_preserves_sheet_values_and_resources() {
+        let source = xlsx_fixture();
+        let mut job = DocumentJob::from_utf8("sample.xlsx", &source).expect("xlsx");
+        assert_eq!(job.format, DocumentFormat::Xlsx);
+        assert_eq!(job.pending_count(), 3);
+        for index in job
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.kind == DocumentSegmentKind::Prose)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+        {
+            job.apply_translation(index, "译文").expect("translation");
+        }
+        let rebuilt = job.reconstruct_bytes().expect("rebuild xlsx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut shared_strings = String::new();
+        archive
+            .by_name("xl/sharedStrings.xml")
+            .expect("shared strings entry")
+            .read_to_string(&mut shared_strings)
+            .expect("shared strings xml");
+        assert!(shared_strings.contains("译文"));
+        let mut worksheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .expect("worksheet entry")
+            .read_to_string(&mut worksheet)
+            .expect("worksheet xml");
+        assert!(worksheet.contains("译文"));
+        let mut image = Vec::new();
+        archive
+            .by_name("xl/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [8, 9, 10]);
     }
 
     #[test]

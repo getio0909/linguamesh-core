@@ -30,7 +30,8 @@ const DOCUMENT_FORMATS_MIGRATION: &str =
 const DOCUMENT_PACKAGES_MIGRATION: &str =
     include_str!("../../../migrations/0010_document_packages.sql");
 const DOCUMENT_PPTX_MIGRATION: &str = include_str!("../../../migrations/0011_document_pptx.sql");
-const LATEST_SCHEMA_VERSION: u32 = 11;
+const DOCUMENT_XLSX_MIGRATION: &str = include_str!("../../../migrations/0012_document_xlsx.sql");
+const LATEST_SCHEMA_VERSION: u32 = 12;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -67,6 +68,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (9, DOCUMENT_FORMATS_MIGRATION),
     (10, DOCUMENT_PACKAGES_MIGRATION),
     (11, DOCUMENT_PPTX_MIGRATION),
+    (12, DOCUMENT_XLSX_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1004,9 +1006,13 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
             "The document contains too many segments.",
         ));
     }
-    if matches!(job.format, DocumentFormat::Docx | DocumentFormat::Pptx) != job.package.is_some() {
+    if matches!(
+        job.format,
+        DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx
+    ) != job.package.is_some()
+    {
         return Err(document_configuration_error(
-            "The DOCX package payload is missing or attached to another format.",
+            "The OOXML package payload is missing or attached to another format.",
         ));
     }
     if job
@@ -1015,7 +1021,7 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
         .is_some_and(|package| package.len() > MAX_DOCUMENT_BYTES)
     {
         return Err(document_configuration_error(
-            "The DOCX package exceeds the local size limit.",
+            "The OOXML package exceeds the local size limit.",
         ));
     }
     let mut source_bytes = 0usize;
@@ -1111,6 +1117,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Json => "json",
         DocumentFormat::Docx => "docx",
         DocumentFormat::Pptx => "pptx",
+        DocumentFormat::Xlsx => "xlsx",
     }
 }
 
@@ -1125,6 +1132,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "json" => Ok(DocumentFormat::Json),
         "docx" => Ok(DocumentFormat::Docx),
         "pptx" => Ok(DocumentFormat::Pptx),
+        "xlsx" => Ok(DocumentFormat::Xlsx),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1559,7 +1567,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 11);
+        assert_eq!(storage.schema_version().expect("version"), 12);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1837,6 +1845,77 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [4, 5, 6]);
+    }
+
+    #[test]
+    fn xlsx_package_and_segments_survive_reopen() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("xl/workbook.xml", options)
+            .expect("workbook");
+        writer.write_all(b"<workbook/>").expect("workbook bytes");
+        writer
+            .start_file("xl/sharedStrings.xml", options)
+            .expect("shared strings");
+        writer
+            .write_all(br"<sst><si><t>Hello</t></si></sst>")
+            .expect("shared strings bytes");
+        writer
+            .start_file("xl/worksheets/sheet1.xml", options)
+            .expect("worksheet");
+        writer
+            .write_all(br#"<worksheet><sheetData><row><c t="s"><v>0</v></c></row></sheetData></worksheet>"#)
+            .expect("worksheet bytes");
+        writer
+            .start_file("xl/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[11, 12, 13]).expect("image bytes");
+        let package = writer.finish().expect("package").into_inner();
+
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("xlsx-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("sample.xlsx", &package).expect("xlsx job");
+        storage
+            .save_document_job("xlsx-job", &job, DocumentJobState::Pending)
+            .expect("save xlsx job");
+        let text = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "Hello")
+            .expect("xlsx text segment");
+        storage
+            .update_document_segment("xlsx-job", text, "你好")
+            .expect("translate xlsx text");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("xlsx-job")
+            .expect("load xlsx job")
+            .expect("xlsx snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Xlsx);
+        let rebuilt = snapshot.job.reconstruct_bytes().expect("reconstruct xlsx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut shared_strings = String::new();
+        archive
+            .by_name("xl/sharedStrings.xml")
+            .expect("shared strings entry")
+            .read_to_string(&mut shared_strings)
+            .expect("shared strings xml");
+        assert!(shared_strings.contains("你好"));
+        let mut image = Vec::new();
+        archive
+            .by_name("xl/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [11, 12, 13]);
     }
 
     #[test]
@@ -2249,7 +2328,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 11);
+        assert_eq!(storage.schema_version().expect("version"), 12);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2331,7 +2410,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 11);
+        assert_eq!(storage.schema_version().expect("version"), 12);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
