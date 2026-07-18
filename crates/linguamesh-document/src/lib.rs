@@ -118,6 +118,27 @@ pub struct DocumentSegment {
     pub line_ending: String,
 }
 
+/// 文档导入或导出时需要向用户明确展示的限制类型。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentWarningKind {
+    /// PDF 页面没有可提取的文本，当前实现不会执行 OCR。
+    PdfImageOnlyPage,
+    /// PDF 页面中的文本顺序无法从内容流坐标可靠推断。
+    PdfUncertainReadingOrder,
+    /// PDF 重建保留文本和页面关联，但不承诺像素级版式一致。
+    PdfReconstructionLimited,
+}
+
+/// 与文档或具体页面关联的导入/导出限制。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DocumentWarning {
+    /// 稳定的 warning 类型，供原生客户端本地化。
+    pub kind: DocumentWarningKind,
+    /// 1 起始的 PDF 页码；文档级 warning 使用 `None`。
+    pub page: Option<usize>,
+}
+
 impl DocumentSegment {
     /// 返回该段重建时应使用的文本。
     pub fn output_text(&self) -> Result<&str, DocumentError> {
@@ -400,6 +421,18 @@ impl DocumentJob {
             DocumentFormat::Json => decode_json_string(&segment.source_text).map(Cow::Owned),
             _ => Ok(Cow::Borrowed(segment.source_text.as_str())),
         }
+    }
+
+    /// 返回当前任务的结构化限制提示，不包含源文本或敏感信息。
+    pub fn warnings(&self) -> Result<Vec<DocumentWarning>, DocumentError> {
+        if !matches!(self.format, DocumentFormat::Pdf) {
+            return Ok(Vec::new());
+        }
+        let package = self
+            .package
+            .as_deref()
+            .ok_or(DocumentError::InvalidStructure)?;
+        pdf::warnings(package)
     }
 
     /// 返回未完成的可翻译段数量。
@@ -1555,7 +1588,8 @@ fn validate_structure_with_delimiter(
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentError, DocumentFormat, DocumentJob, DocumentSegmentKind, MAX_DOCUMENT_BYTES,
+        DocumentError, DocumentFormat, DocumentJob, DocumentSegmentKind, DocumentWarning,
+        DocumentWarningKind, MAX_DOCUMENT_BYTES,
     };
     use std::io::{Cursor, Read, Write};
 
@@ -2326,6 +2360,13 @@ trailer
         let mut job = DocumentJob::from_utf8("book.pdf", &source).expect("pdf");
         assert_eq!(job.format, DocumentFormat::Pdf);
         assert_eq!(job.pending_count(), 2);
+        assert_eq!(
+            job.warnings().expect("pdf warnings"),
+            vec![DocumentWarning {
+                kind: DocumentWarningKind::PdfReconstructionLimited,
+                page: None,
+            }]
+        );
         job.apply_translation(0, "Bonjour").expect("first page");
         job.apply_translation(1, "Deuxieme").expect("second page");
         let rebuilt = job.reconstruct_bytes().expect("rebuild pdf");
@@ -2339,6 +2380,66 @@ trailer
         assert!(html.contains("data-page=\"1\""));
         assert!(html.contains("data-page=\"2\""));
         assert!(html.contains("Bonjour"));
+    }
+
+    #[test]
+    fn pdf_warnings_distinguish_image_only_and_uncertain_pages() {
+        let image_only = br"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+";
+        let image_job = DocumentJob::from_utf8("scan.pdf", image_only).expect("image PDF");
+        assert!(image_job.segments.is_empty());
+        assert!(
+            image_job
+                .warnings()
+                .expect("image warnings")
+                .contains(&DocumentWarning {
+                    kind: DocumentWarningKind::PdfImageOnlyPage,
+                    page: Some(1),
+                })
+        );
+
+        let uncertain = br"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 31 >>
+stream
+BT (First) Tj (Second) Tj ET
+endstream
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+";
+        let uncertain_job = DocumentJob::from_utf8("uncertain.pdf", uncertain).expect("PDF");
+        assert!(
+            uncertain_job
+                .warnings()
+                .expect("order warnings")
+                .contains(&DocumentWarning {
+                    kind: DocumentWarningKind::PdfUncertainReadingOrder,
+                    page: Some(1),
+                })
+        );
     }
 
     #[test]

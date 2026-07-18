@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 
-use crate::{DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, MAX_DOCUMENT_BYTES};
+use crate::{
+    DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, DocumentWarning,
+    DocumentWarningKind, MAX_DOCUMENT_BYTES,
+};
 
 const MAX_PDF_PAGES: usize = 256;
 const MAX_PDF_OBJECTS: usize = 4096;
@@ -553,6 +556,39 @@ pub(crate) fn inspect(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentEr
             }
         })
         .collect())
+}
+
+pub(crate) fn warnings(package: &[u8]) -> Result<Vec<DocumentWarning>, DocumentError> {
+    let document = parse_pdf(package)?;
+    let mut warnings = vec![DocumentWarning {
+        kind: DocumentWarningKind::PdfReconstructionLimited,
+        page: None,
+    }];
+    for page in 0..document.pages.len() {
+        let spans = document
+            .spans
+            .iter()
+            .filter(|span| span.page == page)
+            .collect::<Vec<_>>();
+        if spans.is_empty() {
+            warnings.push(DocumentWarning {
+                kind: DocumentWarningKind::PdfImageOnlyPage,
+                page: Some(page + 1),
+            });
+            continue;
+        }
+        if spans.windows(2).any(|pair| {
+            let first = pair[0];
+            let second = pair[1];
+            (first.x - second.x).abs() < 0.01 && (first.y - second.y).abs() < 0.01
+        }) {
+            warnings.push(DocumentWarning {
+                kind: DocumentWarningKind::PdfUncertainReadingOrder,
+                page: Some(page + 1),
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 fn pdf_escape(text: &str) -> Result<Vec<u8>, DocumentError> {
