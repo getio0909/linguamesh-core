@@ -5,6 +5,8 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod docx;
+
 /// 文本文档的受支持格式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -23,6 +25,8 @@ pub enum DocumentFormat {
     Html,
     /// UTF-8 JSON 文档。
     Json,
+    /// OOXML DOCX 文档包。
+    Docx,
 }
 
 impl DocumentFormat {
@@ -40,6 +44,7 @@ impl DocumentFormat {
             "csv" => Ok(Self::Csv),
             "html" | "htm" => Ok(Self::Html),
             "json" => Ok(Self::Json),
+            "docx" => Ok(Self::Docx),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -121,6 +126,9 @@ pub struct DocumentJob {
     pub source_name: String,
     /// 按原始顺序排列的文档段。
     pub segments: Vec<DocumentSegment>,
+    /// DOCX 原始包字节；普通文本任务不保存此字段。
+    #[serde(default)]
+    pub package: Option<Vec<u8>>,
 }
 
 impl DocumentJob {
@@ -129,7 +137,38 @@ impl DocumentJob {
         source_name: impl Into<String>,
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
+        let source_name = source_name.into();
+        if matches!(
+            DocumentFormat::from_name(&source_name)?,
+            DocumentFormat::Docx
+        ) {
+            return Self::from_docx_bytes(source_name, contents);
+        }
         Self::from_utf8_with_json_paths(source_name, contents, None, None)
+    }
+
+    /// 从受限 DOCX 包创建可恢复文档任务。
+    pub fn from_docx_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
+        if contents.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let source_name = source_name.into();
+        if !matches!(
+            DocumentFormat::from_name(&source_name)?,
+            DocumentFormat::Docx
+        ) {
+            return Err(DocumentError::UnsupportedFormat);
+        }
+        let segments = docx::inspect(contents)?;
+        Ok(Self {
+            format: DocumentFormat::Docx,
+            source_name,
+            segments,
+            package: Some(contents.to_vec()),
+        })
     }
 
     /// 从受限 UTF-8 内容创建文档任务，并可为 CSV 指定要翻译的列。
@@ -234,6 +273,7 @@ impl DocumentJob {
             format,
             source_name,
             segments,
+            package: None,
         }
     }
 
@@ -310,6 +350,14 @@ impl DocumentJob {
 
     /// 重建完整 UTF-8 文档；未完成的可翻译段会被拒绝。
     pub fn reconstruct(&self) -> Result<String, DocumentError> {
+        if matches!(self.format, DocumentFormat::Docx) {
+            let package = self
+                .package
+                .as_deref()
+                .ok_or(DocumentError::InvalidStructure)?;
+            let _ = docx::reconstruct(self, package)?;
+            return docx::preview(self);
+        }
         let mut output = String::new();
         for segment in &self.segments {
             output.push_str(segment.output_text()?);
@@ -322,6 +370,19 @@ impl DocumentJob {
             .then(|| detect_csv_delimiter(&self.source_text()));
         validate_structure_with_delimiter(self.format, &output, csv_delimiter)?;
         Ok(output)
+    }
+
+    /// 重建 DOCX 二进制包，普通文本格式返回 UTF-8 输出字节。
+    pub fn reconstruct_bytes(&self) -> Result<Vec<u8>, DocumentError> {
+        if matches!(self.format, DocumentFormat::Docx) {
+            return docx::reconstruct(
+                self,
+                self.package
+                    .as_deref()
+                    .ok_or(DocumentError::InvalidStructure)?,
+            );
+        }
+        Ok(self.reconstruct()?.into_bytes())
     }
 }
 
@@ -560,6 +621,7 @@ fn from_html_text(source_name: String, text: &str) -> Result<DocumentJob, Docume
         format: DocumentFormat::Html,
         source_name,
         segments,
+        package: None,
     })
 }
 
@@ -843,6 +905,7 @@ fn from_json_text(
         format: DocumentFormat::Json,
         source_name,
         segments,
+        package: None,
     })
 }
 
@@ -1077,6 +1140,7 @@ fn from_csv_text(
         format: DocumentFormat::Csv,
         source_name,
         segments,
+        package: None,
     })
 }
 
@@ -1338,6 +1402,42 @@ mod tests {
     use super::{
         DocumentError, DocumentFormat, DocumentJob, DocumentSegmentKind, MAX_DOCUMENT_BYTES,
     };
+    use std::io::{Cursor, Read, Write};
+
+    use zip::ZipArchive;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+
+    fn docx_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer
+            .write_all(
+                b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+            )
+            .expect("content types bytes");
+        writer
+            .start_file("word/document.xml", options)
+            .expect("document");
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Hello &amp; world</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+            )
+            .expect("document bytes");
+        writer
+            .start_file("word/header1.xml", options)
+            .expect("header");
+        writer
+            .write_all(br#"<w:hdr xmlns:w="urn:w"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#)
+            .expect("header bytes");
+        writer
+            .start_file("word/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[1, 2, 3, 4]).expect("image bytes");
+        writer.finish().expect("docx archive").into_inner()
+    }
 
     #[test]
     fn detects_supported_formats_case_insensitively() {
@@ -1371,7 +1471,7 @@ mod tests {
         );
         assert_eq!(
             DocumentFormat::from_name("notes.docx"),
-            Err(DocumentError::UnsupportedFormat)
+            Ok(DocumentFormat::Docx)
         );
     }
 
@@ -1740,6 +1840,69 @@ mod tests {
         );
         assert_eq!(
             DocumentJob::from_utf8("page.html", b"<html><body><p>text"),
+            Err(DocumentError::InvalidStructure)
+        );
+    }
+
+    #[test]
+    fn docx_preserves_package_parts_and_rebuilds_text_nodes() {
+        let source = docx_fixture();
+        let mut job = DocumentJob::from_utf8("sample.docx", &source).expect("docx");
+        assert_eq!(job.format, DocumentFormat::Docx);
+        assert_eq!(job.pending_count(), 3);
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for (index, translated) in prose.into_iter().zip(["你好 & 世界", "单元格", "页眉"])
+        {
+            job.apply_translation(index, translated)
+                .expect("translation");
+        }
+        let rebuilt = job.reconstruct_bytes().expect("rebuild docx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document entry")
+            .read_to_string(&mut document)
+            .expect("document xml");
+        assert!(document.contains("你好 &amp; 世界"));
+        assert!(document.contains("单元格"));
+        let mut header = String::new();
+        archive
+            .by_name("word/header1.xml")
+            .expect("header entry")
+            .read_to_string(&mut header)
+            .expect("header xml");
+        assert!(header.contains("页眉"));
+        let mut image = Vec::new();
+        archive
+            .by_name("word/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_docx_archive_traversal() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("[Content_Types].xml", SimpleFileOptions::default())
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("../word/document.xml", SimpleFileOptions::default())
+            .expect("traversal");
+        writer.write_all(b"<w:document/>").expect("document bytes");
+        let package = writer.finish().expect("archive").into_inner();
+        assert_eq!(
+            DocumentJob::from_utf8("unsafe.docx", &package),
             Err(DocumentError::InvalidStructure)
         );
     }

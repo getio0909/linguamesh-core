@@ -27,7 +27,9 @@ const DOCUMENT_JOB_OPTIONS_MIGRATION: &str =
     include_str!("../../../migrations/0008_document_job_options.sql");
 const DOCUMENT_FORMATS_MIGRATION: &str =
     include_str!("../../../migrations/0009_document_formats.sql");
-const LATEST_SCHEMA_VERSION: u32 = 9;
+const DOCUMENT_PACKAGES_MIGRATION: &str =
+    include_str!("../../../migrations/0010_document_packages.sql");
+const LATEST_SCHEMA_VERSION: u32 = 10;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -62,6 +64,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (7, DOCUMENT_JOB_PAUSE_MIGRATION),
     (8, DOCUMENT_JOB_OPTIONS_MIGRATION),
     (9, DOCUMENT_FORMATS_MIGRATION),
+    (10, DOCUMENT_PACKAGES_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -219,9 +222,9 @@ impl Storage {
             }
         }
         transaction
-            .execute(
-                "INSERT INTO document_jobs (job_id, state, format, source_name) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(job_id) DO UPDATE SET state = excluded.state, format = excluded.format, source_name = excluded.source_name, updated_at = unixepoch()",
-                params![job_id, document_job_state_name(state), document_format_name(job.format), job.source_name.as_str()],
+                .execute(
+                "INSERT INTO document_jobs (job_id, state, format, source_name, package_blob) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(job_id) DO UPDATE SET state = excluded.state, format = excluded.format, source_name = excluded.source_name, package_blob = excluded.package_blob, updated_at = unixepoch()",
+                params![job_id, document_job_state_name(state), document_format_name(job.format), job.source_name.as_str(), job.package.as_deref()],
             )
             .map_err(|error| map_error(&error))?;
         transaction
@@ -999,6 +1002,20 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
             "The document contains too many segments.",
         ));
     }
+    if matches!(job.format, DocumentFormat::Docx) != job.package.is_some() {
+        return Err(document_configuration_error(
+            "The DOCX package payload is missing or attached to another format.",
+        ));
+    }
+    if job
+        .package
+        .as_ref()
+        .is_some_and(|package| package.len() > MAX_DOCUMENT_BYTES)
+    {
+        return Err(document_configuration_error(
+            "The DOCX package exceeds the local size limit.",
+        ));
+    }
     let mut source_bytes = 0usize;
     let mut translated_bytes = 0usize;
     for (expected_index, segment) in job.segments.iter().enumerate() {
@@ -1090,6 +1107,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Csv => "csv",
         DocumentFormat::Html => "html",
         DocumentFormat::Json => "json",
+        DocumentFormat::Docx => "docx",
     }
 }
 
@@ -1102,6 +1120,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "csv" => Ok(DocumentFormat::Csv),
         "html" => Ok(DocumentFormat::Html),
         "json" => Ok(DocumentFormat::Json),
+        "docx" => Ok(DocumentFormat::Docx),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1159,21 +1178,22 @@ fn load_document_job(
 ) -> Result<Option<DocumentJobSnapshot>, TranslationError> {
     let metadata = connection
         .query_row(
-            "SELECT state, format, source_name, created_at, updated_at FROM document_jobs WHERE job_id = ?1",
+            "SELECT state, format, source_name, package_blob, created_at, updated_at FROM document_jobs WHERE job_id = ?1",
             params![job_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| map_error(&error))?;
-    let Some((state, format, source_name, created_at, updated_at)) = metadata else {
+    let Some((state, format, source_name, package, created_at, updated_at)) = metadata else {
         return Ok(None);
     };
     let mut statement = connection
@@ -1218,6 +1238,7 @@ fn load_document_job(
         format: parse_document_format(&format)?,
         source_name,
         segments,
+        package,
     };
     validate_document_job_identity(job_id, &job)?;
     let options = load_document_job_options(connection, job_id)?;
@@ -1506,9 +1527,12 @@ mod tests {
     };
     use rusqlite::Connection;
     use std::fs;
+    use std::io::{Cursor, Read, Write};
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
+    use zip::ZipArchive;
+    use zip::write::{SimpleFileOptions, ZipWriter};
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:88888888-8888-4888-8888-888888888888";
     const SESSION_SECRET_REF: &str = "session:99999999-9999-4999-8999-999999999999";
@@ -1531,7 +1555,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 9);
+        assert_eq!(storage.schema_version().expect("version"), 10);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1681,6 +1705,67 @@ mod tests {
             snapshot.job.reconstruct().expect("reconstruct html"),
             "<p>Hello &lt;safe&gt;</p>"
         );
+    }
+
+    #[test]
+    fn docx_package_and_segments_survive_reopen() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("word/document.xml", options)
+            .expect("document");
+        writer
+            .write_all(br#"<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#)
+            .expect("document bytes");
+        writer
+            .start_file("word/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[7, 8, 9]).expect("image bytes");
+        let package = writer.finish().expect("package").into_inner();
+
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("docx-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("sample.docx", &package).expect("docx job");
+        storage
+            .save_document_job("docx-job", &job, DocumentJobState::Pending)
+            .expect("save docx job");
+        let text = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "Hello")
+            .expect("docx text segment");
+        storage
+            .update_document_segment("docx-job", text, "你好")
+            .expect("translate docx text");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("docx-job")
+            .expect("load docx job")
+            .expect("docx snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Docx);
+        let rebuilt = snapshot.job.reconstruct_bytes().expect("reconstruct docx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .expect("document entry")
+            .read_to_string(&mut document)
+            .expect("document xml");
+        assert!(document.contains("你好"));
+        let mut image = Vec::new();
+        archive
+            .by_name("word/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [7, 8, 9]);
     }
 
     #[test]
@@ -2093,7 +2178,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 9);
+        assert_eq!(storage.schema_version().expect("version"), 10);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2175,7 +2260,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 9);
+        assert_eq!(storage.schema_version().expect("version"), 10);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
