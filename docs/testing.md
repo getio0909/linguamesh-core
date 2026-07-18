@@ -1,6 +1,6 @@
 # Testing
 
-Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, and restart recovery without persisting paths or credential values.
+Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-7 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, pause persistence, and restart recovery without persisting paths or credential values.
 
 Protected-span tests scan URLs, email addresses, Markdown code, and placeholders, split opaque
 markers across streamed deltas, restore every original span exactly once, and reject missing,

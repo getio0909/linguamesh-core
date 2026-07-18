@@ -39,6 +39,8 @@ pub enum DocumentJobState {
     Pending,
     /// 至少一个段已开始翻译，任务可以在重启后继续。
     Running,
+    /// 用户请求暂停，保留已完成段并等待显式恢复。
+    Paused,
     /// 所有可翻译段均已完成。
     Completed,
     /// 用户主动取消，保留快照供查看或重新开始。
@@ -51,7 +53,7 @@ impl DocumentJobState {
     /// 返回进程重启后应重新暴露给界面的任务。
     #[must_use]
     pub const fn is_resumable(self) -> bool {
-        matches!(self, Self::Pending | Self::Running)
+        matches!(self, Self::Pending | Self::Running | Self::Paused)
     }
 }
 

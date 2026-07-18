@@ -21,7 +21,9 @@ const TRANSLATION_HISTORY_POLICY_MIGRATION: &str =
 const TRANSLATION_MEMORY_MIGRATION: &str =
     include_str!("../../../migrations/0005_translation_memory.sql");
 const DOCUMENT_JOBS_MIGRATION: &str = include_str!("../../../migrations/0006_document_jobs.sql");
-const LATEST_SCHEMA_VERSION: u32 = 6;
+const DOCUMENT_JOB_PAUSE_MIGRATION: &str =
+    include_str!("../../../migrations/0007_document_job_pause.sql");
+const LATEST_SCHEMA_VERSION: u32 = 7;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -49,6 +51,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (4, TRANSLATION_HISTORY_POLICY_MIGRATION),
     (5, TRANSLATION_MEMORY_MIGRATION),
     (6, DOCUMENT_JOBS_MIGRATION),
+    (7, DOCUMENT_JOB_PAUSE_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -269,7 +272,7 @@ impl Storage {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT job_id FROM document_jobs WHERE state IN ('pending', 'running') ORDER BY updated_at ASC, job_id ASC",
+                "SELECT job_id FROM document_jobs WHERE state IN ('pending', 'running', 'paused') ORDER BY updated_at ASC, job_id ASC",
             )
             .map_err(|error| map_error(&error))?;
         let job_ids = statement
@@ -988,6 +991,7 @@ fn document_job_state_name(state: DocumentJobState) -> &'static str {
     match state {
         DocumentJobState::Pending => "pending",
         DocumentJobState::Running => "running",
+        DocumentJobState::Paused => "paused",
         DocumentJobState::Completed => "completed",
         DocumentJobState::Cancelled => "cancelled",
         DocumentJobState::Failed => "failed",
@@ -998,6 +1002,7 @@ fn parse_document_job_state(value: &str) -> Result<DocumentJobState, Translation
     match value {
         "pending" => Ok(DocumentJobState::Pending),
         "running" => Ok(DocumentJobState::Running),
+        "paused" => Ok(DocumentJobState::Paused),
         "completed" => Ok(DocumentJobState::Completed),
         "cancelled" => Ok(DocumentJobState::Cancelled),
         "failed" => Ok(DocumentJobState::Failed),
@@ -1353,7 +1358,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 6);
+        assert_eq!(storage.schema_version().expect("version"), 7);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1396,6 +1401,27 @@ mod tests {
         );
         assert!(reopened.delete_document_job("job-1").expect("delete job"));
         assert!(reopened.document_job("job-1").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn paused_document_job_survives_reopen_and_is_resumable() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("paused-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one\ntwo");
+        storage
+            .save_document_job("job-paused", &job, DocumentJobState::Pending)
+            .expect("save pending");
+        let paused = storage
+            .set_document_job_state("job-paused", DocumentJobState::Paused)
+            .expect("pause job");
+        assert_eq!(paused.state, DocumentJobState::Paused);
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopened storage");
+        let resumable = reopened.resumable_document_jobs().expect("resumable jobs");
+        assert_eq!(resumable.len(), 1);
+        assert_eq!(resumable[0].state, DocumentJobState::Paused);
     }
 
     #[test]
@@ -1746,7 +1772,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 6);
+        assert_eq!(storage.schema_version().expect("version"), 7);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -1828,7 +1854,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 6);
+        assert_eq!(storage.schema_version().expect("version"), 7);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

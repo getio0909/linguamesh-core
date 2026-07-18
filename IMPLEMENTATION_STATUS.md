@@ -50,6 +50,18 @@ commands, emits startup restoration snapshots, and persists segment progress acr
 Core Storage tests (19 passed) and Linux worker tests (88 passed, 1 intentional environment skip)
 cover migration, restart recovery, output reconstruction, queue bounds, and credential/path absence.
 
+## 2026-07-18 — Linux document pause checkpoint
+
+Assumption: pause is a segment-boundary operation. The active provider operation is cancelled,
+only completed segments are persisted, and the job becomes `paused`; resume continues pending
+segments with explicit provider options, while retry also accepts cancelled or failed snapshots.
+
+Implemented Core schema 7 and the `paused` state, including a transactional table rebuild and
+restart recovery. Linux `CoreWorker` now exposes pause, resume, and retry commands, and the GTK
+surface shows per-job progress plus pause/resume/retry controls. Android, Windows, and macOS
+remain intentionally out of scope for this Linux-first slice; archive codecs, automatic provider
+parameter persistence, and a multi-job queue remain open.
+
 ## 2026-07-18 — TXT/Markdown document contract
 
 Assumption: the first Linux-first document slice treats TXT and Markdown as bounded UTF-8 line
