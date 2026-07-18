@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
     EndpointConfiguration, ErrorKind, ModelDescriptor, ModelSource, ProtectedTextError,
-    SecretValue, TranslationError, TranslationRequest, protect_source_text,
+    SecretValue, TranslationError, TranslationRequest, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{ModelProvider, TranslationStream};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
@@ -220,12 +220,21 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .collect())
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn translate_stream(
         &self,
         mut request: TranslationRequest,
         cancellation: CancellationToken,
     ) -> Result<TranslationStream, TranslationError> {
-        let protected = protect_source_text(&request.source_text);
+        let protected = protect_source_text_with_glossary(
+            &request.source_text,
+            request.source_locale.as_deref(),
+            &request.target_locale,
+            request.glossary.as_ref(),
+        )
+        .map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+        })?;
         let marker_instruction = if protected.is_empty() {
             String::new()
         } else {
@@ -472,7 +481,7 @@ mod tests {
     use super::{OpenAiCompatibleProvider, OpenAiConfig, SseDecoder, SseMessage};
     use bytes::Bytes;
     use futures_util::StreamExt;
-    use linguamesh_domain::{ErrorKind, SecretValue, TranslationRequest};
+    use linguamesh_domain::{ErrorKind, Glossary, GlossaryEntry, SecretValue, TranslationRequest};
     use linguamesh_provider_api::ModelProvider;
     use std::fmt::Write;
     use std::time::Duration;
@@ -595,8 +604,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn protected_markers_are_restored_across_stream_fragments() {
-        let source = "Keep https://example.com/path and `git status` unchanged.";
+    async fn protected_markers_and_glossary_are_restored_across_stream_fragments() {
+        let source = "Keep https://example.com/path and `git status` with LinguaMesh unchanged.";
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("listener");
@@ -640,6 +649,7 @@ mod tests {
                 .expect("source delimiters")
                 .to_owned();
             assert!(!content.contains("https://example.com/path"));
+            assert!(!content.contains("with LinguaMesh"));
             let marker_start = content.find("__LINGUAMESH_PROTECTED_").expect("marker");
             let split = marker_start + 7;
             let fragments = [&content[..split], &content[split..]];
@@ -669,7 +679,14 @@ mod tests {
         .expect("provider");
         let mut stream = provider
             .translate_stream(
-                TranslationRequest::new(source, "zh-CN", "protected-translator"),
+                TranslationRequest::new(source, "zh-CN", "protected-translator").with_glossary(
+                    Glossary::new(vec![
+                        GlossaryEntry::new("LinguaMesh", "凌瓦网")
+                            .expect("glossary entry")
+                            .with_target_locale("zh-CN"),
+                    ])
+                    .expect("glossary"),
+                ),
                 CancellationToken::new(),
             )
             .await
@@ -678,7 +695,10 @@ mod tests {
         while let Some(delta) = stream.next().await {
             output.push_str(&delta.expect("protected output"));
         }
-        assert_eq!(output, source);
+        assert_eq!(
+            output,
+            "Keep https://example.com/path and `git status` with 凌瓦网 unchanged."
+        );
         server.await.expect("server task");
     }
 }

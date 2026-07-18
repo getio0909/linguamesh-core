@@ -620,6 +620,223 @@ fn is_loopback_endpoint(url: &Url) -> bool {
 
 const PROTECTED_TOKEN_PREFIX: &str = "__LINGUAMESH_PROTECTED_";
 const PROTECTED_TOKEN_SUFFIX: &str = "__";
+const MAX_GLOSSARY_ENTRIES: usize = 256;
+const MAX_GLOSSARY_TERM_BYTES: usize = 512;
+const MAX_GLOSSARY_NOTE_BYTES: usize = 2048;
+
+/// 表示一条请求级词汇表规则。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct GlossaryEntry {
+    /// 源语言术语。
+    pub source_term: String,
+    /// 必须使用的目标语言术语。
+    pub target_term: String,
+    /// 可选的源语言范围。
+    pub source_locale: Option<String>,
+    /// 可选的目标语言范围。
+    pub target_locale: Option<String>,
+    /// 是否区分源术语大小写。
+    pub case_sensitive: bool,
+    /// 是否要求源术语位于词边界。
+    pub whole_word: bool,
+    /// 是否原样保留源术语而不替换为目标术语。
+    pub immutable: bool,
+    /// 可选的领域标签。
+    pub domain: Option<String>,
+    /// 冲突时使用的确定性优先级。
+    pub priority: i32,
+    /// 供用户查看的非秘密备注。
+    pub notes: Option<String>,
+    /// 是否将此规则用于当前请求。
+    pub enabled: bool,
+}
+
+impl GlossaryEntry {
+    /// 创建启用、全词匹配的必需目标译法规则。
+    pub fn new(
+        source_term: impl Into<String>,
+        target_term: impl Into<String>,
+    ) -> Result<Self, GlossaryError> {
+        let entry = Self {
+            source_term: source_term.into(),
+            target_term: target_term.into(),
+            source_locale: None,
+            target_locale: None,
+            case_sensitive: true,
+            whole_word: true,
+            immutable: false,
+            domain: None,
+            priority: 0,
+            notes: None,
+            enabled: true,
+        };
+        entry.validate()?;
+        Ok(entry)
+    }
+
+    /// 设置源语言范围。
+    #[must_use]
+    pub fn with_source_locale(mut self, locale: impl Into<String>) -> Self {
+        self.source_locale = Some(locale.into());
+        self
+    }
+
+    /// 设置目标语言范围。
+    #[must_use]
+    pub fn with_target_locale(mut self, locale: impl Into<String>) -> Self {
+        self.target_locale = Some(locale.into());
+        self
+    }
+
+    /// 设置是否区分大小写。
+    #[must_use]
+    pub const fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
+    /// 设置是否要求词边界。
+    #[must_use]
+    pub const fn with_whole_word(mut self, whole_word: bool) -> Self {
+        self.whole_word = whole_word;
+        self
+    }
+
+    /// 设置是否原样保护源术语。
+    #[must_use]
+    pub const fn with_immutable(mut self, immutable: bool) -> Self {
+        self.immutable = immutable;
+        self
+    }
+
+    /// 设置领域标签。
+    #[must_use]
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
+        self
+    }
+
+    /// 设置确定性优先级。
+    #[must_use]
+    pub const fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// 设置非秘密备注。
+    #[must_use]
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes = Some(notes.into());
+        self
+    }
+
+    /// 设置规则是否启用。
+    #[must_use]
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    fn validate(&self) -> Result<(), GlossaryError> {
+        validate_glossary_text(&self.source_term, MAX_GLOSSARY_TERM_BYTES, "source term")?;
+        validate_glossary_text(&self.target_term, MAX_GLOSSARY_TERM_BYTES, "target term")?;
+        if let Some(locale) = &self.source_locale {
+            validate_glossary_text(locale, 64, "source locale")?;
+        }
+        if let Some(locale) = &self.target_locale {
+            validate_glossary_text(locale, 64, "target locale")?;
+        }
+        if let Some(domain) = &self.domain {
+            validate_glossary_text(domain, 128, "domain")?;
+        }
+        if let Some(notes) = &self.notes {
+            validate_glossary_text(notes, MAX_GLOSSARY_NOTE_BYTES, "notes")?;
+        }
+        Ok(())
+    }
+}
+
+/// 表示一组经过冲突校验的请求级词汇表规则。
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Glossary {
+    entries: Vec<GlossaryEntry>,
+}
+
+impl Glossary {
+    /// 从规则列表创建词汇表并执行确定性冲突校验。
+    pub fn new(entries: Vec<GlossaryEntry>) -> Result<Self, GlossaryError> {
+        let glossary = Self { entries };
+        glossary.validate()?;
+        Ok(glossary)
+    }
+
+    /// 返回词汇表中的规则。
+    #[must_use]
+    pub fn entries(&self) -> &[GlossaryEntry] {
+        &self.entries
+    }
+
+    /// 验证规则数量、字段安全性和同级冲突。
+    pub fn validate(&self) -> Result<(), GlossaryError> {
+        if self.entries.len() > MAX_GLOSSARY_ENTRIES {
+            return Err(GlossaryError::TooManyEntries);
+        }
+        for entry in &self.entries {
+            entry.validate()?;
+        }
+        for (index, left) in self.entries.iter().enumerate() {
+            if !left.enabled {
+                continue;
+            }
+            for right in self.entries.iter().skip(index + 1) {
+                if !right.enabled
+                    || left.source_term != right.source_term
+                    || left.case_sensitive != right.case_sensitive
+                    || left.source_locale != right.source_locale
+                    || left.target_locale != right.target_locale
+                    || left.domain != right.domain
+                    || left.target_term == right.target_term
+                {
+                    continue;
+                }
+                return Err(GlossaryError::ConflictingEntries);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 描述词汇表输入不满足安全或确定性约束。
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum GlossaryError {
+    /// 词汇表规则数量超过上限。
+    #[error("Glossary contains too many entries.")]
+    TooManyEntries,
+    /// 词汇表字段无效。
+    #[error("Glossary {0} is invalid.")]
+    InvalidField(&'static str),
+    /// 同一匹配范围存在不同目标译法。
+    #[error("Glossary contains conflicting entries.")]
+    ConflictingEntries,
+    /// 词汇表字段疑似包含凭据。
+    #[error("Glossary {0} contains credential-like data.")]
+    CredentialLikeValue(&'static str),
+}
+
+fn validate_glossary_text(
+    value: &str,
+    max_bytes: usize,
+    field: &'static str,
+) -> Result<(), GlossaryError> {
+    if value.trim().is_empty() || value.len() > max_bytes || value.contains('\0') {
+        return Err(GlossaryError::InvalidField(field));
+    }
+    if looks_like_credential(value) {
+        return Err(GlossaryError::CredentialLikeValue(field));
+    }
+    Ok(())
+}
 
 /// 表示一个必须在翻译输出中原样恢复的非语言片段。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -628,6 +845,8 @@ pub struct ProtectedSpan {
     token: String,
     /// 用户源文本中的原始片段。
     source: String,
+    /// 恢复时输出的片段，词汇表规则可将源术语替换为必需目标术语。
+    replacement: String,
 }
 
 /// 表示已替换受保护片段的源文本。
@@ -672,30 +891,85 @@ impl ProtectedSource {
 /// 扫描常见结构化片段并替换为不透明占位符。
 #[must_use]
 pub fn protect_source_text(source: &str) -> ProtectedSource {
-    let mut candidates = Vec::new();
-    collect_fenced_code_candidates(source, &mut candidates);
-    collect_inline_code_candidates(source, &mut candidates);
-    collect_placeholder_candidates(source, &mut candidates);
-    collect_url_candidates(source, &mut candidates);
-    collect_email_candidates(source, &mut candidates);
+    build_protected_source(source, None, None, None)
+        .expect("automatic protected-span scanning cannot fail")
+}
 
-    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+/// 按请求语言和词汇表规则保护源文本并返回可校验的恢复器。
+pub fn protect_source_text_with_glossary(
+    source: &str,
+    source_locale: Option<&str>,
+    target_locale: &str,
+    glossary: Option<&Glossary>,
+) -> Result<ProtectedSource, GlossaryError> {
+    build_protected_source(source, source_locale, Some(target_locale), glossary)
+}
+
+struct ProtectedCandidate {
+    start: usize,
+    end: usize,
+    replacement: String,
+    priority: i32,
+}
+
+fn build_protected_source(
+    source: &str,
+    source_locale: Option<&str>,
+    target_locale: Option<&str>,
+    glossary: Option<&Glossary>,
+) -> Result<ProtectedSource, GlossaryError> {
+    if let Some(glossary) = glossary {
+        glossary.validate()?;
+    }
+    let mut candidates = Vec::new();
+    let mut automatic_candidates = Vec::new();
+    collect_fenced_code_candidates(source, &mut automatic_candidates);
+    collect_inline_code_candidates(source, &mut automatic_candidates);
+    collect_placeholder_candidates(source, &mut automatic_candidates);
+    collect_url_candidates(source, &mut automatic_candidates);
+    collect_email_candidates(source, &mut automatic_candidates);
+    candidates.extend(
+        automatic_candidates
+            .into_iter()
+            .map(|(start, end)| ProtectedCandidate {
+                start,
+                end,
+                replacement: source[start..end].to_owned(),
+                priority: i32::MIN,
+            }),
+    );
+    if let (Some(target_locale), Some(glossary)) = (target_locale, glossary) {
+        collect_glossary_candidates(
+            source,
+            source_locale,
+            target_locale,
+            glossary,
+            &mut candidates,
+        );
+    }
+
+    candidates.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| right.priority.cmp(&left.priority))
+            .then_with(|| (right.end - right.start).cmp(&(left.end - left.start)))
+    });
     let mut selected = Vec::new();
-    for (start, end) in candidates {
-        if start < end
+    for candidate in candidates {
+        if candidate.start < candidate.end
             && selected
                 .last()
-                .is_none_or(|(_, previous_end)| start >= *previous_end)
+                .is_none_or(|previous: &ProtectedCandidate| candidate.start >= previous.end)
         {
-            selected.push((start, end));
+            selected.push(candidate);
         }
     }
 
     let mut protected_text = String::with_capacity(source.len());
     let mut spans = Vec::with_capacity(selected.len());
     let mut cursor = 0;
-    for (index, (start, end)) in selected.into_iter().enumerate() {
-        protected_text.push_str(&source[cursor..start]);
+    for (index, candidate) in selected.into_iter().enumerate() {
+        protected_text.push_str(&source[cursor..candidate.start]);
         let mut token = format!("{PROTECTED_TOKEN_PREFIX}{index}{PROTECTED_TOKEN_SUFFIX}");
         while source.contains(&token) {
             token.push('_');
@@ -703,15 +977,16 @@ pub fn protect_source_text(source: &str) -> ProtectedSource {
         protected_text.push_str(&token);
         spans.push(ProtectedSpan {
             token,
-            source: source[start..end].to_owned(),
+            source: source[candidate.start..candidate.end].to_owned(),
+            replacement: candidate.replacement,
         });
-        cursor = end;
+        cursor = candidate.end;
     }
     protected_text.push_str(&source[cursor..]);
-    ProtectedSource {
+    Ok(ProtectedSource {
         text: protected_text,
         spans,
-    }
+    })
 }
 
 /// 描述模型输出中的受保护片段恢复失败。
@@ -768,7 +1043,7 @@ impl ProtectedTextRestorer {
             }
             let plain = self.pending[..position].to_owned();
             append_plain_text(&mut output, &plain)?;
-            output.push_str(&self.spans[index].source);
+            output.push_str(&self.spans[index].replacement);
             let end = position + self.spans[index].token.len();
             self.pending = self.pending[end..].to_owned();
             self.seen[index] = true;
@@ -808,6 +1083,68 @@ fn longest_marker_prefix_suffix(text: &str, spans: &[ProtectedSpan]) -> usize {
         })
         .find_map(|(span, size)| text.ends_with(&span.token[..size]).then_some(size))
         .unwrap_or(0)
+}
+
+fn collect_glossary_candidates(
+    source: &str,
+    source_locale: Option<&str>,
+    target_locale: &str,
+    glossary: &Glossary,
+    candidates: &mut Vec<ProtectedCandidate>,
+) {
+    for entry in glossary.entries().iter().filter(|entry| {
+        entry.enabled
+            && locale_matches(entry.source_locale.as_deref(), source_locale)
+            && locale_matches(entry.target_locale.as_deref(), Some(target_locale))
+    }) {
+        let term_length = entry.source_term.len();
+        if term_length == 0 {
+            continue;
+        }
+        for (start, _) in source.char_indices() {
+            let Some(end) = start.checked_add(term_length) else {
+                continue;
+            };
+            let Some(candidate) = source.get(start..end) else {
+                continue;
+            };
+            let matches = if entry.case_sensitive {
+                candidate == entry.source_term
+            } else {
+                candidate.eq_ignore_ascii_case(&entry.source_term)
+            };
+            if !matches || (entry.whole_word && !is_whole_word_match(source, start, end)) {
+                continue;
+            }
+            candidates.push(ProtectedCandidate {
+                start,
+                end,
+                replacement: if entry.immutable {
+                    candidate.to_owned()
+                } else {
+                    entry.target_term.clone()
+                },
+                priority: entry.priority,
+            });
+        }
+    }
+}
+
+fn locale_matches(configured: Option<&str>, requested: Option<&str>) -> bool {
+    configured.is_none_or(|configured| requested.is_some_and(|requested| configured == requested))
+}
+
+fn is_whole_word_match(source: &str, start: usize, end: usize) -> bool {
+    let left_is_word = source[..start]
+        .chars()
+        .next_back()
+        .is_some_and(is_word_character);
+    let right_is_word = source[end..].chars().next().is_some_and(is_word_character);
+    !left_is_word && !right_is_word
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn collect_fenced_code_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
@@ -959,6 +1296,9 @@ pub struct TranslationRequest {
     pub target_locale: String,
     /// 明确选择的模型标识。
     pub model_id: String,
+    /// 可选的请求级词汇表，不写入持久化配置。
+    #[serde(default)]
+    pub glossary: Option<Glossary>,
 }
 
 impl TranslationRequest {
@@ -976,7 +1316,15 @@ impl TranslationRequest {
             source_locale: None,
             target_locale: target_locale.into(),
             model_id: model_id.into(),
+            glossary: None,
         }
+    }
+
+    /// 附加经过校验的请求级词汇表。
+    #[must_use]
+    pub fn with_glossary(mut self, glossary: Glossary) -> Self {
+        self.glossary = Some(glossary);
+        self
     }
 }
 
@@ -1112,9 +1460,10 @@ impl TranslationEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
-        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef,
-        SecretRefNamespace, SecretValue, TranslationError, TranslationEvent, protect_source_text,
+        CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind, Glossary,
+        GlossaryEntry, GlossaryError, ProfileValidationError, ProtectedTextError, ProviderProfile,
+        ProviderProfileId, SecretRef, SecretRefNamespace, SecretValue, TranslationError,
+        TranslationEvent, protect_source_text, protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1406,5 +1755,50 @@ mod tests {
             unknown.push("__LINGUAMESH_PROTECTED_99__"),
             Err(ProtectedTextError::InvalidMarker)
         );
+    }
+
+    #[test]
+    fn glossary_replaces_required_terms_and_preserves_immutable_names() {
+        let required = GlossaryEntry::new("LinguaMesh", "凌瓦网")
+            .expect("required term")
+            .with_source_locale("en")
+            .with_target_locale("zh-CN");
+        let immutable = GlossaryEntry::new("Acme Product", "Acme Product")
+            .expect("immutable term")
+            .with_source_locale("en")
+            .with_target_locale("zh-CN")
+            .with_immutable(true);
+        let glossary = Glossary::new(vec![required, immutable]).expect("glossary");
+        let protected = protect_source_text_with_glossary(
+            "LinguaMesh ships Acme Product and LinguaMeshX.",
+            Some("en"),
+            "zh-CN",
+            Some(&glossary),
+        )
+        .expect("protected glossary source");
+        assert_eq!(protected.len(), 2);
+        assert!(!protected.text().contains("LinguaMesh ships"));
+        assert!(!protected.text().contains("Acme Product"));
+
+        let mut restorer = protected.restorer();
+        let mut restored_text = restorer.push(protected.text()).expect("restored output");
+        restored_text.push_str(&restorer.finish().expect("finished output"));
+        assert_eq!(restored_text, "凌瓦网 ships Acme Product and LinguaMeshX.");
+        assert!(restored_text.contains("凌瓦网"));
+        assert!(restored_text.contains("Acme Product"));
+    }
+
+    #[test]
+    fn glossary_rejects_conflicts_and_credential_like_fields() {
+        let left = GlossaryEntry::new("term", "one").expect("left");
+        let right = GlossaryEntry::new("term", "two").expect("right");
+        assert_eq!(
+            Glossary::new(vec![left, right]),
+            Err(GlossaryError::ConflictingEntries)
+        );
+        assert!(matches!(
+            GlossaryEntry::new("sk-12345678901234567890", "target"),
+            Err(GlossaryError::CredentialLikeValue("source term"))
+        ));
     }
 }
