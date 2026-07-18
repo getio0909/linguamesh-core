@@ -268,7 +268,7 @@ fn rewrite_xhtml(
         output.push_str(&xml[byte_cursor..span.content_start]);
         match segment.kind {
             DocumentSegmentKind::Verbatim => {
-                output.push_str(&xml[span.content_start..span.content_end])
+                output.push_str(&xml[span.content_start..span.content_end]);
             }
             DocumentSegmentKind::Prose => {
                 let translated = segment
