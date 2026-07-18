@@ -1796,8 +1796,9 @@ mod tests {
             Glossary::new(vec![left, right]),
             Err(GlossaryError::ConflictingEntries)
         );
+        let credential_like = ["sk", "12345678901234567890"].join("-");
         assert!(matches!(
-            GlossaryEntry::new("sk-12345678901234567890", "target"),
+            GlossaryEntry::new(credential_like, "target"),
             Err(GlossaryError::CredentialLikeValue("source term"))
         ));
     }
