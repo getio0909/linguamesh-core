@@ -617,8 +617,12 @@ mod tests {
             let headers = String::from_utf8_lossy(&request[..body_start]);
             let content_length = headers
                 .lines()
-                .find_map(|line| line.strip_prefix("Content-Length: "))
-                .and_then(|value| value.trim().parse::<usize>().ok())
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
                 .expect("content length");
             while request.len() - body_start < content_length {
                 let read = socket.read(&mut chunk).await.expect("request body");
