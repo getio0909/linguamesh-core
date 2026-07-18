@@ -5,7 +5,7 @@ use linguamesh_document::{
     MAX_DOCUMENT_BYTES,
 };
 use linguamesh_domain::{
-    ErrorKind, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
+    ErrorKind, Glossary, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
     ProviderProfileId, SecretRef, TranslationError, TranslationRequest, validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -23,7 +23,9 @@ const TRANSLATION_MEMORY_MIGRATION: &str =
 const DOCUMENT_JOBS_MIGRATION: &str = include_str!("../../../migrations/0006_document_jobs.sql");
 const DOCUMENT_JOB_PAUSE_MIGRATION: &str =
     include_str!("../../../migrations/0007_document_job_pause.sql");
-const LATEST_SCHEMA_VERSION: u32 = 7;
+const DOCUMENT_JOB_OPTIONS_MIGRATION: &str =
+    include_str!("../../../migrations/0008_document_job_options.sql");
+const LATEST_SCHEMA_VERSION: u32 = 8;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -44,6 +46,10 @@ pub const MAX_DOCUMENT_JOBS: usize = 100;
 pub const MAX_DOCUMENT_SEGMENTS: usize = 10_000;
 /// 限制文档任务快照中源文本和译文的总大小。
 pub const MAX_DOCUMENT_JOB_TEXT_BYTES: usize = MAX_DOCUMENT_BYTES;
+/// 限制可恢复文档参数中的单个文本字段大小。
+pub const MAX_DOCUMENT_JOB_OPTION_TEXT_BYTES: usize = 256;
+/// 限制可恢复文档参数中的词汇表 JSON 大小。
+pub const MAX_DOCUMENT_JOB_GLOSSARY_BYTES: usize = 256 * 1024;
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
@@ -52,6 +58,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (5, TRANSLATION_MEMORY_MIGRATION),
     (6, DOCUMENT_JOBS_MIGRATION),
     (7, DOCUMENT_JOB_PAUSE_MIGRATION),
+    (8, DOCUMENT_JOB_OPTIONS_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -103,10 +110,27 @@ pub struct DocumentJobSnapshot {
     pub state: DocumentJobState,
     /// 文档内容和分段快照。
     pub job: DocumentJob,
+    /// 可在重启后复用的非秘密翻译参数。
+    pub options: Option<DocumentJobOptions>,
     /// 任务首次写入时的 Unix 秒时间戳。
     pub created_at: i64,
     /// 任务最近一次状态或段更新时的 Unix 秒时间戳。
     pub updated_at: i64,
+}
+
+/// 描述文档任务需要复用的非秘密翻译参数。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentJobOptions {
+    /// 可选的源语言标签。
+    pub source_locale: Option<String>,
+    /// 目标语言标签。
+    pub target_locale: String,
+    /// 明确选择的模型标识。
+    pub model_id: String,
+    /// 明确选择的提供商配置标识，不包含端点或秘密。
+    pub provider_id: String,
+    /// 请求级词汇表；只保存经过校验的结构化规则。
+    pub glossary: Option<Glossary>,
 }
 
 /// 管理明确迁移的本地数据库。
@@ -233,6 +257,52 @@ impl Storage {
         job_id: &str,
     ) -> Result<Option<DocumentJobSnapshot>, TranslationError> {
         load_document_job(&self.connection, job_id)
+    }
+
+    /// 保存一个文档任务可复用的非秘密翻译参数。
+    pub fn save_document_job_options(
+        &mut self,
+        job_id: &str,
+        options: &DocumentJobOptions,
+    ) -> Result<DocumentJobSnapshot, TranslationError> {
+        validate_document_job_options(options)?;
+        let glossary_json = options
+            .glossary
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "The document glossary could not be serialized.",
+                )
+            })?;
+        let changed = self
+            .connection
+            .execute(
+                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(job_id) DO UPDATE SET source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, provider_id = excluded.provider_id, glossary_json = excluded.glossary_json, updated_at = unixepoch()",
+                params![
+                    job_id,
+                    options.source_locale.as_deref(),
+                    options.target_locale.as_str(),
+                    options.model_id.as_str(),
+                    options.provider_id.as_str(),
+                    glossary_json.as_deref(),
+                ],
+            )
+            .map_err(|error| map_error(&error))?;
+        if changed == 0 {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "The document job options could not be saved.",
+            ));
+        }
+        self.document_job(job_id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The document job options could not be reloaded.",
+            )
+        })
     }
 
     /// 返回按最近更新时间排序的本地文档任务。
@@ -961,6 +1031,45 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
     Ok(())
 }
 
+fn validate_document_job_options(options: &DocumentJobOptions) -> Result<(), TranslationError> {
+    if let Some(source_locale) = options.source_locale.as_deref() {
+        validate_document_option_text(source_locale, "The document source locale is invalid.")?;
+    }
+    validate_document_option_text(
+        &options.target_locale,
+        "The document target locale is invalid.",
+    )?;
+    validate_model_identifier(&options.model_id)
+        .map_err(|_| document_configuration_error("The document model identifier is invalid."))?;
+    ProviderProfileId::parse(&options.provider_id).map_err(|_| {
+        document_configuration_error("The document provider identifier is invalid.")
+    })?;
+    if let Some(glossary) = options.glossary.as_ref() {
+        glossary
+            .validate()
+            .map_err(|_| document_configuration_error("The document glossary is invalid."))?;
+        let encoded = serde_json::to_vec(glossary).map_err(|_| {
+            document_configuration_error("The document glossary could not be serialized.")
+        })?;
+        if encoded.len() > MAX_DOCUMENT_JOB_GLOSSARY_BYTES {
+            return Err(document_configuration_error(
+                "The document glossary exceeds the local size limit.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_document_option_text(value: &str, message: &str) -> Result<(), TranslationError> {
+    if value.is_empty()
+        || value.len() > MAX_DOCUMENT_JOB_OPTION_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(document_configuration_error(message));
+    }
+    Ok(())
+}
+
 fn document_configuration_error(message: &str) -> TranslationError {
     TranslationError::new(ErrorKind::InvalidConfiguration, message)
 }
@@ -1098,13 +1207,64 @@ fn load_document_job(
         segments,
     };
     validate_document_job_identity(job_id, &job)?;
+    let options = load_document_job_options(connection, job_id)?;
     Ok(Some(DocumentJobSnapshot {
         job_id: job_id.to_owned(),
         state: parse_document_job_state(&state)?,
         job,
+        options,
         created_at,
         updated_at,
     }))
+}
+
+fn load_document_job_options(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<DocumentJobOptions>, TranslationError> {
+    let stored = connection
+        .query_row(
+            "SELECT source_locale, target_locale, model_id, provider_id, glossary_json FROM document_job_options WHERE job_id = ?1",
+            params![job_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| map_error(&error))?;
+    let Some((source_locale, target_locale, model_id, provider_id, glossary_json)) = stored else {
+        return Ok(None);
+    };
+    let glossary = glossary_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The stored document glossary is invalid.",
+            )
+        })?;
+    let options = DocumentJobOptions {
+        source_locale,
+        target_locale,
+        model_id,
+        provider_id,
+        glossary,
+    };
+    validate_document_job_options(&options).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored document translation options are invalid.",
+        )
+    })?;
+    Ok(Some(options))
 }
 
 const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
@@ -1325,11 +1485,11 @@ fn normalize_translation_memory_source(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, Storage};
+    use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, Storage};
     use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
-        ErrorKind, ProviderProfile, ProviderProfileId, SecretRef, TranslationPrivacyMode,
-        TranslationRequest,
+        ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, SecretRef,
+        TranslationPrivacyMode, TranslationRequest,
     };
     use rusqlite::Connection;
     use std::fs;
@@ -1358,7 +1518,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 7);
+        assert_eq!(storage.schema_version().expect("version"), 8);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1422,6 +1582,47 @@ mod tests {
         let resumable = reopened.resumable_document_jobs().expect("resumable jobs");
         assert_eq!(resumable.len(), 1);
         assert_eq!(resumable[0].state, DocumentJobState::Paused);
+    }
+
+    #[test]
+    fn document_job_options_round_trip_without_provider_secrets() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("document-job-options.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one");
+        storage
+            .save_document_job("job-options", &job, DocumentJobState::Pending)
+            .expect("save pending");
+        let glossary =
+            Glossary::new(vec![GlossaryEntry::new("one", "一").expect("entry")]).expect("glossary");
+        let options = DocumentJobOptions {
+            source_locale: Some("en".to_owned()),
+            target_locale: "zh-CN".to_owned(),
+            model_id: "model-options".to_owned(),
+            provider_id: "legacy-profile".to_owned(),
+            glossary: Some(glossary),
+        };
+        let saved = storage
+            .save_document_job_options("job-options", &options)
+            .expect("save options");
+        assert_eq!(saved.options, Some(options.clone()));
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopened storage");
+        let loaded = reopened
+            .document_job("job-options")
+            .expect("load job")
+            .expect("job");
+        assert_eq!(loaded.options, Some(options));
+        let mut statement = reopened
+            .connection
+            .prepare("SELECT glossary_json FROM document_job_options")
+            .expect("options query");
+        let glossary_json: String = statement
+            .query_row([], |row| row.get(0))
+            .expect("glossary row");
+        assert!(!glossary_json.contains("api_key"));
+        assert!(!glossary_json.contains("credential"));
     }
 
     #[test]
@@ -1772,7 +1973,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 7);
+        assert_eq!(storage.schema_version().expect("version"), 8);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -1854,7 +2055,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 7);
+        assert_eq!(storage.schema_version().expect("version"), 8);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

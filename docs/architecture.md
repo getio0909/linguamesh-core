@@ -18,7 +18,7 @@ configured provider cannot be revoked, so session closure drops the HTTP future 
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
 
-SQLite migrations currently reach schema version 7. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 8. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown document
 jobs with segment snapshots. The migrations are transactional,
@@ -38,8 +38,10 @@ retains LF/CRLF/CR line endings, and represents Markdown fenced code and blank s
 verbatim segments. Prose segments can be completed independently and the job reconstructs the
 original ordering without allowing untranslated or structural segments to be overwritten. Core schema
 6 persists bounded job metadata and ordered segment snapshots without local paths or credential
-values; schema 7 adds a transactionally migrated paused state. Linux worker startup restores
-pending/running/paused jobs and exposes explicit segment/state commands. Archive formats and a
+values; schema 7 adds a transactionally migrated paused state, and schema 8 adds validated,
+non-secret document translation options. Linux worker startup restores pending/running/paused jobs
+and exposes explicit segment/state commands; resume/retry reuses the saved provider/model/glossary
+only after the active runtime matches. Archive formats and a
 multi-job GUI queue remain future work.
 
 `linguamesh-engine::core_compatibility` reports Core semantic version, ABI major, protocol version,

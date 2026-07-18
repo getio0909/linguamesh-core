@@ -62,6 +62,20 @@ surface shows per-job progress plus pause/resume/retry controls. Android, Window
 remain intentionally out of scope for this Linux-first slice; archive codecs, automatic provider
 parameter persistence, and a multi-job queue remain open.
 
+## 2026-07-18 — Linux document restart options checkpoint
+
+Assumption: only non-secret translation parameters are reusable after restart. The active provider
+profile and selected model must match the saved identifiers; endpoints, credentials, session secrets,
+and privacy-mode state remain runtime-only.
+
+Implemented Core schema 8 with bounded, validated `document_job_options` persistence for source and
+target locales, model/provider identifiers, and optional glossary JSON. Linux Translate saves these
+options before entering the running state; Resume and Retry load them from storage, require the
+matching active provider/model, and resume with standard privacy. A worker restart test pauses a
+slow job, reconnects to a fresh worker/provider, and completes the saved job without UI parameters.
+Android, Windows, and macOS remain intentionally out of scope; archive codecs, automatic provider
+discovery, and multi-job queue selection remain open.
+
 ## 2026-07-18 — TXT/Markdown document contract
 
 Assumption: the first Linux-first document slice treats TXT and Markdown as bounded UTF-8 line
