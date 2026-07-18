@@ -152,10 +152,10 @@ impl DocumentJob {
     #[must_use]
     pub fn from_text(source_name: impl Into<String>, format: DocumentFormat, text: &str) -> Self {
         let source_name = source_name.into();
-        if matches!(format, DocumentFormat::Csv) {
-            if let Ok(job) = from_csv_text(source_name.clone(), text, None) {
-                return job;
-            }
+        if matches!(format, DocumentFormat::Csv)
+            && let Ok(job) = from_csv_text(source_name.clone(), text, None)
+        {
+            return job;
         }
         let mut in_fenced_code = false;
         let subtitle_kinds = subtitle_line_kinds(format, text);
