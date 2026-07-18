@@ -2,7 +2,7 @@
 
 use linguamesh_domain::{
     ErrorKind, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
-    ProviderProfileId, SecretRef, TranslationError, validate_model_identifier,
+    ProviderProfileId, SecretRef, TranslationError, TranslationRequest, validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
@@ -10,11 +10,35 @@ use std::path::Path;
 const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_initial.sql");
 const PROVIDER_PROFILE_STATE_MIGRATION: &str =
     include_str!("../../../migrations/0002_provider_profile_state.sql");
-const LATEST_SCHEMA_VERSION: u32 = 2;
+const TRANSLATION_HISTORY_MIGRATION: &str =
+    include_str!("../../../migrations/0003_translation_history.sql");
+const LATEST_SCHEMA_VERSION: u32 = 3;
+/// 限制本地历史记录的数量，避免数据库无限增长。
+pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
+/// 限制单条历史记录中源文本和译文的大小。
+pub const MAX_TRANSLATION_HISTORY_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
+    (3, TRANSLATION_HISTORY_MIGRATION),
 ];
+
+/// 描述一条已完成且允许持久化的文本翻译历史。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranslationHistoryEntry {
+    /// 一次翻译操作的稳定标识。
+    pub operation_id: String,
+    /// 原始源文本。
+    pub source_text: String,
+    /// 已完成的译文。
+    pub translated_text: String,
+    /// 可选的源语言标签。
+    pub source_locale: Option<String>,
+    /// 目标语言标签。
+    pub target_locale: String,
+    /// 使用的模型标识。
+    pub model_id: String,
+}
 
 /// 管理明确迁移的本地数据库。
 pub struct Storage {
@@ -134,6 +158,67 @@ impl Storage {
             })
             .map_err(|error| map_error(&error))?
             .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 返回本地翻译历史记录数。
+    pub fn translation_history_count(&self) -> Result<usize, TranslationError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM translation_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 写入一条非隐身翻译历史并裁剪最旧记录。
+    pub fn record_translation_history(
+        &mut self,
+        request: &TranslationRequest,
+        translated_text: &str,
+    ) -> Result<(), TranslationError> {
+        if request.is_incognito() {
+            return Ok(());
+        }
+        if request.source_text.len() > MAX_TRANSLATION_HISTORY_TEXT_BYTES
+            || translated_text.len() > MAX_TRANSLATION_HISTORY_TEXT_BYTES
+        {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Translation history entry exceeds the local size limit.",
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO translation_history (operation_id, source_text, translated_text, source_locale, target_locale, model_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(operation_id) DO UPDATE SET source_text = excluded.source_text, translated_text = excluded.translated_text, source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, created_at = unixepoch()",
+                params![
+                    request.operation_id.as_str(),
+                    request.source_text.as_str(),
+                    translated_text,
+                    request.source_locale.as_deref(),
+                    request.target_locale.as_str(),
+                    request.model_id.as_str(),
+                ],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM translation_history WHERE operation_id IN (SELECT operation_id FROM translation_history ORDER BY created_at DESC, operation_id DESC LIMIT -1 OFFSET ?1)",
+                params![i64::try_from(MAX_TRANSLATION_HISTORY_ENTRIES).unwrap_or(i64::MAX)],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction.commit().map_err(|error| map_error(&error))
+    }
+
+    /// 清空全部本地翻译历史。
+    pub fn clear_translation_history(&mut self) -> Result<(), TranslationError> {
+        self.connection
+            .execute("DELETE FROM translation_history", [])
+            .map(|_| ())
             .map_err(|error| map_error(&error))
     }
 
@@ -489,7 +574,10 @@ fn map_error(error: &rusqlite::Error) -> TranslationError {
 #[cfg(test)]
 mod tests {
     use super::{INITIAL_MIGRATION, Storage};
-    use linguamesh_domain::{ErrorKind, ProviderProfile, ProviderProfileId, SecretRef};
+    use linguamesh_domain::{
+        ErrorKind, ProviderProfile, ProviderProfileId, SecretRef, TranslationPrivacyMode,
+        TranslationRequest,
+    };
     use rusqlite::Connection;
     use std::fs;
     #[cfg(unix)]
@@ -517,7 +605,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 2);
+        assert_eq!(storage.schema_version().expect("version"), 3);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -525,6 +613,49 @@ mod tests {
             Some("manual-model")
         );
         assert_eq!(storage.manual_models().expect("models").len(), 1);
+    }
+
+    #[test]
+    fn translation_history_respects_incognito_and_clear_controls() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let request = TranslationRequest::new("Hello", "zh-CN", "fake-translator");
+        storage
+            .record_translation_history(&request, "你好")
+            .expect("history");
+        assert_eq!(storage.translation_history_count().expect("count"), 1);
+
+        let incognito = TranslationRequest::new("Private", "zh-CN", "fake-translator")
+            .with_privacy_mode(TranslationPrivacyMode::Incognito);
+        storage
+            .record_translation_history(&incognito, "私密")
+            .expect("incognito history is skipped");
+        assert_eq!(storage.translation_history_count().expect("count"), 1);
+
+        storage.clear_translation_history().expect("clear history");
+        assert_eq!(storage.translation_history_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn translation_history_is_bounded_and_rejects_oversized_text() {
+        let mut storage = Storage::in_memory().expect("storage");
+        for index in 0..(super::MAX_TRANSLATION_HISTORY_ENTRIES + 3) {
+            let request =
+                TranslationRequest::new(format!("source-{index}"), "zh-CN", "fake-translator");
+            storage
+                .record_translation_history(&request, "translated")
+                .expect("history");
+        }
+        assert_eq!(
+            storage.translation_history_count().expect("count"),
+            super::MAX_TRANSLATION_HISTORY_ENTRIES
+        );
+
+        let request = TranslationRequest::new("oversized", "zh-CN", "fake-translator");
+        let oversized = "x".repeat(super::MAX_TRANSLATION_HISTORY_TEXT_BYTES + 1);
+        let error = storage
+            .record_translation_history(&request, &oversized)
+            .expect_err("oversized history");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
     }
 
     #[cfg(unix)]
@@ -641,7 +772,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 2);
+        assert_eq!(storage.schema_version().expect("version"), 3);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -723,7 +854,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 2);
+        assert_eq!(storage.schema_version().expect("version"), 3);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
