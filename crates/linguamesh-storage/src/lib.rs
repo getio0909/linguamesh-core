@@ -28,6 +28,8 @@ const MIGRATIONS: &[(u32, &str)] = &[
 pub struct TranslationHistoryEntry {
     /// 一次翻译操作的稳定标识。
     pub operation_id: String,
+    /// 记录写入时的 Unix 秒时间戳。
+    pub created_at: i64,
     /// 原始源文本。
     pub source_text: String,
     /// 已完成的译文。
@@ -171,6 +173,35 @@ impl Storage {
             .map_err(|error| map_error(&error))
     }
 
+    /// 按最新写入顺序返回有限数量的本地翻译历史。
+    pub fn translation_history(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TranslationHistoryEntry>, TranslationError> {
+        let limit = limit.min(MAX_TRANSLATION_HISTORY_ENTRIES);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT operation_id, created_at, source_text, translated_text, source_locale, target_locale, model_id FROM translation_history ORDER BY created_at DESC, operation_id DESC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok(TranslationHistoryEntry {
+                    operation_id: row.get(0)?,
+                    created_at: row.get(1)?,
+                    source_text: row.get(2)?,
+                    translated_text: row.get(3)?,
+                    source_locale: row.get(4)?,
+                    target_locale: row.get(5)?,
+                    model_id: row.get(6)?,
+                })
+            })
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))
+    }
+
     /// 写入一条非隐身翻译历史并裁剪最旧记录。
     pub fn record_translation_history(
         &mut self,
@@ -220,6 +251,21 @@ impl Storage {
             .execute("DELETE FROM translation_history", [])
             .map(|_| ())
             .map_err(|error| map_error(&error))
+    }
+
+    /// 删除指定操作标识对应的本地翻译历史，并返回是否找到记录。
+    pub fn delete_translation_history_entry(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<bool, TranslationError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM translation_history WHERE operation_id = ?1",
+                params![operation_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(deleted != 0)
     }
 
     /// 原子保存提供商配置及其最近模型。
@@ -656,6 +702,38 @@ mod tests {
             .record_translation_history(&request, &oversized)
             .expect_err("oversized history");
         assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+    }
+
+    #[test]
+    fn translation_history_lists_newest_entries_and_deletes_one_entry() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let mut first = TranslationRequest::new("first", "zh-CN", "model-a");
+        first.operation_id = linguamesh_domain::OperationId::from_value("operation-a");
+        let mut second = TranslationRequest::new("second", "zh-CN", "model-b");
+        second.operation_id = linguamesh_domain::OperationId::from_value("operation-b");
+        storage
+            .record_translation_history(&first, "第一条")
+            .expect("first history");
+        storage
+            .record_translation_history(&second, "第二条")
+            .expect("second history");
+
+        let entries = storage.translation_history(10).expect("list history");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].operation_id, "operation-b");
+        assert_eq!(entries[0].source_text, "second");
+        assert!(entries[0].created_at > 0);
+        assert!(
+            storage
+                .delete_translation_history_entry("operation-a")
+                .expect("delete history")
+        );
+        assert!(
+            !storage
+                .delete_translation_history_entry("missing")
+                .expect("missing delete")
+        );
+        assert_eq!(storage.translation_history_count().expect("count"), 1);
     }
 
     #[cfg(unix)]

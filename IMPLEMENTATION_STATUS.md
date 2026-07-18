@@ -273,3 +273,24 @@ Remaining for the Linux secure-provider checkpoint:
   for persistent credentials, and prove the Linux save/restart/translation path in native CI.
 - The C ABI still rejects host-response messages and does not project semantic/catalog/feature
   negotiation. File leases and other complete Milestone 2 host services remain unimplemented.
+
+## 2026-07-18 — Linux history controls contract
+
+Assumption: Linux history inspection uses the existing bounded schema-3 table and returns at most
+`MAX_TRANSLATION_HISTORY_ENTRIES`; clients remain responsible for presenting and exporting entries.
+
+Implemented:
+
+- `Storage::translation_history` returns newest-first entries with stable operation IDs, timestamps,
+  locales, model IDs, source text, and translated text.
+- `Storage::delete_translation_history_entry` deletes exactly one operation ID and reports whether a
+  row existed; SQL parameters remain bound and no credential columns are introduced.
+- Storage regression coverage verifies newest ordering, timestamp presence, exact deletion, and a
+  missing-entry no-op alongside the existing Incognito, clear, size, and count tests.
+
+Validated locally with Rust 1.93.0:
+
+- `cargo fmt --all` passed.
+- `cargo test -p linguamesh-storage --all-targets --all-features --offline` passed: 14 tests,
+  0 failed.
+- `git diff --check` passed.
