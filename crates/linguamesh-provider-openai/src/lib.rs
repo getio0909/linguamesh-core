@@ -5,14 +5,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
-    EndpointConfiguration, ErrorKind, ModelDescriptor, ModelSource, ProtectedTextError,
-    SecretValue, TranslationError, TranslationRequest, protect_source_text_with_glossary,
+    ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
+    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
+    TranslationError, TranslationRequest, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{ModelProvider, TranslationStream};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -69,10 +70,11 @@ impl fmt::Debug for OpenAiConfig {
 }
 
 /// 实现模型发现和 Chat Completions 流。
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     client: Client,
     base_url: Url,
-    credential: Mutex<CredentialState>,
+    credential: Arc<Mutex<CredentialState>>,
     session_cancellation: CancellationToken,
 }
 
@@ -118,11 +120,11 @@ impl OpenAiCompatibleProvider {
         Ok(Self {
             client,
             base_url,
-            credential: Mutex::new(
+            credential: Arc::new(Mutex::new(
                 config
                     .credential
                     .map_or(CredentialState::NotRequired, CredentialState::Available),
-            ),
+            )),
             session_cancellation: CancellationToken::new(),
         })
     }
@@ -174,74 +176,19 @@ impl OpenAiCompatibleProvider {
             TranslationError::new(ErrorKind::InvalidEndpoint, "Provider endpoint is invalid.")
         })
     }
-}
 
-fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
-    let endpoint = EndpointConfiguration::parse(base_url).map_err(|_| {
-        TranslationError::new(
-            ErrorKind::InvalidEndpoint,
-            "Provider endpoint is invalid or unsafe.",
-        )
-    })?;
-    Url::parse(endpoint.as_str()).map_err(|_| {
-        TranslationError::new(
-            ErrorKind::InvalidEndpoint,
-            "Provider endpoint is invalid or unsafe.",
-        )
-    })
-}
-
-#[async_trait]
-impl ModelProvider for OpenAiCompatibleProvider {
-    async fn list_models(&self) -> Result<Vec<ModelDescriptor>, TranslationError> {
-        let request = self
-            .request(self.client.get(self.endpoint("models")?))?
-            .send();
-        let response = tokio::select! {
-            biased;
-            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
-            response = request => response.map_err(|error| map_reqwest_error(&error))?,
-        };
-        let response = ensure_success(response)?;
-        let body_request = response.json();
-        let body: ModelListResponse = tokio::select! {
-            biased;
-            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
-            body = body_request => body.map_err(|error| map_reqwest_error(&error))?,
-        };
-        Ok(body
-            .data
-            .into_iter()
-            .map(|model| ModelDescriptor {
-                display_name: model.id.clone(),
-                id: model.id,
-                source: ModelSource::Discovered,
-            })
-            .collect())
-    }
-
-    #[allow(clippy::too_many_lines)]
-    async fn translate_stream(
+    async fn translate_protected_stream(
         &self,
-        mut request: TranslationRequest,
+        request: TranslationRequest,
+        protected: ProtectedSource,
         cancellation: CancellationToken,
     ) -> Result<TranslationStream, TranslationError> {
-        let protected = protect_source_text_with_glossary(
-            &request.source_text,
-            request.source_locale.as_deref(),
-            &request.target_locale,
-            request.glossary.as_ref(),
-        )
-        .map_err(|error| {
-            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
-        })?;
         let marker_instruction = if protected.is_empty() {
             String::new()
         } else {
             " Preserve every opaque marker such as __LINGUAMESH_PROTECTED_0__ exactly once."
                 .to_owned()
         };
-        request.source_text = protected.text().to_owned();
         let mut span_restorer = protected.restorer();
         let body = ChatRequest {
             model: request.model_id,
@@ -331,6 +278,106 @@ impl ModelProvider for OpenAiCompatibleProvider {
         };
         Ok(Box::pin(stream))
     }
+}
+
+fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
+    let endpoint = EndpointConfiguration::parse(base_url).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "Provider endpoint is invalid or unsafe.",
+        )
+    })?;
+    Url::parse(endpoint.as_str()).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "Provider endpoint is invalid or unsafe.",
+        )
+    })
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiCompatibleProvider {
+    async fn list_models(&self) -> Result<Vec<ModelDescriptor>, TranslationError> {
+        let request = self
+            .request(self.client.get(self.endpoint("models")?))?
+            .send();
+        let response = tokio::select! {
+            biased;
+            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            response = request => response.map_err(|error| map_reqwest_error(&error))?,
+        };
+        let response = ensure_success(response)?;
+        let body_request = response.json();
+        let body: ModelListResponse = tokio::select! {
+            biased;
+            () = self.session_cancellation.cancelled() => return Err(TranslationError::cancelled()),
+            body = body_request => body.map_err(|error| map_reqwest_error(&error))?,
+        };
+        Ok(body
+            .data
+            .into_iter()
+            .map(|model| ModelDescriptor {
+                display_name: model.id.clone(),
+                id: model.id,
+                source: ModelSource::Discovered,
+            })
+            .collect())
+    }
+
+    async fn translate_stream(
+        &self,
+        request: TranslationRequest,
+        cancellation: CancellationToken,
+    ) -> Result<TranslationStream, TranslationError> {
+        let protected = protect_source_text_with_glossary(
+            &request.source_text,
+            request.source_locale.as_deref(),
+            &request.target_locale,
+            request.glossary.as_ref(),
+        )
+        .map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+        })?;
+        let max_chunk_bytes = request
+            .max_chunk_bytes
+            .unwrap_or(DEFAULT_TRANSLATION_CHUNK_BYTES);
+        let mut chunks = protected
+            .chunks(max_chunk_bytes)
+            .map_err(map_chunking_error)?;
+        let first_chunk = chunks.drain(..1).next().ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Translation source produced no chunks.",
+            )
+        })?;
+        let mut first_request = request.clone();
+        first_request.source_text = first_chunk.text().to_owned();
+        let first_stream = self
+            .translate_protected_stream(first_request, first_chunk, cancellation.clone())
+            .await?;
+        let provider = self.clone();
+        let stream = try_stream! {
+            let mut chunk_stream = first_stream;
+            while let Some(delta) = chunk_stream.next().await {
+                yield delta?;
+            }
+            for chunk in chunks {
+                let mut chunk_request = request.clone();
+                chunk_request.source_text = chunk.text().to_owned();
+                let mut chunk_stream = provider
+                    .translate_protected_stream(chunk_request, chunk, cancellation.clone())
+                    .await?;
+                while let Some(delta) = chunk_stream.next().await {
+                    yield delta?;
+                }
+            }
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+fn map_chunking_error(error: ChunkingError) -> TranslationError {
+    TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
 }
 
 fn map_protected_error(error: &ProtectedTextError) -> TranslationError {
@@ -484,6 +531,7 @@ mod tests {
     use linguamesh_domain::{ErrorKind, Glossary, GlossaryEntry, SecretValue, TranslationRequest};
     use linguamesh_provider_api::ModelProvider;
     use std::fmt::Write;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -700,5 +748,34 @@ mod tests {
             "Keep https://example.com/path and `git status` with 凌瓦网 unchanged."
         );
         server.await.expect("server task");
+    }
+
+    #[tokio::test]
+    async fn long_text_is_chunked_in_order_and_each_chunk_streams() {
+        let server = linguamesh_testkit::FakeProviderServer::start()
+            .await
+            .expect("server");
+        let requests = server.chat_request_counter();
+        let provider =
+            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(server.base_url()))
+                .expect("provider");
+        let request = TranslationRequest::new(
+            "First sentence. Second sentence. Third sentence.",
+            "zh-CN",
+            "fake-translator",
+        )
+        .with_max_chunk_bytes(20);
+        let mut stream = provider
+            .translate_stream(request, CancellationToken::new())
+            .await
+            .expect("stream");
+        let mut output = String::new();
+        while let Some(delta) = stream.next().await {
+            output.push_str(&delta.expect("chunk output"));
+        }
+        let request_count = requests.load(Ordering::SeqCst);
+        assert!(request_count > 1);
+        assert_eq!(output, "你好，LinguaMesh！".repeat(request_count));
+        server.shutdown().await;
     }
 }

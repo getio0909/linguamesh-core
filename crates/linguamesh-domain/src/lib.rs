@@ -620,6 +620,8 @@ fn is_loopback_endpoint(url: &Url) -> bool {
 
 const PROTECTED_TOKEN_PREFIX: &str = "__LINGUAMESH_PROTECTED_";
 const PROTECTED_TOKEN_SUFFIX: &str = "__";
+/// 未提供 tokenizer 时使用的保守近似分段上限。
+pub const DEFAULT_TRANSLATION_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_GLOSSARY_ENTRIES: usize = 256;
 const MAX_GLOSSARY_TERM_BYTES: usize = 512;
 const MAX_GLOSSARY_NOTE_BYTES: usize = 2048;
@@ -886,6 +888,105 @@ impl ProtectedSource {
             seen: vec![false; self.spans.len()],
         }
     }
+
+    /// 按安全字节上限和语义边界拆分受保护源文本。
+    pub fn chunks(&self, max_bytes: usize) -> Result<Vec<Self>, ChunkingError> {
+        let tokens = self
+            .spans
+            .iter()
+            .map(|span| span.token.as_str())
+            .collect::<Vec<_>>();
+        let pieces = split_protected_text(&self.text, max_bytes, &tokens)?;
+        let mut used = vec![false; self.spans.len()];
+        let mut chunks = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let mut spans = Vec::new();
+            for (index, span) in self.spans.iter().enumerate() {
+                if piece.contains(&span.token) {
+                    if used[index] {
+                        return Err(ChunkingError::ProtectedSpanSplit);
+                    }
+                    used[index] = true;
+                    spans.push(span.clone());
+                }
+            }
+            chunks.push(Self { text: piece, spans });
+        }
+        if used.iter().any(|was_used| !was_used) {
+            return Err(ChunkingError::ProtectedSpanSplit);
+        }
+        Ok(chunks)
+    }
+}
+
+/// 描述长文本分段无法满足安全边界的原因。
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ChunkingError {
+    /// 分段上限无效。
+    #[error("Translation chunk size must be greater than zero.")]
+    InvalidLimit,
+    /// 单个受保护片段超过分段上限。
+    #[error("A protected span exceeds the translation chunk size.")]
+    ProtectedSpanTooLarge,
+    /// 分段无法保持受保护片段完整。
+    #[error("Translation chunking would split a protected span.")]
+    ProtectedSpanSplit,
+}
+
+fn split_protected_text(
+    text: &str,
+    max_bytes: usize,
+    protected_tokens: &[&str],
+) -> Result<Vec<String>, ChunkingError> {
+    if max_bytes == 0 {
+        return Err(ChunkingError::InvalidLimit);
+    }
+    if text.is_empty() {
+        return Ok(vec![String::new()]);
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut limit = (start + max_bytes).min(text.len());
+        while limit > start && !text.is_char_boundary(limit) {
+            limit -= 1;
+        }
+        let crossing_span = protected_tokens.iter().find_map(|token| {
+            let relative = text[start..].find(token)?;
+            let token_start = start + relative;
+            let token_end = token_start + token.len();
+            (token_start < limit && token_end > limit).then_some((token_start, token_end))
+        });
+        if let Some((token_start, token_end)) = crossing_span {
+            if token_start == start {
+                return Err(ChunkingError::ProtectedSpanTooLarge);
+            }
+            limit = token_start;
+            if token_end - token_start > max_bytes {
+                return Err(ChunkingError::ProtectedSpanTooLarge);
+            }
+        }
+        let boundary = semantic_boundary(text, start, limit);
+        if boundary <= start {
+            return Err(ChunkingError::ProtectedSpanSplit);
+        }
+        chunks.push(text[start..boundary].to_owned());
+        start = boundary;
+    }
+    Ok(chunks)
+}
+
+fn semantic_boundary(text: &str, start: usize, limit: usize) -> usize {
+    let mut preferred = None;
+    for (relative, character) in text[start..limit].char_indices() {
+        let end = start + relative + character.len_utf8();
+        if matches!(character, '\n' | '.' | '!' | '?' | '。' | '！' | '？')
+            || character.is_whitespace()
+        {
+            preferred = Some(end);
+        }
+    }
+    preferred.unwrap_or(limit)
 }
 
 /// 扫描常见结构化片段并替换为不透明占位符。
@@ -1299,6 +1400,9 @@ pub struct TranslationRequest {
     /// 可选的请求级词汇表，不写入持久化配置。
     #[serde(default)]
     pub glossary: Option<Glossary>,
+    /// 可选的近似分段字节上限，用于长文本安全分段。
+    #[serde(default)]
+    pub max_chunk_bytes: Option<usize>,
 }
 
 impl TranslationRequest {
@@ -1317,6 +1421,7 @@ impl TranslationRequest {
             target_locale: target_locale.into(),
             model_id: model_id.into(),
             glossary: None,
+            max_chunk_bytes: None,
         }
     }
 
@@ -1324,6 +1429,13 @@ impl TranslationRequest {
     #[must_use]
     pub fn with_glossary(mut self, glossary: Glossary) -> Self {
         self.glossary = Some(glossary);
+        self
+    }
+
+    /// 设置近似长文本分段字节上限。
+    #[must_use]
+    pub const fn with_max_chunk_bytes(mut self, max_chunk_bytes: usize) -> Self {
+        self.max_chunk_bytes = Some(max_chunk_bytes);
         self
     }
 }
@@ -1460,10 +1572,10 @@ impl TranslationEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind, Glossary,
-        GlossaryEntry, GlossaryError, ProfileValidationError, ProtectedTextError, ProviderProfile,
-        ProviderProfileId, SecretRef, SecretRefNamespace, SecretValue, TranslationError,
-        TranslationEvent, protect_source_text, protect_source_text_with_glossary,
+        ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
+        Glossary, GlossaryEntry, GlossaryError, ProfileValidationError, ProtectedTextError,
+        ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace, SecretValue,
+        TranslationError, TranslationEvent, protect_source_text, protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1801,5 +1913,42 @@ mod tests {
             GlossaryEntry::new(credential_like, "target"),
             Err(GlossaryError::CredentialLikeValue("source term"))
         ));
+    }
+
+    #[test]
+    fn protected_source_chunks_on_semantic_boundaries_without_splitting_markers() {
+        let glossary = Glossary::new(vec![
+            GlossaryEntry::new("LinguaMesh", "凌瓦网").expect("glossary entry"),
+        ])
+        .expect("glossary");
+        let protected = protect_source_text_with_glossary(
+            "First sentence with LinguaMesh. Second sentence keeps https://example.com/path.",
+            None,
+            "zh-CN",
+            Some(&glossary),
+        )
+        .expect("protected source");
+        let chunks = protected.chunks(48).expect("chunks");
+        assert!(chunks.len() > 1);
+        let mut restored_text = String::new();
+        for chunk in chunks {
+            let mut chunk_restorer = chunk.restorer();
+            restored_text.push_str(&chunk_restorer.push(chunk.text()).expect("chunk output"));
+            restored_text.push_str(&chunk_restorer.finish().expect("chunk complete"));
+        }
+        assert_eq!(
+            restored_text,
+            "First sentence with 凌瓦网. Second sentence keeps https://example.com/path."
+        );
+    }
+
+    #[test]
+    fn protected_source_rejects_a_chunk_limit_that_cuts_a_marker() {
+        let protected = protect_source_text("Keep https://example.com/path unchanged.");
+        let marker_size = protected.text().find(' ').expect("marker boundary");
+        assert_eq!(
+            protected.chunks(marker_size),
+            Err(ChunkingError::ProtectedSpanTooLarge)
+        );
     }
 }

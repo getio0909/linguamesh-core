@@ -803,6 +803,7 @@ dependencies = [
  "futures-util",
  "linguamesh-domain",
  "linguamesh-provider-api",
+ "linguamesh-testkit",
  "reqwest",
  "serde",
  "serde_json",

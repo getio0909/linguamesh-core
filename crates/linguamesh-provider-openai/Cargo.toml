@@ -18,5 +18,8 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+[dev-dependencies]
+linguamesh-testkit.workspace = true
+
 [lints]
 workspace = true

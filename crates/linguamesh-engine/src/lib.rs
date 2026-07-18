@@ -24,6 +24,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "typed_rust_host_secret_broker_v1",
     "model_discovery_v1",
     "protected_spans_v1",
+    "long_text_chunking_v1",
     "provider_profile_persistence_v1",
     "streaming_text_v1",
     "text_translation_v1",
