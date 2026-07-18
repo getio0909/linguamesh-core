@@ -625,6 +625,10 @@ pub const DEFAULT_TRANSLATION_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_GLOSSARY_ENTRIES: usize = 256;
 const MAX_GLOSSARY_TERM_BYTES: usize = 512;
 const MAX_GLOSSARY_NOTE_BYTES: usize = 2048;
+/// 词汇表 CSV 文件的最大 UTF-8 字节数。
+pub const MAX_GLOSSARY_CSV_BYTES: usize = 4 * 1024 * 1024;
+/// 词汇表 CSV 的固定列顺序。
+pub const GLOSSARY_CSV_HEADER: &str = "source_term,target_term,source_locale,target_locale,case_sensitive,whole_word,immutable,domain,priority,notes,enabled";
 
 /// 表示一条请求级词汇表规则。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -807,6 +811,238 @@ impl Glossary {
         }
         Ok(())
     }
+
+    /// 从带有固定列头的 UTF-8 CSV 文件导入词汇表。
+    pub fn from_csv(source: &str) -> Result<Self, GlossaryCsvError> {
+        if source.len() > MAX_GLOSSARY_CSV_BYTES {
+            return Err(GlossaryCsvError::TooLarge);
+        }
+        let mut records = parse_csv_records(source)?;
+        if records.is_empty() {
+            return Err(GlossaryCsvError::MissingHeader);
+        }
+        let header = records.remove(0);
+        let expected = GLOSSARY_CSV_HEADER
+            .split(',')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if header != expected {
+            return Err(GlossaryCsvError::InvalidHeader);
+        }
+        if records.len() > MAX_GLOSSARY_ENTRIES {
+            return Err(GlossaryCsvError::TooManyRows);
+        }
+        let mut entries = Vec::with_capacity(records.len());
+        for (index, record) in records.into_iter().enumerate() {
+            if record.len() != expected.len() {
+                return Err(GlossaryCsvError::InvalidRow(index + 2));
+            }
+            entries.push(parse_glossary_entry(&record, index + 2)?);
+        }
+        Self::new(entries).map_err(GlossaryCsvError::Glossary)
+    }
+
+    /// 以固定列顺序导出可重复生成的 UTF-8 CSV 文件。
+    #[must_use]
+    pub fn to_csv(&self) -> String {
+        let mut output = String::from(GLOSSARY_CSV_HEADER);
+        output.push('\n');
+        for entry in &self.entries {
+            let row = [
+                entry.source_term.as_str(),
+                entry.target_term.as_str(),
+                entry.source_locale.as_deref().unwrap_or_default(),
+                entry.target_locale.as_deref().unwrap_or_default(),
+                bool_to_csv(entry.case_sensitive),
+                bool_to_csv(entry.whole_word),
+                bool_to_csv(entry.immutable),
+                entry.domain.as_deref().unwrap_or_default(),
+                &entry.priority.to_string(),
+                entry.notes.as_deref().unwrap_or_default(),
+                bool_to_csv(entry.enabled),
+            ];
+            for (column, value) in row.iter().enumerate() {
+                if column > 0 {
+                    output.push(',');
+                }
+                append_csv_field(&mut output, value);
+            }
+            output.push('\n');
+        }
+        output
+    }
+}
+
+/// 描述词汇表 CSV 输入不满足安全或结构约束的原因。
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum GlossaryCsvError {
+    /// 文件超过允许的 UTF-8 字节上限。
+    #[error("Glossary CSV exceeds the 4 MiB size limit.")]
+    TooLarge,
+    /// 文件没有列头。
+    #[error("Glossary CSV is missing its header row.")]
+    MissingHeader,
+    /// 列头不是当前规范列头。
+    #[error("Glossary CSV header does not match the supported schema.")]
+    InvalidHeader,
+    /// 数据行数量超过上限。
+    #[error("Glossary CSV contains too many rows.")]
+    TooManyRows,
+    /// CSV 引号或换行结构无效。
+    #[error("Glossary CSV contains malformed quoting.")]
+    Malformed,
+    /// 数据行列数不正确。
+    #[error("Glossary CSV row {0} has an invalid column count.")]
+    InvalidRow(usize),
+    /// 布尔值、优先级或字段内容无效。
+    #[error("Glossary CSV row {0} contains an invalid value.")]
+    InvalidValue(usize),
+    /// 行中的词汇表规则未通过领域校验。
+    #[error("Glossary CSV row {row} is invalid: {error}")]
+    InvalidEntry { row: usize, error: GlossaryError },
+    /// 导入后的词汇表存在冲突。
+    #[error("Glossary CSV contains invalid glossary rules: {0}")]
+    Glossary(GlossaryError),
+}
+
+fn parse_glossary_entry(record: &[String], row: usize) -> Result<GlossaryEntry, GlossaryCsvError> {
+    let parse_bool = |value: &str| match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(GlossaryCsvError::InvalidValue(row)),
+    };
+    let mut entry = GlossaryEntry::new(&record[0], &record[1])
+        .map_err(|error| GlossaryCsvError::InvalidEntry { row, error })?;
+    if !record[2].is_empty() {
+        entry = entry.with_source_locale(&record[2]);
+    }
+    if !record[3].is_empty() {
+        entry = entry.with_target_locale(&record[3]);
+    }
+    entry = entry
+        .with_case_sensitive(parse_bool(&record[4])?)
+        .with_whole_word(parse_bool(&record[5])?)
+        .with_immutable(parse_bool(&record[6])?);
+    if !record[7].is_empty() {
+        entry = entry.with_domain(&record[7]);
+    }
+    entry = entry.with_priority(
+        record[8]
+            .parse::<i32>()
+            .map_err(|_| GlossaryCsvError::InvalidValue(row))?,
+    );
+    if !record[9].is_empty() {
+        entry = entry.with_notes(&record[9]);
+    }
+    entry = entry.with_enabled(parse_bool(&record[10])?);
+    entry
+        .validate()
+        .map_err(|error| GlossaryCsvError::InvalidEntry { row, error })?;
+    Ok(entry)
+}
+
+fn bool_to_csv(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+fn append_csv_field(output: &mut String, value: &str) {
+    if value
+        .chars()
+        .any(|character| matches!(character, ',' | '"' | '\n' | '\r'))
+    {
+        output.push('"');
+        for character in value.chars() {
+            if character == '"' {
+                output.push('"');
+            }
+            output.push(character);
+        }
+        output.push('"');
+    } else {
+        output.push_str(value);
+    }
+}
+
+fn parse_csv_records(source: &str) -> Result<Vec<Vec<String>>, GlossaryCsvError> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut closed_quote = false;
+    let mut at_field_start = true;
+    let mut characters = source.chars().peekable();
+    while let Some(character) = characters.next() {
+        if quoted {
+            match character {
+                '"' if characters.peek() == Some(&'"') => {
+                    field.push('"');
+                    characters.next();
+                }
+                '"' => {
+                    quoted = false;
+                    closed_quote = true;
+                }
+                other => field.push(other),
+            }
+            continue;
+        }
+        if closed_quote {
+            match character {
+                ',' => {
+                    record.push(std::mem::take(&mut field));
+                    at_field_start = true;
+                    closed_quote = false;
+                }
+                '\n' => {
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                    at_field_start = true;
+                    closed_quote = false;
+                }
+                '\r' if characters.peek() == Some(&'\n') => {
+                    characters.next();
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                    at_field_start = true;
+                    closed_quote = false;
+                }
+                _ => return Err(GlossaryCsvError::Malformed),
+            }
+            continue;
+        }
+        match character {
+            '"' if at_field_start => quoted = true,
+            ',' => {
+                record.push(std::mem::take(&mut field));
+                at_field_start = true;
+            }
+            '\n' => {
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+                at_field_start = true;
+            }
+            '\r' if characters.peek() == Some(&'\n') => {
+                characters.next();
+                record.push(std::mem::take(&mut field));
+                records.push(std::mem::take(&mut record));
+                at_field_start = true;
+            }
+            '"' | '\r' => return Err(GlossaryCsvError::Malformed),
+            other => {
+                field.push(other);
+                at_field_start = false;
+            }
+        }
+    }
+    if quoted {
+        return Err(GlossaryCsvError::Malformed);
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    Ok(records)
 }
 
 /// 描述词汇表输入不满足安全或确定性约束。
@@ -1573,9 +1809,10 @@ impl TranslationEvent {
 mod tests {
     use super::{
         ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
-        Glossary, GlossaryEntry, GlossaryError, ProfileValidationError, ProtectedTextError,
-        ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace, SecretValue,
-        TranslationError, TranslationEvent, protect_source_text, protect_source_text_with_glossary,
+        Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, ProfileValidationError,
+        ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
+        SecretValue, TranslationError, TranslationEvent, protect_source_text,
+        protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1913,6 +2150,79 @@ mod tests {
             GlossaryEntry::new(credential_like, "target"),
             Err(GlossaryError::CredentialLikeValue("source term"))
         ));
+    }
+
+    #[test]
+    fn glossary_csv_round_trips_quoted_fields_and_all_rule_options() {
+        let glossary = Glossary::new(vec![
+            GlossaryEntry::new("LinguaMesh", "凌瓦网")
+                .expect("entry")
+                .with_source_locale("en")
+                .with_target_locale("zh-CN")
+                .with_case_sensitive(false)
+                .with_whole_word(false)
+                .with_priority(7)
+                .with_domain("software, UI")
+                .with_notes("Keep \"LinguaMesh\" unchanged.\nReview later."),
+            GlossaryEntry::new("Acme Product", "Acme Product")
+                .expect("immutable entry")
+                .with_immutable(true)
+                .with_enabled(false),
+        ])
+        .expect("glossary");
+        let csv = glossary.to_csv();
+        assert!(csv.starts_with(super::GLOSSARY_CSV_HEADER));
+        assert!(csv.contains("\"software, UI\""));
+        assert!(csv.contains("\"Keep \"\"LinguaMesh\"\" unchanged.\nReview later.\""));
+        assert_eq!(Glossary::from_csv(&csv), Ok(glossary));
+    }
+
+    #[test]
+    fn glossary_csv_rejects_schema_and_credential_failures() {
+        assert_eq!(
+            Glossary::from_csv("source_term,target_term\nsource,target\n"),
+            Err(GlossaryCsvError::InvalidHeader)
+        );
+        assert_eq!(
+            Glossary::from_csv(&format!(
+                "{}\nsource,target,,,,,,,,\n",
+                super::GLOSSARY_CSV_HEADER
+            )),
+            Err(GlossaryCsvError::InvalidRow(2))
+        );
+        let credential_like = ["sk", "12345678901234567890"].join("-");
+        let csv = format!(
+            "{}\n{}\n",
+            super::GLOSSARY_CSV_HEADER,
+            [
+                credential_like.as_str(),
+                "target",
+                "",
+                "",
+                "true",
+                "true",
+                "false",
+                "",
+                "0",
+                "",
+                "true",
+            ]
+            .join(",")
+        );
+        assert!(matches!(
+            Glossary::from_csv(&csv),
+            Err(GlossaryCsvError::InvalidEntry {
+                row: 2,
+                error: GlossaryError::CredentialLikeValue("source term")
+            })
+        ));
+        assert_eq!(
+            Glossary::from_csv(&format!(
+                "{}\n\"unterminated,target\n",
+                super::GLOSSARY_CSV_HEADER
+            )),
+            Err(GlossaryCsvError::Malformed)
+        );
     }
 
     #[test]
