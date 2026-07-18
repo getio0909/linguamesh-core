@@ -32,7 +32,8 @@ const DOCUMENT_PACKAGES_MIGRATION: &str =
 const DOCUMENT_PPTX_MIGRATION: &str = include_str!("../../../migrations/0011_document_pptx.sql");
 const DOCUMENT_XLSX_MIGRATION: &str = include_str!("../../../migrations/0012_document_xlsx.sql");
 const DOCUMENT_EPUB_MIGRATION: &str = include_str!("../../../migrations/0013_document_epub.sql");
-const LATEST_SCHEMA_VERSION: u32 = 13;
+const DOCUMENT_PDF_MIGRATION: &str = include_str!("../../../migrations/0014_document_pdf.sql");
+const LATEST_SCHEMA_VERSION: u32 = 14;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -71,6 +72,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (11, DOCUMENT_PPTX_MIGRATION),
     (12, DOCUMENT_XLSX_MIGRATION),
     (13, DOCUMENT_EPUB_MIGRATION),
+    (14, DOCUMENT_PDF_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1010,7 +1012,11 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
     }
     if matches!(
         job.format,
-        DocumentFormat::Docx | DocumentFormat::Pptx | DocumentFormat::Xlsx | DocumentFormat::Epub
+        DocumentFormat::Docx
+            | DocumentFormat::Pptx
+            | DocumentFormat::Xlsx
+            | DocumentFormat::Epub
+            | DocumentFormat::Pdf
     ) != job.package.is_some()
     {
         return Err(document_configuration_error(
@@ -1121,6 +1127,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Pptx => "pptx",
         DocumentFormat::Xlsx => "xlsx",
         DocumentFormat::Epub => "epub",
+        DocumentFormat::Pdf => "pdf",
     }
 }
 
@@ -1137,6 +1144,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "pptx" => Ok(DocumentFormat::Pptx),
         "xlsx" => Ok(DocumentFormat::Xlsx),
         "epub" => Ok(DocumentFormat::Epub),
+        "pdf" => Ok(DocumentFormat::Pdf),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1571,7 +1579,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 13);
+        assert_eq!(storage.schema_version().expect("version"), 14);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1980,6 +1988,78 @@ mod tests {
             .read_to_string(&mut chapter)
             .expect("chapter xml");
         assert!(chapter.contains("你好"));
+    }
+
+    #[test]
+    fn pdf_package_and_page_segments_survive_reopen() {
+        let package = br"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R >>
+endobj
+5 0 obj
+<< /Length 30 >>
+stream
+BT
+72 720 Td
+(Hello) Tj
+ET
+endstream
+endobj
+6 0 obj
+<< /Length 32 >>
+stream
+BT
+72 720 Td
+(Second) Tj
+ET
+endstream
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+";
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("pdf-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("book.pdf", package).expect("pdf job");
+        storage
+            .save_document_job("pdf-job", &job, DocumentJobState::Pending)
+            .expect("save pdf job");
+        storage
+            .update_document_segment("pdf-job", 0, "Bonjour")
+            .expect("translate first page");
+        storage
+            .update_document_segment("pdf-job", 1, "Deuxieme")
+            .expect("translate second page");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("pdf-job")
+            .expect("load pdf job")
+            .expect("pdf snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Pdf);
+        let rebuilt = snapshot.job.reconstruct_bytes().expect("reconstruct pdf");
+        assert!(rebuilt.starts_with(b"%PDF-1.4"));
+        assert!(
+            rebuilt
+                .windows(b"(Bonjour)".len())
+                .any(|window| window == b"(Bonjour)")
+        );
+        assert!(
+            rebuilt
+                .windows(b"(Deuxieme)".len())
+                .any(|window| window == b"(Deuxieme)")
+        );
     }
 
     #[test]
@@ -2392,7 +2472,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 13);
+        assert_eq!(storage.schema_version().expect("version"), 14);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2474,7 +2554,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 13);
+        assert_eq!(storage.schema_version().expect("version"), 14);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

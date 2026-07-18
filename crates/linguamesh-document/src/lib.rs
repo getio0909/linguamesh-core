@@ -7,6 +7,7 @@ use thiserror::Error;
 
 mod docx;
 mod epub;
+mod pdf;
 
 /// 文本文档的受支持格式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,6 +35,8 @@ pub enum DocumentFormat {
     Xlsx,
     /// EPUB 电子书包。
     Epub,
+    /// PDF 文本页面。
+    Pdf,
 }
 
 impl DocumentFormat {
@@ -55,6 +58,7 @@ impl DocumentFormat {
             "pptx" => Ok(Self::Pptx),
             "xlsx" => Ok(Self::Xlsx),
             "epub" => Ok(Self::Epub),
+            "pdf" => Ok(Self::Pdf),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -154,12 +158,19 @@ impl DocumentJob {
                 | DocumentFormat::Pptx
                 | DocumentFormat::Xlsx
                 | DocumentFormat::Epub
+                | DocumentFormat::Pdf
         ) {
             if matches!(
                 DocumentFormat::from_name(&source_name)?,
                 DocumentFormat::Epub
             ) {
                 return Self::from_epub_bytes(source_name, contents);
+            }
+            if matches!(
+                DocumentFormat::from_name(&source_name)?,
+                DocumentFormat::Pdf
+            ) {
+                return Self::from_pdf_bytes(source_name, contents);
             }
             return Self::from_ooxml_bytes(source_name, contents);
         }
@@ -209,6 +220,29 @@ impl DocumentJob {
             format: DocumentFormat::Epub,
             source_name,
             segments: epub::inspect(contents)?,
+            package: Some(contents.to_vec()),
+        })
+    }
+
+    /// 从受限文本型 PDF 创建可恢复文档任务。
+    pub fn from_pdf_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
+        let source_name = source_name.into();
+        if !matches!(
+            DocumentFormat::from_name(&source_name)?,
+            DocumentFormat::Pdf
+        ) {
+            return Err(DocumentError::UnsupportedFormat);
+        }
+        if contents.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        Ok(Self {
+            format: DocumentFormat::Pdf,
+            source_name,
+            segments: pdf::inspect(contents)?,
             package: Some(contents.to_vec()),
         })
     }
@@ -427,6 +461,7 @@ impl DocumentJob {
                 | DocumentFormat::Pptx
                 | DocumentFormat::Xlsx
                 | DocumentFormat::Epub
+                | DocumentFormat::Pdf
         ) {
             let package = self
                 .package
@@ -437,6 +472,7 @@ impl DocumentJob {
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package)?,
                 DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package)?,
                 DocumentFormat::Epub => epub::reconstruct(self, package, None)?,
+                DocumentFormat::Pdf => pdf::reconstruct(self, package)?,
                 _ => unreachable!(),
             };
             return docx::preview(self);
@@ -471,6 +507,7 @@ impl DocumentJob {
                 | DocumentFormat::Pptx
                 | DocumentFormat::Xlsx
                 | DocumentFormat::Epub
+                | DocumentFormat::Pdf
         ) {
             let package = self
                 .package
@@ -481,10 +518,23 @@ impl DocumentJob {
                 DocumentFormat::Pptx => docx::reconstruct_pptx(self, package),
                 DocumentFormat::Xlsx => docx::reconstruct_xlsx(self, package),
                 DocumentFormat::Epub => epub::reconstruct(self, package, target_locale),
+                DocumentFormat::Pdf => pdf::reconstruct(self, package),
                 _ => unreachable!(),
             };
         }
         Ok(self.reconstruct()?.into_bytes())
+    }
+
+    /// 为无法可靠直接重建字体或版式的 PDF 提供保留页码的 HTML 输出。
+    pub fn reconstruct_alternative_html(&self) -> Result<Vec<u8>, DocumentError> {
+        if !matches!(self.format, DocumentFormat::Pdf) {
+            return Err(DocumentError::UnsupportedFormat);
+        }
+        let package = self
+            .package
+            .as_deref()
+            .ok_or(DocumentError::InvalidStructure)?;
+        pdf::alternative_html(self, package)
     }
 }
 
@@ -515,6 +565,9 @@ pub enum DocumentError {
     /// 仍有段没有译文。
     #[error("The document segment is not translated.")]
     SegmentIncomplete(usize),
+    /// PDF 文本包含当前安全重建器无法编码的字符。
+    #[error("The PDF text requires an alternative structured export.")]
+    PdfTextEncodingUnsupported,
 }
 
 fn split_lines(text: &str) -> Vec<(String, String)> {
@@ -1641,6 +1694,39 @@ mod tests {
         writer.finish().expect("epub archive").into_inner()
     }
 
+    fn pdf_fixture() -> Vec<u8> {
+        br"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT /F1 12 Tf 72 320 Td (Hello) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 45 >>
+stream
+BT /F1 12 Tf 72 320 Td (Second) Tj ET
+endstream
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+"
+        .to_vec()
+    }
+
     #[test]
     fn detects_supported_formats_case_insensitively() {
         assert_eq!(
@@ -1686,6 +1772,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("book.EPUB"),
             Ok(DocumentFormat::Epub)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("book.PDF"),
+            Ok(DocumentFormat::Pdf)
         );
     }
 
@@ -2228,6 +2318,27 @@ mod tests {
             .read_to_end(&mut cover)
             .expect("cover bytes");
         assert_eq!(cover, [20, 21, 22]);
+    }
+
+    #[test]
+    fn pdf_extracts_page_order_and_rewrites_text_without_claiming_pixel_identity() {
+        let source = pdf_fixture();
+        let mut job = DocumentJob::from_utf8("book.pdf", &source).expect("pdf");
+        assert_eq!(job.format, DocumentFormat::Pdf);
+        assert_eq!(job.pending_count(), 2);
+        job.apply_translation(0, "Bonjour").expect("first page");
+        job.apply_translation(1, "Deuxieme").expect("second page");
+        let rebuilt = job.reconstruct_bytes().expect("rebuild pdf");
+        assert!(rebuilt.starts_with(b"%PDF-1.4"));
+        assert!(rebuilt.windows(9).any(|window| window == b"(Bonjour)"));
+        assert!(rebuilt.windows(10).any(|window| window == b"(Deuxieme)"));
+        let html = job
+            .reconstruct_alternative_html()
+            .expect("alternative html");
+        let html = String::from_utf8(html).expect("html utf8");
+        assert!(html.contains("data-page=\"1\""));
+        assert!(html.contains("data-page=\"2\""));
+        assert!(html.contains("Bonjour"));
     }
 
     #[test]
