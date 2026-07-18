@@ -1618,6 +1618,16 @@ fn collect_email_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) 
     }
 }
 
+/// 描述翻译请求的本地隐私策略。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TranslationPrivacyMode {
+    /// 使用标准请求策略。
+    #[default]
+    Standard,
+    /// 请求不得写入翻译历史或翻译记忆等本地结果存储。
+    Incognito,
+}
+
 /// 包含一次提供商无关的翻译请求。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranslationRequest {
@@ -1639,6 +1649,9 @@ pub struct TranslationRequest {
     /// 可选的近似分段字节上限，用于长文本安全分段。
     #[serde(default)]
     pub max_chunk_bytes: Option<usize>,
+    /// 本次请求的本地隐私策略。
+    #[serde(default)]
+    pub privacy_mode: TranslationPrivacyMode,
 }
 
 impl TranslationRequest {
@@ -1658,6 +1671,7 @@ impl TranslationRequest {
             model_id: model_id.into(),
             glossary: None,
             max_chunk_bytes: None,
+            privacy_mode: TranslationPrivacyMode::Standard,
         }
     }
 
@@ -1673,6 +1687,19 @@ impl TranslationRequest {
     pub const fn with_max_chunk_bytes(mut self, max_chunk_bytes: usize) -> Self {
         self.max_chunk_bytes = Some(max_chunk_bytes);
         self
+    }
+
+    /// 设置本次请求的本地隐私策略。
+    #[must_use]
+    pub const fn with_privacy_mode(mut self, privacy_mode: TranslationPrivacyMode) -> Self {
+        self.privacy_mode = privacy_mode;
+        self
+    }
+
+    /// 判断本次请求是否使用隐身模式。
+    #[must_use]
+    pub const fn is_incognito(&self) -> bool {
+        matches!(self.privacy_mode, TranslationPrivacyMode::Incognito)
     }
 }
 
@@ -1811,8 +1838,8 @@ mod tests {
         ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
         Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, ProfileValidationError,
         ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
-        SecretValue, TranslationError, TranslationEvent, protect_source_text,
-        protect_source_text_with_glossary,
+        SecretValue, TranslationError, TranslationEvent, TranslationPrivacyMode,
+        TranslationRequest, protect_source_text, protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1826,6 +1853,36 @@ mod tests {
         };
         assert!(failed.is_terminal());
         assert_eq!(failed.sequence(), 4);
+    }
+
+    #[test]
+    fn translation_request_defaults_to_standard_privacy() {
+        let request = TranslationRequest::new("hello", "zh-CN", "model");
+        assert_eq!(request.privacy_mode, TranslationPrivacyMode::Standard);
+        assert!(!request.is_incognito());
+    }
+
+    #[test]
+    fn translation_request_incognito_policy_round_trips_and_accepts_legacy_payloads() {
+        let request = TranslationRequest::new("hello", "zh-CN", "model")
+            .with_privacy_mode(TranslationPrivacyMode::Incognito);
+        let encoded = serde_json::to_string(&request).expect("serialize request");
+        let decoded: TranslationRequest =
+            serde_json::from_str(&encoded).expect("deserialize request");
+        assert_eq!(decoded.privacy_mode, TranslationPrivacyMode::Incognito);
+        assert!(decoded.is_incognito());
+
+        let legacy = serde_json::json!({
+            "operation_id": "operation",
+            "correlation_id": "correlation",
+            "source_text": "hello",
+            "source_locale": null,
+            "target_locale": "zh-CN",
+            "model_id": "model"
+        });
+        let decoded: TranslationRequest = serde_json::from_value(legacy).expect("legacy request");
+        assert_eq!(decoded.privacy_mode, TranslationPrivacyMode::Standard);
+        assert!(!decoded.is_incognito());
     }
 
     #[test]

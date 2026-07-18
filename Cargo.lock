@@ -734,6 +734,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "secrecy",
  "serde",
+ "serde_json",
  "thiserror",
  "url",
  "uuid",
