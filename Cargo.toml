@@ -30,6 +30,7 @@ clap = { version = "4.5.41", features = ["derive"] }
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 linguamesh-domain = { version = "0.1.0-alpha.2", path = "crates/linguamesh-domain" }
+linguamesh-document = { version = "0.1.0-alpha.2", path = "crates/linguamesh-document" }
 linguamesh-application = { version = "0.1.0-alpha.2", path = "crates/linguamesh-application" }
 linguamesh-engine = { version = "0.1.0-alpha.2", path = "crates/linguamesh-engine" }
 linguamesh-protocol = { version = "0.1.0-alpha.2", path = "crates/linguamesh-protocol" }

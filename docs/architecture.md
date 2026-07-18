@@ -18,9 +18,10 @@ configured provider cannot be revoked, so session closure drops the HTTP future 
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
 
-SQLite migrations currently reach schema version 5. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 6. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
-translation history and optional translation-memory policy/entries. The migrations are transactional,
+translation history, optional translation-memory policy/entries, and bounded TXT/Markdown document
+jobs with segment snapshots. The migrations are transactional,
 preserve schema-1 profile metadata while clearing untrusted legacy secret references, enable WAL,
 secure deletion, and
 foreign-key enforcement for every connection, and never defines a credential-value column. Every
@@ -35,9 +36,10 @@ The `linguamesh-document` crate is the first `bounded_text_document_v1` document
 UTF-8 TXT and Markdown names, enforces a 4 MiB input/output bound, strips an optional UTF-8 BOM,
 retains LF/CRLF/CR line endings, and represents Markdown fenced code and blank structure as
 verbatim segments. Prose segments can be completed independently and the job reconstructs the
-original ordering without allowing untranslated or structural segments to be overwritten. This is
-the codec foundation for the Linux-first document slice; archive formats, persistent job recovery,
-and native document queues remain future work.
+original ordering without allowing untranslated or structural segments to be overwritten. Core schema
+6 persists bounded job metadata and ordered segment snapshots without local paths or credential
+values; Linux worker startup restores pending/running jobs and exposes explicit segment/state
+commands. Archive formats and GUI document queue presentation remain future work.
 
 `linguamesh-engine::core_compatibility` reports Core semantic version, ABI major, protocol version,
 bundled provider-catalog version, and stable enabled-feature identifiers. Clients compare every

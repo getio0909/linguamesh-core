@@ -31,6 +31,30 @@ impl DocumentFormat {
 /// 文档读取和分段的最大 UTF-8 字节数。
 pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 
+/// 文档任务在本地数据库中的生命周期状态。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentJobState {
+    /// 已创建但尚未开始翻译。
+    Pending,
+    /// 至少一个段已开始翻译，任务可以在重启后继续。
+    Running,
+    /// 所有可翻译段均已完成。
+    Completed,
+    /// 用户主动取消，保留快照供查看或重新开始。
+    Cancelled,
+    /// 任务因可恢复之外的错误停止。
+    Failed,
+}
+
+impl DocumentJobState {
+    /// 返回进程重启后应重新暴露给界面的任务。
+    #[must_use]
+    pub const fn is_resumable(self) -> bool {
+        matches!(self, Self::Pending | Self::Running)
+    }
+}
+
 /// 文档段的语义类别。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,5 +1,9 @@
 #![doc = "`LinguaMesh` 的 `SQLite` 迁移和最小配置存储。"]
 
+use linguamesh_document::{
+    DocumentFormat, DocumentJob, DocumentJobState, DocumentSegment, DocumentSegmentKind,
+    MAX_DOCUMENT_BYTES,
+};
 use linguamesh_domain::{
     ErrorKind, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
     ProviderProfileId, SecretRef, TranslationError, TranslationRequest, validate_model_identifier,
@@ -16,7 +20,8 @@ const TRANSLATION_HISTORY_POLICY_MIGRATION: &str =
     include_str!("../../../migrations/0004_translation_history_policy.sql");
 const TRANSLATION_MEMORY_MIGRATION: &str =
     include_str!("../../../migrations/0005_translation_memory.sql");
-const LATEST_SCHEMA_VERSION: u32 = 5;
+const DOCUMENT_JOBS_MIGRATION: &str = include_str!("../../../migrations/0006_document_jobs.sql");
+const LATEST_SCHEMA_VERSION: u32 = 6;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -31,12 +36,19 @@ pub const TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY: &str = "protected-spans-v1";
 pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "prompt-template-v1";
 /// 翻译记忆身份中的质量模式。
 pub const TRANSLATION_MEMORY_QUALITY_MODE: &str = "standard";
+/// 限制本地可恢复文档任务的数量，避免任务队列无限增长。
+pub const MAX_DOCUMENT_JOBS: usize = 100;
+/// 限制单个文档任务的段数量，避免恶意输入制造过大元数据。
+pub const MAX_DOCUMENT_SEGMENTS: usize = 10_000;
+/// 限制文档任务快照中源文本和译文的总大小。
+pub const MAX_DOCUMENT_JOB_TEXT_BYTES: usize = MAX_DOCUMENT_BYTES;
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
     (3, TRANSLATION_HISTORY_MIGRATION),
     (4, TRANSLATION_HISTORY_POLICY_MIGRATION),
     (5, TRANSLATION_MEMORY_MIGRATION),
+    (6, DOCUMENT_JOBS_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -77,6 +89,21 @@ pub struct TranslationMemoryEntry {
     pub model_id: String,
     /// 可审计的身份字段 JSON，不包含秘密值。
     pub identity_json: String,
+}
+
+/// 描述一个可在进程重启后恢复的文档任务。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentJobSnapshot {
+    /// 由宿主生成且不包含本地路径的任务标识。
+    pub job_id: String,
+    /// 当前任务生命周期状态。
+    pub state: DocumentJobState,
+    /// 文档内容和分段快照。
+    pub job: DocumentJob,
+    /// 任务首次写入时的 Unix 秒时间戳。
+    pub created_at: i64,
+    /// 任务最近一次状态或段更新时的 Unix 秒时间戳。
+    pub updated_at: i64,
 }
 
 /// 管理明确迁移的本地数据库。
@@ -120,6 +147,221 @@ impl Storage {
                 [],
                 |row| row.get(0),
             )
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 保存或替换一个文档任务及其全部段快照。
+    pub fn save_document_job(
+        &mut self,
+        job_id: &str,
+        job: &DocumentJob,
+        state: DocumentJobState,
+    ) -> Result<DocumentJobSnapshot, TranslationError> {
+        validate_document_job_identity(job_id, job)?;
+        if state == DocumentJobState::Completed && job.pending_count() != 0 {
+            return Err(document_configuration_error(
+                "A completed document job still has untranslated segments.",
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM document_jobs WHERE job_id = ?1",
+                params![job_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| map_error(&error))?
+            .is_some();
+        if !exists {
+            let count = transaction
+                .query_row("SELECT COUNT(*) FROM document_jobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| map_error(&error))?;
+            if usize::try_from(count).unwrap_or(usize::MAX) >= MAX_DOCUMENT_JOBS {
+                return Err(document_configuration_error(
+                    "The local document job limit has been reached.",
+                ));
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO document_jobs (job_id, state, format, source_name) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(job_id) DO UPDATE SET state = excluded.state, format = excluded.format, source_name = excluded.source_name, updated_at = unixepoch()",
+                params![job_id, document_job_state_name(state), document_format_name(job.format), job.source_name.as_str()],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM document_segments WHERE job_id = ?1",
+                params![job_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        for segment in &job.segments {
+            transaction
+                .execute(
+                    "INSERT INTO document_segments (job_id, segment_index, kind, source_text, translated_text, line_ending) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        job_id,
+                        i64::try_from(segment.index).unwrap_or(i64::MAX),
+                        document_segment_kind_name(segment.kind),
+                        segment.source_text.as_str(),
+                        segment.translated_text.as_deref(),
+                        segment.line_ending.as_str(),
+                    ],
+                )
+                .map_err(|error| map_error(&error))?;
+        }
+        transaction.commit().map_err(|error| map_error(&error))?;
+        self.document_job(job_id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The saved document job could not be reloaded.",
+            )
+        })
+    }
+
+    /// 按稳定标识读取一个文档任务快照。
+    pub fn document_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<DocumentJobSnapshot>, TranslationError> {
+        load_document_job(&self.connection, job_id)
+    }
+
+    /// 返回按最近更新时间排序的本地文档任务。
+    pub fn document_jobs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<DocumentJobSnapshot>, TranslationError> {
+        let limit = limit.min(MAX_DOCUMENT_JOBS);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT job_id FROM document_jobs ORDER BY updated_at DESC, job_id DESC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        let job_ids = statement
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))?;
+        job_ids
+            .into_iter()
+            .map(|job_id| {
+                self.document_job(&job_id)?.ok_or_else(|| {
+                    TranslationError::new(
+                        ErrorKind::Persistence,
+                        "A document job disappeared while it was being listed.",
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// 返回进程重启后需要继续处理的文档任务。
+    pub fn resumable_document_jobs(&self) -> Result<Vec<DocumentJobSnapshot>, TranslationError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT job_id FROM document_jobs WHERE state IN ('pending', 'running') ORDER BY updated_at ASC, job_id ASC",
+            )
+            .map_err(|error| map_error(&error))?;
+        let job_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))?;
+        job_ids
+            .into_iter()
+            .map(|job_id| {
+                self.document_job(&job_id)?.ok_or_else(|| {
+                    TranslationError::new(
+                        ErrorKind::Persistence,
+                        "A resumable document job disappeared while it was being listed.",
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// 更新一个可翻译段，并自动推进任务状态。
+    pub fn update_document_segment(
+        &mut self,
+        job_id: &str,
+        index: usize,
+        translated_text: &str,
+    ) -> Result<DocumentJobSnapshot, TranslationError> {
+        if translated_text.len() > MAX_DOCUMENT_JOB_TEXT_BYTES {
+            return Err(document_configuration_error(
+                "The translated document segment exceeds the local size limit.",
+            ));
+        }
+        let snapshot = self.document_job(job_id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "The document job was not found.",
+            )
+        })?;
+        let mut job = snapshot.job;
+        job.apply_translation(index, translated_text.to_owned())
+            .map_err(map_document_error)?;
+        let state = if job.pending_count() == 0 {
+            DocumentJobState::Completed
+        } else {
+            DocumentJobState::Running
+        };
+        self.save_document_job(job_id, &job, state)
+    }
+
+    /// 更新一个文档任务的生命周期状态，不修改段内容。
+    pub fn set_document_job_state(
+        &mut self,
+        job_id: &str,
+        state: DocumentJobState,
+    ) -> Result<DocumentJobSnapshot, TranslationError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE document_jobs SET state = ?2, updated_at = unixepoch() WHERE job_id = ?1",
+                params![job_id, document_job_state_name(state)],
+            )
+            .map_err(|error| map_error(&error))?;
+        if changed == 0 {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "The document job was not found.",
+            ));
+        }
+        self.document_job(job_id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The document job state could not be reloaded.",
+            )
+        })
+    }
+
+    /// 删除一个文档任务及其段快照。
+    pub fn delete_document_job(&mut self, job_id: &str) -> Result<bool, TranslationError> {
+        self.connection
+            .execute(
+                "DELETE FROM document_jobs WHERE job_id = ?1",
+                params![job_id],
+            )
+            .map(|count| count != 0)
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 清空全部本地文档任务。
+    pub fn clear_document_jobs(&mut self) -> Result<(), TranslationError> {
+        self.connection
+            .execute("DELETE FROM document_jobs", [])
+            .map(|_| ())
             .map_err(|error| map_error(&error))
     }
 
@@ -659,6 +901,207 @@ impl Storage {
     }
 }
 
+fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(), TranslationError> {
+    if job_id.is_empty() || job_id.len() > 128 || job_id.chars().any(char::is_control) {
+        return Err(document_configuration_error(
+            "The document job ID is invalid.",
+        ));
+    }
+    if job.source_name.is_empty()
+        || job.source_name.len() > 255
+        || job
+            .source_name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return Err(document_configuration_error(
+            "The document source name is invalid.",
+        ));
+    }
+    if job.segments.len() > MAX_DOCUMENT_SEGMENTS {
+        return Err(document_configuration_error(
+            "The document contains too many segments.",
+        ));
+    }
+    let mut source_bytes = 0usize;
+    let mut translated_bytes = 0usize;
+    for (expected_index, segment) in job.segments.iter().enumerate() {
+        if segment.index != expected_index
+            || !matches!(segment.line_ending.as_str(), "" | "\n" | "\r\n" | "\r")
+        {
+            return Err(document_configuration_error(
+                "The document segment ordering or line ending is invalid.",
+            ));
+        }
+        if segment.kind == DocumentSegmentKind::Verbatim && segment.translated_text.is_some() {
+            return Err(document_configuration_error(
+                "A document structure segment cannot contain a translation.",
+            ));
+        }
+        source_bytes = source_bytes
+            .checked_add(segment.source_text.len())
+            .ok_or_else(|| document_configuration_error("The document source is too large."))?;
+        if let Some(translated_text) = &segment.translated_text {
+            translated_bytes = translated_bytes
+                .checked_add(translated_text.len())
+                .ok_or_else(|| {
+                    document_configuration_error("The translated document is too large.")
+                })?;
+        }
+    }
+    if source_bytes > MAX_DOCUMENT_JOB_TEXT_BYTES || translated_bytes > MAX_DOCUMENT_JOB_TEXT_BYTES
+    {
+        return Err(document_configuration_error(
+            "The document text exceeds the local size limit.",
+        ));
+    }
+    Ok(())
+}
+
+fn document_configuration_error(message: &str) -> TranslationError {
+    TranslationError::new(ErrorKind::InvalidConfiguration, message)
+}
+
+fn map_document_error(error: linguamesh_document::DocumentError) -> TranslationError {
+    TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+}
+
+fn document_format_name(format: DocumentFormat) -> &'static str {
+    match format {
+        DocumentFormat::Txt => "txt",
+        DocumentFormat::Markdown => "markdown",
+    }
+}
+
+fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError> {
+    match value {
+        "txt" => Ok(DocumentFormat::Txt),
+        "markdown" => Ok(DocumentFormat::Markdown),
+        _ => Err(TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored document format is invalid.",
+        )),
+    }
+}
+
+fn document_job_state_name(state: DocumentJobState) -> &'static str {
+    match state {
+        DocumentJobState::Pending => "pending",
+        DocumentJobState::Running => "running",
+        DocumentJobState::Completed => "completed",
+        DocumentJobState::Cancelled => "cancelled",
+        DocumentJobState::Failed => "failed",
+    }
+}
+
+fn parse_document_job_state(value: &str) -> Result<DocumentJobState, TranslationError> {
+    match value {
+        "pending" => Ok(DocumentJobState::Pending),
+        "running" => Ok(DocumentJobState::Running),
+        "completed" => Ok(DocumentJobState::Completed),
+        "cancelled" => Ok(DocumentJobState::Cancelled),
+        "failed" => Ok(DocumentJobState::Failed),
+        _ => Err(TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored document job state is invalid.",
+        )),
+    }
+}
+
+fn document_segment_kind_name(kind: DocumentSegmentKind) -> &'static str {
+    match kind {
+        DocumentSegmentKind::Prose => "prose",
+        DocumentSegmentKind::Verbatim => "verbatim",
+    }
+}
+
+fn parse_document_segment_kind(value: &str) -> Result<DocumentSegmentKind, TranslationError> {
+    match value {
+        "prose" => Ok(DocumentSegmentKind::Prose),
+        "verbatim" => Ok(DocumentSegmentKind::Verbatim),
+        _ => Err(TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored document segment kind is invalid.",
+        )),
+    }
+}
+
+fn load_document_job(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<DocumentJobSnapshot>, TranslationError> {
+    let metadata = connection
+        .query_row(
+            "SELECT state, format, source_name, created_at, updated_at FROM document_jobs WHERE job_id = ?1",
+            params![job_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| map_error(&error))?;
+    let Some((state, format, source_name, created_at, updated_at)) = metadata else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT segment_index, kind, source_text, translated_text, line_ending FROM document_segments WHERE job_id = ?1 ORDER BY segment_index ASC",
+        )
+        .map_err(|error| map_error(&error))?;
+    let segments = statement
+        .query_map(params![job_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| map_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_error(&error))?;
+    let segments = segments
+        .into_iter()
+        .map(
+            |(index, kind, source_text, translated_text, line_ending)| -> Result<_, TranslationError> {
+                let index = usize::try_from(index).map_err(|_| {
+                    TranslationError::new(
+                        ErrorKind::Persistence,
+                        "The stored document segment index is invalid.",
+                    )
+                })?;
+                Ok(DocumentSegment {
+                    index,
+                    kind: parse_document_segment_kind(&kind)?,
+                    source_text,
+                    translated_text,
+                    line_ending,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    let job = DocumentJob {
+        format: parse_document_format(&format)?,
+        source_name,
+        segments,
+    };
+    validate_document_job_identity(job_id, &job)?;
+    Ok(Some(DocumentJobSnapshot {
+        job_id: job_id.to_owned(),
+        state: parse_document_job_state(&state)?,
+        job,
+        created_at,
+        updated_at,
+    }))
+}
+
 const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
 const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
 const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
@@ -877,7 +1320,8 @@ fn normalize_translation_memory_source(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{INITIAL_MIGRATION, Storage};
+    use super::{INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, Storage};
+    use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
         ErrorKind, ProviderProfile, ProviderProfileId, SecretRef, TranslationPrivacyMode,
         TranslationRequest,
@@ -909,7 +1353,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 5);
+        assert_eq!(storage.schema_version().expect("version"), 6);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -917,6 +1361,71 @@ mod tests {
             Some("manual-model")
         );
         assert_eq!(storage.manual_models().expect("models").len(), 1);
+    }
+
+    #[test]
+    fn document_job_round_trip_resumes_and_completes_across_reopen() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("document-jobs.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let mut job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one\ntwo");
+        let pending = storage
+            .save_document_job("job-1", &job, DocumentJobState::Pending)
+            .expect("save pending");
+        assert_eq!(pending.state, DocumentJobState::Pending);
+        storage
+            .update_document_segment("job-1", 0, "一")
+            .expect("save first segment");
+        let resumed = storage.resumable_document_jobs().expect("resumable jobs");
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].job.pending_count(), 1);
+        job.apply_translation(0, "一").expect("local first segment");
+        drop(storage);
+
+        let mut reopened = Storage::open(&path).expect("reopened storage");
+        let completed = reopened
+            .update_document_segment("job-1", 1, "二")
+            .expect("complete job");
+        assert_eq!(completed.state, DocumentJobState::Completed);
+        assert_eq!(completed.job.reconstruct().expect("reconstruct"), "一\n二");
+        assert!(
+            reopened
+                .resumable_document_jobs()
+                .expect("no resumable jobs")
+                .is_empty()
+        );
+        assert!(reopened.delete_document_job("job-1").expect("delete job"));
+        assert!(reopened.document_job("job-1").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn document_jobs_are_bounded_and_do_not_store_paths_or_credentials() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one");
+        for index in 0..MAX_DOCUMENT_JOBS {
+            storage
+                .save_document_job(&format!("job-{index}"), &job, DocumentJobState::Pending)
+                .expect("bounded job");
+        }
+        let error = storage
+            .save_document_job("overflow", &job, DocumentJobState::Pending)
+            .expect_err("job limit");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+        let mut statement = storage
+            .connection
+            .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table'")
+            .expect("schema query");
+        let schema = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("schema rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("schema");
+        assert!(schema.iter().all(|(_, sql)| {
+            !sql.to_ascii_lowercase().contains("api_key")
+                && !sql.to_ascii_lowercase().contains("credential_value")
+        }));
     }
 
     #[test]
@@ -1237,7 +1746,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 5);
+        assert_eq!(storage.schema_version().expect("version"), 6);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -1319,7 +1828,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 5);
+        assert_eq!(storage.schema_version().expect("version"), 6);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

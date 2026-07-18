@@ -35,6 +35,21 @@ shutdown. `contracts/abi/linguamesh.h` records the current native boundary.
 This checkpoint does not claim complete Milestone 1 provider configuration, complete C ABI
 behavior, native SDK artifacts, document support, or a stable release.
 
+## 2026-07-18 — Linux document job persistence checkpoint
+
+Assumption: the Linux-first document queue persists only an opaque job ID, source basename, format,
+ordered bounded segments, and lifecycle state. It never stores the source filesystem path, provider
+credentials, or session secrets. Pending and running jobs are the only states restored automatically;
+GUI queue presentation and archive codecs remain later work.
+
+Implemented Core schema 6 with `document_jobs` and `document_segments` tables, transactional snapshot
+replacement, bounded job/segment/text limits, exact segment updates, resumable-job listing, state
+transitions, deletion, and cascade cleanup. `DocumentJobState` covers pending, running, completed,
+cancelled, and failed snapshots. Linux `CoreWorker` now exposes create/list/update/resume/cancel
+commands, emits startup restoration snapshots, and persists segment progress across worker restart.
+Core Storage tests (19 passed) and Linux worker tests (88 passed, 1 intentional environment skip)
+cover migration, restart recovery, output reconstruction, queue bounds, and credential/path absence.
+
 ## 2026-07-18 — TXT/Markdown document contract
 
 Assumption: the first Linux-first document slice treats TXT and Markdown as bounded UTF-8 line
