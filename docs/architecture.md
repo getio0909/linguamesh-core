@@ -34,6 +34,13 @@ bundled provider-catalog version, and stable enabled-feature identifiers. Client
 version dimension and require their feature subset before provider work; exact prerelease version
 matching is intentional until a compatible range policy is defined.
 
+The OpenAI-compatible translation path automatically protects common structured source spans before
+prompt construction. URLs, email addresses, Markdown code spans, fenced code, and common placeholder
+forms become collision-checked opaque markers; an incremental restorer validates marker identity and
+emits the original spans across split SSE deltas. Missing, duplicated, or unknown markers fail the
+operation as a typed malformed-response error. This is a safety boundary, not a user glossary or
+custom protected-term system; those require explicit translation options and additional validation.
+
 The ABI owns a Tokio runtime, a bounded event channel, and at most one active operation per opaque
 engine handle. A submitted `translate_text` envelope is decoded into the same `TranslationEngine`
 used by Rust callers. A forwarding task encodes ordered domain events back into Protobuf envelopes;

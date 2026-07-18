@@ -618,6 +618,332 @@ fn is_loopback_endpoint(url: &Url) -> bool {
     }
 }
 
+const PROTECTED_TOKEN_PREFIX: &str = "__LINGUAMESH_PROTECTED_";
+const PROTECTED_TOKEN_SUFFIX: &str = "__";
+
+/// 表示一个必须在翻译输出中原样恢复的非语言片段。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedSpan {
+    /// 发送给模型的不可变占位符。
+    token: String,
+    /// 用户源文本中的原始片段。
+    source: String,
+}
+
+/// 表示已替换受保护片段的源文本。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtectedSource {
+    /// 发送给模型的安全文本。
+    text: String,
+    /// 待恢复的受保护片段。
+    spans: Vec<ProtectedSpan>,
+}
+
+impl ProtectedSource {
+    /// 返回发送给模型的安全文本。
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// 返回受保护片段数量。
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// 判断源文本是否包含受保护片段。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    /// 创建与此源文本对应的增量恢复器。
+    #[must_use]
+    pub fn restorer(&self) -> ProtectedTextRestorer {
+        ProtectedTextRestorer {
+            spans: self.spans.clone(),
+            pending: String::new(),
+            seen: vec![false; self.spans.len()],
+        }
+    }
+}
+
+/// 扫描常见结构化片段并替换为不透明占位符。
+#[must_use]
+pub fn protect_source_text(source: &str) -> ProtectedSource {
+    let mut candidates = Vec::new();
+    collect_fenced_code_candidates(source, &mut candidates);
+    collect_inline_code_candidates(source, &mut candidates);
+    collect_placeholder_candidates(source, &mut candidates);
+    collect_url_candidates(source, &mut candidates);
+    collect_email_candidates(source, &mut candidates);
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(&left.1)));
+    let mut selected = Vec::new();
+    for (start, end) in candidates {
+        if start < end
+            && selected
+                .last()
+                .is_none_or(|(_, previous_end)| start >= *previous_end)
+        {
+            selected.push((start, end));
+        }
+    }
+
+    let mut protected_text = String::with_capacity(source.len());
+    let mut spans = Vec::with_capacity(selected.len());
+    let mut cursor = 0;
+    for (index, (start, end)) in selected.into_iter().enumerate() {
+        protected_text.push_str(&source[cursor..start]);
+        let mut token = format!("{PROTECTED_TOKEN_PREFIX}{index}{PROTECTED_TOKEN_SUFFIX}");
+        while source.contains(&token) {
+            token.push('_');
+        }
+        protected_text.push_str(&token);
+        spans.push(ProtectedSpan {
+            token,
+            source: source[start..end].to_owned(),
+        });
+        cursor = end;
+    }
+    protected_text.push_str(&source[cursor..]);
+    ProtectedSource {
+        text: protected_text,
+        spans,
+    }
+}
+
+/// 描述模型输出中的受保护片段恢复失败。
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ProtectedTextError {
+    /// 模型重复输出同一个占位符。
+    #[error("Provider output repeated a protected marker.")]
+    DuplicateMarker,
+    /// 模型遗漏了一个占位符。
+    #[error("Provider output omitted a protected marker.")]
+    MissingMarker,
+    /// 模型输出了未知占位符。
+    #[error("Provider output contained an invalid protected marker.")]
+    InvalidMarker,
+}
+
+/// 将流式模型输出中的占位符增量恢复为原始片段。
+pub struct ProtectedTextRestorer {
+    spans: Vec<ProtectedSpan>,
+    pending: String,
+    seen: Vec<bool>,
+}
+
+impl ProtectedTextRestorer {
+    /// 消费一段模型增量并返回可安全展示的文本。
+    pub fn push(&mut self, delta: &str) -> Result<String, ProtectedTextError> {
+        self.pending.push_str(delta);
+        if self.spans.is_empty() {
+            return Ok(std::mem::take(&mut self.pending));
+        }
+
+        let mut output = String::new();
+        loop {
+            let next_marker = self
+                .spans
+                .iter()
+                .enumerate()
+                .filter_map(|(index, span)| {
+                    self.pending
+                        .find(&span.token)
+                        .map(|position| (position, index))
+                })
+                .min_by_key(|(position, _)| *position);
+            let Some((position, index)) = next_marker else {
+                let keep = longest_marker_prefix_suffix(&self.pending, &self.spans);
+                let split = self.pending.len().saturating_sub(keep);
+                let plain = self.pending[..split].to_owned();
+                self.pending = self.pending[split..].to_owned();
+                append_plain_text(&mut output, &plain)?;
+                break;
+            };
+            if self.seen[index] {
+                return Err(ProtectedTextError::DuplicateMarker);
+            }
+            let plain = self.pending[..position].to_owned();
+            append_plain_text(&mut output, &plain)?;
+            output.push_str(&self.spans[index].source);
+            let end = position + self.spans[index].token.len();
+            self.pending = self.pending[end..].to_owned();
+            self.seen[index] = true;
+        }
+        Ok(output)
+    }
+
+    /// 完成输出并验证每个受保护片段均被恢复一次。
+    pub fn finish(&mut self) -> Result<String, ProtectedTextError> {
+        let mut output = self.push("")?;
+        if !self.pending.is_empty() {
+            let plain = std::mem::take(&mut self.pending);
+            append_plain_text(&mut output, &plain)?;
+        }
+        if self.seen.iter().any(|seen| !seen) {
+            return Err(ProtectedTextError::MissingMarker);
+        }
+        Ok(output)
+    }
+}
+
+fn append_plain_text(output: &mut String, plain: &str) -> Result<(), ProtectedTextError> {
+    if plain.contains(PROTECTED_TOKEN_PREFIX) {
+        return Err(ProtectedTextError::InvalidMarker);
+    }
+    output.push_str(plain);
+    Ok(())
+}
+
+fn longest_marker_prefix_suffix(text: &str, spans: &[ProtectedSpan]) -> usize {
+    spans
+        .iter()
+        .flat_map(|span| {
+            (1..=span.token.len().min(text.len()))
+                .rev()
+                .map(move |size| (span, size))
+        })
+        .find_map(|(span, size)| text.ends_with(&span.token[..size]).then_some(size))
+        .unwrap_or(0)
+}
+
+fn collect_fenced_code_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
+    let mut cursor = 0;
+    while let Some(relative_open) = source[cursor..].find("```") {
+        let open = cursor + relative_open;
+        let Some(relative_close) = source[open + 3..].find("```") else {
+            break;
+        };
+        let end = open + 3 + relative_close + 3;
+        candidates.push((open, end));
+        cursor = end;
+    }
+}
+
+fn collect_inline_code_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
+    let mut cursor = 0;
+    while let Some(relative_open) = source[cursor..].find('`') {
+        let open = cursor + relative_open;
+        if source[open..].starts_with("```") {
+            cursor = open + 3;
+            continue;
+        }
+        let Some(relative_close) = source[open + 1..].find('`') else {
+            break;
+        };
+        let end = open + 1 + relative_close + 1;
+        candidates.push((open, end));
+        cursor = end;
+    }
+}
+
+fn collect_placeholder_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
+    for (start, character) in source.char_indices() {
+        let remainder = &source[start..];
+        let end = if remainder.starts_with("${") || remainder.starts_with("{{") {
+            remainder
+                .find(if remainder.starts_with("{{") {
+                    "}}"
+                } else {
+                    "}"
+                })
+                .map(|relative| start + relative + if remainder.starts_with("{{") { 2 } else { 1 })
+        } else if character == '{' {
+            remainder.find('}').and_then(|relative| {
+                let body = &remainder[1..relative];
+                is_placeholder_body(body).then_some(start + relative + 1)
+            })
+        } else if character == '%' {
+            placeholder_percent_end(remainder).map(|relative| start + relative)
+        } else {
+            None
+        };
+        if let Some(end) = end {
+            candidates.push((start, end));
+        }
+    }
+}
+
+fn is_placeholder_body(body: &str) -> bool {
+    !body.is_empty()
+        && body.len() <= 128
+        && body.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+        })
+}
+
+fn placeholder_percent_end(remainder: &str) -> Option<usize> {
+    let bytes = remainder.as_bytes();
+    if bytes.first() != Some(&b'%') {
+        return None;
+    }
+    if bytes.get(1).is_some_and(|byte| b"sduif%@".contains(byte)) {
+        return Some(2);
+    }
+    if remainder.starts_with("%(") {
+        let close = remainder.find(")s")?;
+        return (close > 2).then_some(close + 2);
+    }
+    None
+}
+
+fn collect_url_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
+    for (start, _) in source.char_indices() {
+        let remainder = &source[start..];
+        if !(remainder.starts_with("https://") || remainder.starts_with("http://")) {
+            continue;
+        }
+        let mut end = start;
+        for (relative, character) in remainder.char_indices() {
+            if character.is_whitespace() || "<>[]{}\"".contains(character) {
+                break;
+            }
+            end = start + relative + character.len_utf8();
+        }
+        while end > start && ".,;:!?".contains(source[..end].chars().next_back().unwrap_or(' ')) {
+            end -= source[..end].chars().next_back().unwrap().len_utf8();
+        }
+        if end > start {
+            candidates.push((start, end));
+        }
+    }
+}
+
+fn collect_email_candidates(source: &str, candidates: &mut Vec<(usize, usize)>) {
+    for (at, character) in source.char_indices() {
+        if character != '@' {
+            continue;
+        }
+        let mut start = at;
+        while start > 0 {
+            let previous = source[..start].char_indices().next_back();
+            let Some((position, previous)) = previous else {
+                break;
+            };
+            if previous.is_ascii_alphanumeric() || matches!(previous, '.' | '_' | '+' | '-') {
+                start = position;
+            } else {
+                break;
+            }
+        }
+        let mut end = at + 1;
+        for (relative, next) in source[end..].char_indices() {
+            if next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_') {
+                end = at + 1 + relative + next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let right = &source[at + 1..end];
+        if start < at && right.contains('.') {
+            candidates.push((start, end));
+        }
+    }
+}
+
 /// 包含一次提供商无关的翻译请求。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranslationRequest {
@@ -787,8 +1113,8 @@ impl TranslationEvent {
 mod tests {
     use super::{
         CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
-        ProfileValidationError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
-        SecretValue, TranslationError, TranslationEvent,
+        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef,
+        SecretRefNamespace, SecretValue, TranslationError, TranslationEvent, protect_source_text,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1033,6 +1359,52 @@ mod tests {
             Err(CompatibilityError::MissingFeature(
                 "text_translation_v1".into()
             ))
+        );
+    }
+
+    #[test]
+    fn protected_source_covers_common_structured_spans_and_restores_split_markers() {
+        let source = "Open https://example.com/path, email alice@example.com, run `git status`, and keep {{name}}.";
+        let protected = protect_source_text(source);
+        assert_eq!(protected.len(), 4);
+        assert!(!protected.text().contains("https://example.com/path"));
+        assert!(!protected.text().contains("alice@example.com"));
+
+        let marker = &protected.spans[0].token;
+        let split = protected.text().find(marker).expect("marker") + 5;
+        let mut restorer = protected.restorer();
+        let mut restored_text = restorer
+            .push(&protected.text()[..split])
+            .expect("first output chunk");
+        restored_text.push_str(
+            &restorer
+                .push(&protected.text()[split..])
+                .expect("second chunk"),
+        );
+        restored_text.push_str(&restorer.finish().expect("restored output"));
+        assert_eq!(restored_text, source);
+    }
+
+    #[test]
+    fn protected_restorer_rejects_missing_duplicate_and_unknown_markers() {
+        let protected = protect_source_text("Keep `code` unchanged.");
+        let token = protected.spans[0].token.clone();
+
+        let mut missing = protected.restorer();
+        missing.push("translated").expect("plain output");
+        assert_eq!(missing.finish(), Err(ProtectedTextError::MissingMarker));
+
+        let mut duplicate = protected.restorer();
+        let repeated = format!("{token}{token}");
+        assert_eq!(
+            duplicate.push(&repeated),
+            Err(ProtectedTextError::DuplicateMarker)
+        );
+
+        let mut unknown = protected.restorer();
+        assert_eq!(
+            unknown.push("__LINGUAMESH_PROTECTED_99__"),
+            Err(ProtectedTextError::InvalidMarker)
         );
     }
 }

@@ -24,6 +24,11 @@ cargo run -p linguamesh-cli -- demo --text "Hello, LinguaMesh" --target zh-CN
 
 The demo starts a loopback fake provider and requires no API key.
 
+The shared OpenAI-compatible path protects common URLs, email addresses, Markdown code spans,
+fenced code, and placeholders while translating. Marker restoration is incremental and fails closed
+if a provider omits, duplicates, or changes a protected span. User glossaries and custom protected
+terms are not yet part of this prerelease slice.
+
 For native client conformance, keep the same deterministic provider running on a chosen loopback
 port:
 

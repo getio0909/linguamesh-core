@@ -153,6 +153,38 @@ Not verified or not implemented:
 - No package was released. The central compatibility and release manifests remain unreleased and
   require the compatible client checkpoints before they can record this source train.
 
+## 2026-07-18 — Protected-span integrity slice
+
+Assumption: automatic protection covers common URLs, email addresses, Markdown inline/fenced code,
+and placeholder forms (`{name}`, `${name}`, `{{name}}`, and printf-style markers). User-managed
+glossaries, custom product names, and provider families beyond the current OpenAI-compatible adapter
+remain separate work.
+
+Implemented:
+
+- The shared domain scans untrusted source text and replaces recognized structured spans with
+  collision-checked opaque markers. A bounded incremental restorer holds split marker fragments,
+  restores each original span exactly once, rejects duplicates and unknown markers, and fails closed
+  when a provider omits a required marker.
+- The OpenAI-compatible adapter sends the protected source with an explicit marker-preservation
+  instruction and restores markers before yielding streamed deltas. Safe structural failures map to
+  typed `MalformedResponse` errors without including source content.
+- Core compatibility advertises `protected_spans_v1`; Linux clients must negotiate this feature
+  before using the updated adapter.
+
+Validated locally with Rust 1.93.0:
+
+- `cargo fmt --all` passed.
+- `cargo check --workspace --all-targets --all-features --locked` passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` passed.
+- `cargo test --workspace --all-targets --all-features --locked` passed: 60 tests, 0 failed.
+- Domain tests cover common span scanning, split-marker restoration, missing, duplicate, and
+  unknown-marker rejection. The provider test captures the outbound JSON and verifies split-marker
+  restoration through a real SSE response.
+
+This slice does not claim complete glossary enforcement, user-selected protected terms, long-text
+chunking, translation memory, document translation, or stable-release readiness.
+
 ## 2026-07-17 — Linux secure-provider Core prerequisite
 
 Change identifier: `LM-CHANGE-2026-07-LINUX-SECURE-PROVIDER-1`
