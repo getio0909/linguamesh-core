@@ -386,9 +386,17 @@ fn validate_structure(format: DocumentFormat, text: &str) -> Result<(), Document
     let mut expecting_timestamp = false;
     let mut cue_count = 0usize;
     let mut cue_has_text = false;
+    let mut metadata = false;
     for (line, _) in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            if metadata {
+                metadata = false;
+                cue_start = true;
+                expecting_timestamp = false;
+                cue_has_text = false;
+                continue;
+            }
             if expecting_timestamp || (cue_count > 0 && !cue_has_text) {
                 return Err(DocumentError::InvalidStructure);
             }
@@ -398,8 +406,19 @@ fn validate_structure(format: DocumentFormat, text: &str) -> Result<(), Document
             continue;
         }
         if matches!(format, DocumentFormat::WebVtt)
+            && cue_start
+            && matches!(trimmed, "NOTE" | "STYLE" | "REGION")
+        {
+            metadata = true;
+            cue_start = false;
+            continue;
+        }
+        if metadata {
+            continue;
+        }
+        if matches!(format, DocumentFormat::WebVtt)
             && cue_count == 0
-            && (trimmed.starts_with("WEBVTT") || matches!(trimmed, "NOTE" | "STYLE" | "REGION"))
+            && trimmed.starts_with("WEBVTT")
         {
             cue_start = false;
             continue;
@@ -428,7 +447,7 @@ fn validate_structure(format: DocumentFormat, text: &str) -> Result<(), Document
             cue_has_text = true;
         }
     }
-    if expecting_timestamp || cue_count == 0 || (!cue_start && !cue_has_text) {
+    if expecting_timestamp || cue_count == 0 || (!metadata && !cue_start && !cue_has_text) {
         return Err(DocumentError::InvalidStructure);
     }
     Ok(())
@@ -536,6 +555,23 @@ mod tests {
         assert_eq!(
             job.reconstruct().expect("reconstruct"),
             "WEBVTT\n\ncue-1\n00:00.000 --> 00:01.000\n你好\n"
+        );
+        let with_note = "WEBVTT\n\n00:00.000 --> 00:01.000\nOne\n\nNOTE\nbetween cues\n\n00:02.000 --> 00:03.000\nTwo\n";
+        let mut job = DocumentJob::from_utf8("captions.vtt", with_note.as_bytes()).expect("note");
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prose.len(), 2);
+        job.apply_translation(prose[0], "一").expect("first cue");
+        job.apply_translation(prose[1], "二").expect("second cue");
+        assert_eq!(
+            job.reconstruct().expect("note reconstruct"),
+            with_note.replace("One", "一").replace("Two", "二")
         );
     }
 
