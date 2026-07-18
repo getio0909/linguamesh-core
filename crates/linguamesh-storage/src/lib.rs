@@ -1088,6 +1088,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Srt => "srt",
         DocumentFormat::WebVtt => "webvtt",
         DocumentFormat::Csv => "csv",
+        DocumentFormat::Json => "json",
     }
 }
 
@@ -1098,6 +1099,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "srt" => Ok(DocumentFormat::Srt),
         "webvtt" => Ok(DocumentFormat::WebVtt),
         "csv" => Ok(DocumentFormat::Csv),
+        "json" => Ok(DocumentFormat::Json),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1613,6 +1615,38 @@ mod tests {
         assert_eq!(
             snapshot.job.reconstruct().expect("reconstruct csv"),
             "id,comment\n1,\"译文, 世界\"\n"
+        );
+    }
+
+    #[test]
+    fn json_document_format_and_encoded_translation_survive_reopen() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("json-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("payload.json", br#"{"name":"Alice","count":2}"#)
+            .expect("json job");
+        storage
+            .save_document_job("json-job", &job, DocumentJobState::Pending)
+            .expect("save json job");
+        let name = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "\"Alice\"")
+            .expect("name segment");
+        storage
+            .update_document_segment("json-job", name, "爱丽丝")
+            .expect("translate json value");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("json-job")
+            .expect("load json job")
+            .expect("json snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Json);
+        assert_eq!(
+            snapshot.job.reconstruct().expect("reconstruct json"),
+            r#"{"name":"爱丽丝","count":2}"#
         );
     }
 

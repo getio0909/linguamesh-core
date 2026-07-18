@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Bounded TXT and Markdown inspection, segmentation, and reconstruction for LinguaMesh"
+description = "Bounded text document inspection, segmentation, and reconstruction for LinguaMesh"
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -19,6 +19,8 @@ pub enum DocumentFormat {
     WebVtt,
     /// UTF-8 逗号或兼容分隔符表格。
     Csv,
+    /// UTF-8 JSON 文档。
+    Json,
 }
 
 impl DocumentFormat {
@@ -34,6 +36,7 @@ impl DocumentFormat {
             "srt" => Ok(Self::Srt),
             "vtt" => Ok(Self::WebVtt),
             "csv" => Ok(Self::Csv),
+            "json" => Ok(Self::Json),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -123,7 +126,7 @@ impl DocumentJob {
         source_name: impl Into<String>,
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
-        Self::from_utf8_with_csv_columns(source_name, contents, None)
+        Self::from_utf8_with_json_paths(source_name, contents, None, None)
     }
 
     /// 从受限 UTF-8 内容创建文档任务，并可为 CSV 指定要翻译的列。
@@ -148,12 +151,45 @@ impl DocumentJob {
         Ok(Self::from_text(source_name, format, text))
     }
 
+    /// 从受限 UTF-8 内容创建 JSON 任务，并按 JSON Pointer 选择字符串值。
+    ///
+    /// 默认翻译所有字符串值；对象键、数字、布尔值和 `null` 始终原样保留。
+    /// `include_paths` 和 `exclude_paths` 使用 RFC 6901 JSON Pointer 的完整路径，
+    /// 排除规则优先于包含规则。非 JSON 格式忽略这些选项。
+    pub fn from_utf8_with_json_paths(
+        source_name: impl Into<String>,
+        contents: &[u8],
+        include_paths: Option<&[String]>,
+        exclude_paths: Option<&[String]>,
+    ) -> Result<Self, DocumentError> {
+        if contents.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::TooLarge);
+        }
+        let source_name = source_name.into();
+        let format = DocumentFormat::from_name(&source_name)?;
+        let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
+        let text = std::str::from_utf8(contents).map_err(|_| DocumentError::InvalidUtf8)?;
+        validate_structure(format, text)?;
+        if matches!(format, DocumentFormat::Json) {
+            return from_json_text(source_name, text, include_paths, exclude_paths);
+        }
+        if matches!(format, DocumentFormat::Csv) {
+            return from_csv_text(source_name, text, None);
+        }
+        Ok(Self::from_text(source_name, format, text))
+    }
+
     /// 从已解码的文本创建文档任务。
     #[must_use]
     pub fn from_text(source_name: impl Into<String>, format: DocumentFormat, text: &str) -> Self {
         let source_name = source_name.into();
         if matches!(format, DocumentFormat::Csv)
             && let Ok(job) = from_csv_text(source_name.clone(), text, None)
+        {
+            return job;
+        }
+        if matches!(format, DocumentFormat::Json)
+            && let Ok(job) = from_json_text(source_name.clone(), text, None, None)
         {
             return job;
         }
@@ -199,15 +235,18 @@ impl DocumentJob {
             .segments
             .get(index)
             .ok_or(DocumentError::UnknownSegment(index))?;
-        if !matches!(self.format, DocumentFormat::Csv) || segment.kind != DocumentSegmentKind::Prose
-        {
+        if segment.kind != DocumentSegmentKind::Prose {
             return Ok(Cow::Borrowed(segment.source_text.as_str()));
         }
-        decode_csv_field(
-            &segment.source_text,
-            detect_csv_delimiter(&self.source_text()),
-        )
-        .map(Cow::Owned)
+        match self.format {
+            DocumentFormat::Csv => decode_csv_field(
+                &segment.source_text,
+                detect_csv_delimiter(&self.source_text()),
+            )
+            .map(Cow::Owned),
+            DocumentFormat::Json => decode_json_string(&segment.source_text).map(Cow::Owned),
+            _ => Ok(Cow::Borrowed(segment.source_text.as_str())),
+        }
     }
 
     /// 返回未完成的可翻译段数量。
@@ -250,6 +289,9 @@ impl DocumentJob {
         let translated_text = translated_text.into();
         segment.translated_text = Some(match csv_delimiter {
             Some(delimiter) => encode_csv_field(&segment.source_text, &translated_text, delimiter),
+            None if matches!(self.format, DocumentFormat::Json) => {
+                encode_json_string(&translated_text)
+            }
             None => translated_text,
         });
         Ok(())
@@ -318,6 +360,289 @@ fn split_lines(text: &str) -> Vec<(String, String)> {
         lines.push((text[start..].to_owned(), String::new()));
     }
     lines
+}
+
+const MAX_JSON_TOKENS: usize = 5_000;
+const MAX_JSON_SEGMENTS: usize = 10_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum JsonPathSegment {
+    Key(String),
+    Index(usize),
+}
+
+struct JsonStringToken {
+    start: usize,
+    end: usize,
+    path: Vec<JsonPathSegment>,
+    is_key: bool,
+}
+
+struct JsonParser<'a> {
+    text: &'a str,
+    bytes: &'a [u8],
+    index: usize,
+    tokens: Vec<JsonStringToken>,
+}
+
+impl<'a> JsonParser<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            bytes: text.as_bytes(),
+            index: 0,
+            tokens: Vec::new(),
+        }
+    }
+
+    fn parse(mut self) -> Result<Vec<JsonStringToken>, DocumentError> {
+        self.skip_whitespace();
+        self.parse_value(&[])?;
+        self.skip_whitespace();
+        if self.index != self.bytes.len() {
+            return Err(DocumentError::InvalidStructure);
+        }
+        Ok(self.tokens)
+    }
+
+    fn parse_value(&mut self, path: &[JsonPathSegment]) -> Result<(), DocumentError> {
+        self.skip_whitespace();
+        let Some(byte) = self.bytes.get(self.index).copied() else {
+            return Err(DocumentError::InvalidStructure);
+        };
+        match byte {
+            b'{' => self.parse_object(path),
+            b'[' => self.parse_array(path),
+            b'"' => {
+                self.parse_string(path, false)?;
+                Ok(())
+            }
+            b't' | b'f' | b'n' | b'-' | b'0'..=b'9' => self.parse_primitive(),
+            _ => Err(DocumentError::InvalidStructure),
+        }
+    }
+
+    fn parse_object(&mut self, path: &[JsonPathSegment]) -> Result<(), DocumentError> {
+        self.expect_byte(b'{')?;
+        self.skip_whitespace();
+        if self.consume_byte(b'}') {
+            return Ok(());
+        }
+        loop {
+            self.skip_whitespace();
+            if self.bytes.get(self.index) != Some(&b'"') {
+                return Err(DocumentError::InvalidStructure);
+            }
+            let (start, end) = self.parse_string(path, true)?;
+            let key = serde_json::from_str::<String>(&self.text[start..end])
+                .map_err(|_| DocumentError::InvalidStructure)?;
+            self.skip_whitespace();
+            self.expect_byte(b':')?;
+            let mut child_path = path.to_vec();
+            child_path.push(JsonPathSegment::Key(key));
+            self.parse_value(&child_path)?;
+            self.skip_whitespace();
+            if self.consume_byte(b'}') {
+                return Ok(());
+            }
+            self.expect_byte(b',')?;
+        }
+    }
+
+    fn parse_array(&mut self, path: &[JsonPathSegment]) -> Result<(), DocumentError> {
+        self.expect_byte(b'[')?;
+        self.skip_whitespace();
+        if self.consume_byte(b']') {
+            return Ok(());
+        }
+        let mut item_index = 0usize;
+        loop {
+            let mut child_path = path.to_vec();
+            child_path.push(JsonPathSegment::Index(item_index));
+            self.parse_value(&child_path)?;
+            item_index = item_index
+                .checked_add(1)
+                .ok_or(DocumentError::InvalidStructure)?;
+            self.skip_whitespace();
+            if self.consume_byte(b']') {
+                return Ok(());
+            }
+            self.expect_byte(b',')?;
+        }
+    }
+
+    fn parse_string(
+        &mut self,
+        path: &[JsonPathSegment],
+        is_key: bool,
+    ) -> Result<(usize, usize), DocumentError> {
+        let start = self.index;
+        self.expect_byte(b'"')?;
+        loop {
+            let Some(byte) = self.bytes.get(self.index).copied() else {
+                return Err(DocumentError::InvalidStructure);
+            };
+            match byte {
+                b'"' => {
+                    self.index += 1;
+                    if self.tokens.len() >= MAX_JSON_TOKENS {
+                        return Err(DocumentError::InvalidStructure);
+                    }
+                    let end = self.index;
+                    serde_json::from_str::<String>(&self.text[start..end])
+                        .map_err(|_| DocumentError::InvalidStructure)?;
+                    self.tokens.push(JsonStringToken {
+                        start,
+                        end,
+                        path: path.to_vec(),
+                        is_key,
+                    });
+                    return Ok((start, end));
+                }
+                b'\\' => {
+                    self.index = self
+                        .index
+                        .checked_add(2)
+                        .ok_or(DocumentError::InvalidStructure)?;
+                }
+                byte if byte < 0x20 => return Err(DocumentError::InvalidStructure),
+                _ => self.index += 1,
+            }
+        }
+    }
+
+    fn parse_primitive(&mut self) -> Result<(), DocumentError> {
+        let start = self.index;
+        while let Some(byte) = self.bytes.get(self.index).copied() {
+            if matches!(byte, b',' | b']' | b'}' | b' ' | b'\n' | b'\r' | b'\t') {
+                break;
+            }
+            self.index += 1;
+        }
+        if start == self.index
+            || serde_json::from_str::<serde_json::Value>(&self.text[start..self.index]).is_err()
+        {
+            return Err(DocumentError::InvalidStructure);
+        }
+        Ok(())
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            self.index += 1;
+        }
+    }
+
+    fn consume_byte(&mut self, expected: u8) -> bool {
+        if self.bytes.get(self.index) == Some(&expected) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_byte(&mut self, expected: u8) -> Result<(), DocumentError> {
+        self.consume_byte(expected)
+            .then_some(())
+            .ok_or(DocumentError::InvalidStructure)
+    }
+}
+
+fn parse_json_tokens(text: &str) -> Result<Vec<JsonStringToken>, DocumentError> {
+    JsonParser::new(text).parse()
+}
+
+fn json_pointer(path: &[JsonPathSegment]) -> String {
+    let mut pointer = String::new();
+    for segment in path {
+        pointer.push('/');
+        match segment {
+            JsonPathSegment::Key(key) => {
+                pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
+            }
+            JsonPathSegment::Index(index) => pointer.push_str(&index.to_string()),
+        }
+    }
+    pointer
+}
+
+fn json_path_selected(
+    path: &[JsonPathSegment],
+    include_paths: Option<&[String]>,
+    exclude_paths: Option<&[String]>,
+) -> bool {
+    let pointer = json_pointer(path);
+    if exclude_paths.is_some_and(|paths| paths.iter().any(|candidate| candidate == &pointer)) {
+        return false;
+    }
+    include_paths.is_none_or(|paths| paths.iter().any(|candidate| candidate == &pointer))
+}
+
+fn decode_json_string(raw: &str) -> Result<String, DocumentError> {
+    serde_json::from_str(raw).map_err(|_| DocumentError::InvalidStructure)
+}
+
+fn encode_json_string(translated: &str) -> String {
+    serde_json::to_string(translated).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
+// 将 JSON 字符串值切成可翻译段，同时保留所有非字符串字节和原始转义。
+fn from_json_text(
+    source_name: String,
+    text: &str,
+    include_paths: Option<&[String]>,
+    exclude_paths: Option<&[String]>,
+) -> Result<DocumentJob, DocumentError> {
+    let tokens = parse_json_tokens(text)?;
+    let mut segments = Vec::with_capacity(tokens.len().saturating_mul(2).saturating_add(1));
+    let mut cursor = 0usize;
+    for token in tokens {
+        if cursor < token.start {
+            segments.push(DocumentSegment {
+                index: segments.len(),
+                kind: DocumentSegmentKind::Verbatim,
+                source_text: text[cursor..token.start].to_owned(),
+                translated_text: None,
+                line_ending: String::new(),
+            });
+        }
+        let kind = if !token.is_key && json_path_selected(&token.path, include_paths, exclude_paths)
+        {
+            DocumentSegmentKind::Prose
+        } else {
+            DocumentSegmentKind::Verbatim
+        };
+        segments.push(DocumentSegment {
+            index: segments.len(),
+            kind,
+            source_text: text[token.start..token.end].to_owned(),
+            translated_text: None,
+            line_ending: String::new(),
+        });
+        cursor = token.end;
+        if segments.len() > MAX_JSON_SEGMENTS {
+            return Err(DocumentError::InvalidStructure);
+        }
+    }
+    if cursor < text.len() {
+        segments.push(DocumentSegment {
+            index: segments.len(),
+            kind: DocumentSegmentKind::Verbatim,
+            source_text: text[cursor..].to_owned(),
+            translated_text: None,
+            line_ending: String::new(),
+        });
+    }
+    Ok(DocumentJob {
+        format: DocumentFormat::Json,
+        source_name,
+        segments,
+    })
 }
 
 const CSV_DELIMITER_CANDIDATES: [u8; 4] = [b',', b';', b'\t', b'|'];
@@ -707,6 +1032,10 @@ fn validate_structure_with_delimiter(
     text: &str,
     delimiter: Option<char>,
 ) -> Result<(), DocumentError> {
+    if matches!(format, DocumentFormat::Json) {
+        parse_json_tokens(text)?;
+        return Ok(());
+    }
     if matches!(format, DocumentFormat::Csv) {
         parse_csv_records(
             text,
@@ -826,6 +1155,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("table.CSV"),
             Ok(DocumentFormat::Csv)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("payload.JSON"),
+            Ok(DocumentFormat::Json)
         );
         assert_eq!(
             DocumentFormat::from_name("notes.docx"),
@@ -1069,6 +1402,92 @@ mod tests {
         );
         assert_eq!(
             DocumentJob::from_utf8("table.csv", b"id,name\n1,\"quoted\"tail\n"),
+            Err(DocumentError::InvalidStructure)
+        );
+    }
+
+    #[test]
+    fn json_preserves_shape_and_translates_selected_string_paths() {
+        let source = "{\n  \"id\": 7,\n  \"profile\": { \"name\": \"Alice\", \"note\": \"Hello \\\"world\\\"\" },\n  \"items\": [\"one\", {\"label\": \"two\"}],\n  \"active\": true,\n  \"missing\": null\n}\n";
+        let include = vec!["/profile/name".to_owned(), "/items/1/label".to_owned()];
+        let exclude = vec!["/items/1/label".to_owned()];
+        let mut job = DocumentJob::from_utf8_with_json_paths(
+            "payload.json",
+            source.as_bytes(),
+            Some(&include),
+            Some(&exclude),
+        )
+        .expect("json");
+        assert_eq!(job.format, DocumentFormat::Json);
+        assert_eq!(job.pending_count(), 1);
+        let name = job
+            .segments
+            .iter()
+            .enumerate()
+            .find(|(_, segment)| segment.source_text == "\"Alice\"")
+            .map(|(index, _)| index)
+            .expect("name");
+        assert_eq!(job.translation_source_text(name).unwrap(), "Alice");
+        job.apply_translation(name, "爱丽丝")
+            .expect("name translation");
+        assert_eq!(
+            job.reconstruct().unwrap(),
+            source.replace("\"Alice\"", "\"爱丽丝\"")
+        );
+        assert!(
+            job.segments
+                .iter()
+                .any(|segment| segment.source_text == "\"id\""
+                    && segment.kind == DocumentSegmentKind::Verbatim)
+        );
+        assert!(
+            job.segments
+                .iter()
+                .any(|segment| segment.source_text.contains("true")
+                    && segment.kind == DocumentSegmentKind::Verbatim)
+        );
+    }
+
+    #[test]
+    fn json_defaults_to_all_values_and_reencodes_escaped_translation() {
+        let source = r#"{"quote":"原文 \\\"引号\\\"","array":["one","two"],"slash/key":"value"}"#;
+        let mut job = DocumentJob::from_utf8("payload.json", source.as_bytes()).expect("json");
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prose.len(), 4);
+        for index in prose {
+            let source_text = job.translation_source_text(index).unwrap().into_owned();
+            job.apply_translation(index, format!("{source_text}-译"))
+                .expect("translate json value");
+        }
+        let output = job.reconstruct().expect("reconstruct json");
+        let value = serde_json::from_str::<serde_json::Value>(&output).expect("valid json");
+        assert!(
+            value["quote"]
+                .as_str()
+                .is_some_and(|text| text.ends_with("-译"))
+        );
+        assert_eq!(value["array"][0], "one-译");
+    }
+
+    #[test]
+    fn rejects_malformed_json_structure() {
+        assert_eq!(
+            DocumentJob::from_utf8("payload.json", br#"{"name":"unclosed}"#),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("payload.json", br#"{"name":"ok" "other":"bad"}"#),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("payload.json", br#"{"name":"bad\q"}"#),
             Err(DocumentError::InvalidStructure)
         );
     }
