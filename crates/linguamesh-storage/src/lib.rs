@@ -1088,6 +1088,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Srt => "srt",
         DocumentFormat::WebVtt => "webvtt",
         DocumentFormat::Csv => "csv",
+        DocumentFormat::Html => "html",
         DocumentFormat::Json => "json",
     }
 }
@@ -1099,6 +1100,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "srt" => Ok(DocumentFormat::Srt),
         "webvtt" => Ok(DocumentFormat::WebVtt),
         "csv" => Ok(DocumentFormat::Csv),
+        "html" => Ok(DocumentFormat::Html),
         "json" => Ok(DocumentFormat::Json),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
@@ -1647,6 +1649,37 @@ mod tests {
         assert_eq!(
             snapshot.job.reconstruct().expect("reconstruct json"),
             r#"{"name":"爱丽丝","count":2}"#
+        );
+    }
+
+    #[test]
+    fn html_document_format_and_encoded_translation_survive_reopen() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("html-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("page.html", b"<p>Hello</p>").expect("html job");
+        storage
+            .save_document_job("html-job", &job, DocumentJobState::Pending)
+            .expect("save html job");
+        let text = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "Hello")
+            .expect("html text segment");
+        storage
+            .update_document_segment("html-job", text, "Hello <safe>")
+            .expect("translate html text");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("html-job")
+            .expect("load html job")
+            .expect("html snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Html);
+        assert_eq!(
+            snapshot.job.reconstruct().expect("reconstruct html"),
+            "<p>Hello &lt;safe&gt;</p>"
         );
     }
 

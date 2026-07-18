@@ -1,7 +1,7 @@
 CREATE TABLE document_jobs_v9 (
     job_id TEXT PRIMARY KEY,
     state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'paused', 'completed', 'cancelled', 'failed')),
-    format TEXT NOT NULL CHECK (format IN ('txt', 'markdown', 'srt', 'webvtt', 'csv', 'json')),
+    format TEXT NOT NULL CHECK (format IN ('txt', 'markdown', 'srt', 'webvtt', 'csv', 'html', 'json')),
     source_name TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())

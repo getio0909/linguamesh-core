@@ -19,6 +19,8 @@ pub enum DocumentFormat {
     WebVtt,
     /// UTF-8 逗号或兼容分隔符表格。
     Csv,
+    /// UTF-8 HTML 文档。
+    Html,
     /// UTF-8 JSON 文档。
     Json,
 }
@@ -36,6 +38,7 @@ impl DocumentFormat {
             "srt" => Ok(Self::Srt),
             "vtt" => Ok(Self::WebVtt),
             "csv" => Ok(Self::Csv),
+            "html" | "htm" => Ok(Self::Html),
             "json" => Ok(Self::Json),
             _ => Err(DocumentError::UnsupportedFormat),
         }
@@ -193,6 +196,11 @@ impl DocumentJob {
         {
             return job;
         }
+        if matches!(format, DocumentFormat::Html)
+            && let Ok(job) = from_html_text(source_name.clone(), text)
+        {
+            return job;
+        }
         let mut in_fenced_code = false;
         let subtitle_kinds = subtitle_line_kinds(format, text);
         let segments = split_lines(text)
@@ -292,6 +300,9 @@ impl DocumentJob {
             None if matches!(self.format, DocumentFormat::Json) => {
                 encode_json_string(&translated_text)
             }
+            None if matches!(self.format, DocumentFormat::Html) => {
+                encode_html_text(&translated_text)
+            }
             None => translated_text,
         });
         Ok(())
@@ -360,6 +371,196 @@ fn split_lines(text: &str) -> Vec<(String, String)> {
         lines.push((text[start..].to_owned(), String::new()));
     }
     lines
+}
+
+const MAX_HTML_SEGMENTS: usize = 10_000;
+const HTML_VOID_TAGS: [&str; 14] = [
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+const HTML_RAW_TEXT_TAGS: [&str; 2] = ["script", "style"];
+
+struct HtmlToken {
+    start: usize,
+    end: usize,
+    translatable: bool,
+}
+
+// 在 HTML 标签边界内扫描引号，拒绝未闭合的结构而不执行任何实体或脚本。
+fn html_tag_end(text: &str, start: usize) -> Result<usize, DocumentError> {
+    let bytes = text.as_bytes();
+    let mut quote = None;
+    for (index, byte) in bytes.iter().copied().enumerate().skip(start + 1) {
+        if let Some(expected) = quote {
+            if byte == expected {
+                quote = None;
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => quote = Some(byte),
+            b'>' => return Ok(index + 1),
+            _ => {}
+        }
+    }
+    Err(DocumentError::InvalidStructure)
+}
+
+fn html_find_case_insensitive(text: &str, pattern: &str, start: usize) -> Option<usize> {
+    let pattern = pattern.as_bytes();
+    let bytes = text.as_bytes();
+    if pattern.is_empty() || start >= bytes.len() || pattern.len() > bytes.len() - start {
+        return None;
+    }
+    (start..=bytes.len() - pattern.len()).find(|offset| {
+        bytes[*offset..*offset + pattern.len()]
+            .iter()
+            .zip(pattern)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+fn html_tag_name(raw: &str) -> Result<(Option<String>, bool, bool), DocumentError> {
+    let mut body = raw[1..raw.len() - 1].trim();
+    if body.is_empty() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    let closing = body.starts_with('/');
+    if closing {
+        body = body[1..].trim_start();
+    }
+    if body.starts_with('!') || body.starts_with('?') {
+        return Ok((None, closing, false));
+    }
+    let self_closing = !closing && body.trim_end().ends_with('/');
+    let name_end = body
+        .find(|character: char| character.is_ascii_whitespace() || matches!(character, '/' | '>'))
+        .unwrap_or(body.len());
+    let name = &body[..name_end];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | ':'))
+    {
+        return Err(DocumentError::InvalidStructure);
+    }
+    Ok((Some(name.to_ascii_lowercase()), closing, self_closing))
+}
+
+// 通过标签栈验证 HTML 结构，并将可见文本节点与结构字节分开。
+fn parse_html_tokens(text: &str) -> Result<Vec<HtmlToken>, DocumentError> {
+    if text.is_empty() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    let mut tokens = Vec::new();
+    let mut stack = Vec::<String>::new();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        if let Some(raw_tag) = stack
+            .last()
+            .filter(|tag| HTML_RAW_TEXT_TAGS.contains(&tag.as_str()))
+            .cloned()
+        {
+            let close = html_find_case_insensitive(text, &format!("</{raw_tag}"), cursor)
+                .ok_or(DocumentError::InvalidStructure)?;
+            if close > cursor {
+                tokens.push(HtmlToken {
+                    start: cursor,
+                    end: close,
+                    translatable: false,
+                });
+                cursor = close;
+                continue;
+            }
+        }
+        if text.as_bytes().get(cursor) == Some(&b'<') {
+            if text[cursor..].starts_with("<!--") {
+                let end = text[cursor + 4..]
+                    .find("-->")
+                    .map(|offset| cursor + 4 + offset + 3)
+                    .ok_or(DocumentError::InvalidStructure)?;
+                tokens.push(HtmlToken {
+                    start: cursor,
+                    end,
+                    translatable: false,
+                });
+                cursor = end;
+                continue;
+            }
+            let end = html_tag_end(text, cursor)?;
+            let raw = &text[cursor..end];
+            let (name, closing, self_closing) = html_tag_name(raw)?;
+            if let Some(name) = name {
+                if closing {
+                    if stack.pop().as_deref() != Some(name.as_str()) {
+                        return Err(DocumentError::InvalidStructure);
+                    }
+                } else if !self_closing && !HTML_VOID_TAGS.contains(&name.as_str()) {
+                    stack.push(name);
+                }
+            }
+            tokens.push(HtmlToken {
+                start: cursor,
+                end,
+                translatable: false,
+            });
+            cursor = end;
+            continue;
+        }
+        let end = text[cursor..]
+            .find('<')
+            .map_or(text.len(), |offset| cursor + offset);
+        let content = &text[cursor..end];
+        let inside_raw_text = stack
+            .iter()
+            .any(|tag| HTML_RAW_TEXT_TAGS.contains(&tag.as_str()));
+        tokens.push(HtmlToken {
+            start: cursor,
+            end,
+            translatable: !inside_raw_text
+                && content.chars().any(|character| !character.is_whitespace()),
+        });
+        cursor = end;
+        if tokens.len() > MAX_HTML_SEGMENTS {
+            return Err(DocumentError::InvalidStructure);
+        }
+    }
+    if !stack.is_empty() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    Ok(tokens)
+}
+
+fn encode_html_text(translated: &str) -> String {
+    translated
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+// 将 HTML token 转成保留标签、脚本、样式和空白的文档段。
+fn from_html_text(source_name: String, text: &str) -> Result<DocumentJob, DocumentError> {
+    let tokens = parse_html_tokens(text)?;
+    let segments = tokens
+        .into_iter()
+        .enumerate()
+        .map(|(index, token)| DocumentSegment {
+            index,
+            kind: if token.translatable {
+                DocumentSegmentKind::Prose
+            } else {
+                DocumentSegmentKind::Verbatim
+            },
+            source_text: text[token.start..token.end].to_owned(),
+            translated_text: None,
+            line_ending: String::new(),
+        })
+        .collect::<Vec<_>>();
+    Ok(DocumentJob {
+        format: DocumentFormat::Html,
+        source_name,
+        segments,
+    })
 }
 
 const MAX_JSON_TOKENS: usize = 5_000;
@@ -1032,6 +1233,10 @@ fn validate_structure_with_delimiter(
     text: &str,
     delimiter: Option<char>,
 ) -> Result<(), DocumentError> {
+    if matches!(format, DocumentFormat::Html) {
+        parse_html_tokens(text)?;
+        return Ok(());
+    }
     if matches!(format, DocumentFormat::Json) {
         parse_json_tokens(text)?;
         return Ok(());
@@ -1159,6 +1364,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("payload.JSON"),
             Ok(DocumentFormat::Json)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("page.HTML"),
+            Ok(DocumentFormat::Html)
         );
         assert_eq!(
             DocumentFormat::from_name("notes.docx"),
@@ -1488,6 +1697,49 @@ mod tests {
         );
         assert_eq!(
             DocumentJob::from_utf8("payload.json", br#"{"name":"bad\q"}"#),
+            Err(DocumentError::InvalidStructure)
+        );
+    }
+
+    #[test]
+    fn html_preserves_tags_attributes_scripts_and_styles() {
+        let source = "<!DOCTYPE html>\n<html id=\"root\" data-page=\"1\"><head><style>.x { color: red; }</style><script>if (a < b) c();</script></head><body><p>Hello <a href=\"https://example.test\">world</a>!</p></body></html>";
+        let mut job = DocumentJob::from_utf8("page.html", source.as_bytes()).expect("html");
+        assert_eq!(job.format, DocumentFormat::Html);
+        assert_eq!(job.pending_count(), 3);
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in prose {
+            let source_text = job.translation_source_text(index).unwrap().into_owned();
+            job.apply_translation(index, format!("{source_text}-译<safe>"))
+                .expect("translate html text");
+        }
+        let output = job.reconstruct().expect("reconstruct html");
+        assert!(output.contains("id=\"root\" data-page=\"1\""));
+        assert!(output.contains("<style>.x { color: red; }</style>"));
+        assert!(output.contains("<script>if (a < b) c();</script>"));
+        assert!(output.contains("&lt;safe&gt;"));
+        assert!(output.contains("href=\"https://example.test\""));
+    }
+
+    #[test]
+    fn rejects_malformed_html_structure() {
+        assert_eq!(
+            DocumentJob::from_utf8("page.html", b"<html><body>text</html>"),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("page.html", b"<html><script>if (a < b)</html>"),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("page.html", b"<html><body><p>text"),
             Err(DocumentError::InvalidStructure)
         );
     }
