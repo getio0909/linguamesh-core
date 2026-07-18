@@ -12,7 +12,9 @@ const PROVIDER_PROFILE_STATE_MIGRATION: &str =
     include_str!("../../../migrations/0002_provider_profile_state.sql");
 const TRANSLATION_HISTORY_MIGRATION: &str =
     include_str!("../../../migrations/0003_translation_history.sql");
-const LATEST_SCHEMA_VERSION: u32 = 3;
+const TRANSLATION_HISTORY_POLICY_MIGRATION: &str =
+    include_str!("../../../migrations/0004_translation_history_policy.sql");
+const LATEST_SCHEMA_VERSION: u32 = 4;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -21,6 +23,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
     (3, TRANSLATION_HISTORY_MIGRATION),
+    (4, TRANSLATION_HISTORY_POLICY_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -173,6 +176,31 @@ impl Storage {
             .map_err(|error| map_error(&error))
     }
 
+    /// 返回是否允许新的标准请求写入本地翻译历史。
+    pub fn translation_history_enabled(&self) -> Result<bool, TranslationError> {
+        self.connection
+            .query_row(
+                "SELECT enabled FROM translation_history_policy WHERE singleton = 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 持久化新的本地翻译历史写入策略，不删除既有记录。
+    pub fn set_translation_history_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), TranslationError> {
+        self.connection
+            .execute(
+                "INSERT INTO translation_history_policy (singleton, enabled) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled",
+                params![enabled],
+            )
+            .map(|_| ())
+            .map_err(|error| map_error(&error))
+    }
+
     /// 按最新写入顺序返回有限数量的本地翻译历史。
     pub fn translation_history(
         &self,
@@ -209,6 +237,9 @@ impl Storage {
         translated_text: &str,
     ) -> Result<(), TranslationError> {
         if request.is_incognito() {
+            return Ok(());
+        }
+        if !self.translation_history_enabled()? {
             return Ok(());
         }
         if request.source_text.len() > MAX_TRANSLATION_HISTORY_TEXT_BYTES
@@ -651,7 +682,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 3);
+        assert_eq!(storage.schema_version().expect("version"), 4);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -679,6 +710,50 @@ mod tests {
 
         storage.clear_translation_history().expect("clear history");
         assert_eq!(storage.translation_history_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn translation_history_policy_persists_without_deleting_existing_entries() {
+        let directory = tempfile::tempdir().expect("directory");
+        let database_path = directory.path().join("history-policy.sqlite3");
+        let mut storage = Storage::open(&database_path).expect("storage");
+        let mut first = TranslationRequest::new("hello", "zh-CN", "model");
+        first.operation_id = linguamesh_domain::OperationId::from_value("policy-operation");
+        storage
+            .record_translation_history(&first, "你好")
+            .expect("record history");
+        assert!(storage.translation_history_enabled().expect("policy"));
+
+        storage
+            .set_translation_history_enabled(false)
+            .expect("disable history");
+        let mut second = TranslationRequest::new("second", "zh-CN", "model");
+        second.operation_id = linguamesh_domain::OperationId::from_value("disabled-operation");
+        storage
+            .record_translation_history(&second, "第二条")
+            .expect("disabled record");
+        assert_eq!(storage.translation_history_count().expect("count"), 1);
+        assert_eq!(
+            storage.translation_history(10).expect("entries")[0].operation_id,
+            "policy-operation"
+        );
+        drop(storage);
+
+        let mut reopened = Storage::open(&database_path).expect("reopened storage");
+        assert!(
+            !reopened
+                .translation_history_enabled()
+                .expect("persisted policy")
+        );
+        reopened
+            .set_translation_history_enabled(true)
+            .expect("enable history");
+        let mut third = TranslationRequest::new("third", "zh-CN", "model");
+        third.operation_id = linguamesh_domain::OperationId::from_value("enabled-operation");
+        reopened
+            .record_translation_history(&third, "第三条")
+            .expect("enabled record");
+        assert_eq!(reopened.translation_history_count().expect("count"), 2);
     }
 
     #[test]
@@ -850,7 +925,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 3);
+        assert_eq!(storage.schema_version().expect("version"), 4);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -932,7 +1007,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 3);
+        assert_eq!(storage.schema_version().expect("version"), 4);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

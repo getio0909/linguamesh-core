@@ -294,3 +294,25 @@ Validated locally with Rust 1.93.0:
 - `cargo test -p linguamesh-storage --all-targets --all-features --offline` passed: 14 tests,
   0 failed.
 - `git diff --check` passed.
+
+## 2026-07-18 — Linux history policy contract
+
+Assumption: disabling history changes only future standard-request persistence; existing entries
+remain available for inspection, export, and deletion, while Incognito remains an unconditional
+per-request opt-out.
+
+Implemented:
+
+- Schema 4 adds a singleton `translation_history_policy` table with an enabled-by-default flag.
+- `Storage::translation_history_enabled` and `Storage::set_translation_history_enabled` expose
+  the persisted policy without storing source text, output, or credentials in the setting.
+- `Storage::record_translation_history` checks the policy before applying the existing bounded
+  write path; disabled history does not delete existing entries.
+- Storage tests cover default enablement, disabled-write behavior, reopen persistence, and re-enable.
+
+Validated locally with Rust 1.93.0:
+
+- `cargo fmt --all` passed.
+- `cargo test -p linguamesh-storage --all-targets --all-features --offline` passed: 15 tests,
+  0 failed.
+- `git diff --check` passed.
