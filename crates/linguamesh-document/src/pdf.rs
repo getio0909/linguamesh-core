@@ -563,6 +563,7 @@ pub(crate) fn warnings(package: &[u8]) -> Result<Vec<DocumentWarning>, DocumentE
     let mut warnings = vec![DocumentWarning {
         kind: DocumentWarningKind::PdfReconstructionLimited,
         page: None,
+        cue: None,
     }];
     for page in 0..document.pages.len() {
         let spans = document
@@ -574,6 +575,7 @@ pub(crate) fn warnings(package: &[u8]) -> Result<Vec<DocumentWarning>, DocumentE
             warnings.push(DocumentWarning {
                 kind: DocumentWarningKind::PdfImageOnlyPage,
                 page: Some(page + 1),
+                cue: None,
             });
             continue;
         }
@@ -585,6 +587,7 @@ pub(crate) fn warnings(package: &[u8]) -> Result<Vec<DocumentWarning>, DocumentE
             warnings.push(DocumentWarning {
                 kind: DocumentWarningKind::PdfUncertainReadingOrder,
                 page: Some(page + 1),
+                cue: None,
             });
         }
     }

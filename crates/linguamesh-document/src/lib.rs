@@ -128,6 +128,10 @@ pub enum DocumentWarningKind {
     PdfUncertainReadingOrder,
     /// PDF 重建保留文本和页面关联，但不承诺像素级版式一致。
     PdfReconstructionLimited,
+    /// 字幕行长度超过默认可读性建议。
+    SubtitleLineLengthExceeded,
+    /// 字幕阅读速度超过默认可读性建议。
+    SubtitleReadingSpeedHigh,
 }
 
 /// 与文档或具体页面关联的导入/导出限制。
@@ -137,6 +141,9 @@ pub struct DocumentWarning {
     pub kind: DocumentWarningKind,
     /// 1 起始的 PDF 页码；文档级 warning 使用 `None`。
     pub page: Option<usize>,
+    /// 1 起始的字幕 cue 序号；非字幕 warning 使用 `None`。
+    #[serde(default)]
+    pub cue: Option<usize>,
 }
 
 impl DocumentSegment {
@@ -425,14 +432,38 @@ impl DocumentJob {
 
     /// 返回当前任务的结构化限制提示，不包含源文本或敏感信息。
     pub fn warnings(&self) -> Result<Vec<DocumentWarning>, DocumentError> {
-        if !matches!(self.format, DocumentFormat::Pdf) {
-            return Ok(Vec::new());
+        self.warnings_with_subtitle_limits(
+            DEFAULT_SUBTITLE_MAX_LINE_CHARS,
+            DEFAULT_SUBTITLE_MAX_READING_SPEED,
+        )
+    }
+
+    /// 使用调用方提供的可读性阈值生成结构化限制提示。
+    pub fn warnings_with_subtitle_limits(
+        &self,
+        max_subtitle_line_chars: usize,
+        max_subtitle_reading_speed: u64,
+    ) -> Result<Vec<DocumentWarning>, DocumentError> {
+        match self.format {
+            DocumentFormat::Pdf => {
+                let package = self
+                    .package
+                    .as_deref()
+                    .ok_or(DocumentError::InvalidStructure)?;
+                pdf::warnings(package)
+            }
+            DocumentFormat::Srt | DocumentFormat::WebVtt => {
+                let source = self.source_text();
+                validate_structure(self.format, &source)?;
+                subtitle_warnings(
+                    self.format,
+                    &source,
+                    max_subtitle_line_chars,
+                    max_subtitle_reading_speed,
+                )
+            }
+            _ => Ok(Vec::new()),
         }
-        let package = self
-            .package
-            .as_deref()
-            .ok_or(DocumentError::InvalidStructure)?;
-        pdf::warnings(package)
     }
 
     /// 返回未完成的可翻译段数量。
@@ -1378,31 +1409,26 @@ fn looks_like_identifier_header(header: &str) -> bool {
         || normalized.ends_with("-key")
 }
 
-// 校验字幕时间戳的时钟字段和毫秒字段。
-fn valid_timestamp_line(line: &str, format: DocumentFormat) -> bool {
-    let Some((start, end)) = line.split_once("-->") else {
-        return false;
-    };
-    valid_timestamp(start.trim(), format)
-        && valid_timestamp(end.split_whitespace().next().unwrap_or(""), format)
-}
+/// 字幕单行的默认可读性上限。
+pub const DEFAULT_SUBTITLE_MAX_LINE_CHARS: usize = 42;
 
-// 校验 SRT 或 WebVTT 的单个时间戳。
-fn valid_timestamp(value: &str, format: DocumentFormat) -> bool {
+/// 字幕的默认阅读速度上限（非空白 Unicode 字符/秒）。
+pub const DEFAULT_SUBTITLE_MAX_READING_SPEED: u64 = 17;
+
+// 解析字幕时间戳的时钟字段和毫秒字段。
+fn timestamp_millis(value: &str, format: DocumentFormat) -> Option<u64> {
     let separator = if matches!(format, DocumentFormat::Srt) {
         ','
     } else {
         '.'
     };
-    let Some((clock, milliseconds)) = value.rsplit_once(separator) else {
-        return false;
-    };
+    let (clock, milliseconds) = value.rsplit_once(separator)?;
     if milliseconds.len() != 3
         || !milliseconds
             .chars()
             .all(|character| character.is_ascii_digit())
     {
-        return false;
+        return None;
     }
     let fields = clock.split(':').collect::<Vec<_>>();
     if !(fields.len() == 2 || fields.len() == 3)
@@ -1410,13 +1436,127 @@ fn valid_timestamp(value: &str, format: DocumentFormat) -> bool {
             field.is_empty() || !field.chars().all(|character| character.is_ascii_digit())
         })
     {
-        return false;
+        return None;
     }
+    let hour = if fields.len() == 3 {
+        fields[0].parse::<u64>().ok()?
+    } else {
+        0
+    };
     let minute = fields
         .get(fields.len() - 2)
-        .and_then(|field| field.parse::<u32>().ok());
-    let second = fields.last().and_then(|field| field.parse::<u32>().ok());
-    minute.is_some_and(|value| value < 60) && second.is_some_and(|value| value < 60)
+        .and_then(|field| field.parse::<u64>().ok())?;
+    let second = fields.last().and_then(|field| field.parse::<u64>().ok())?;
+    if minute >= 60 || second >= 60 {
+        return None;
+    }
+    let milliseconds = milliseconds.parse::<u64>().ok()?;
+    Some(
+        hour.saturating_mul(3_600_000)
+            .saturating_add(minute.saturating_mul(60_000))
+            .saturating_add(second.saturating_mul(1_000))
+            .saturating_add(milliseconds),
+    )
+}
+
+// 校验并解析字幕 cue 的起止时间。
+fn subtitle_timestamp_range(line: &str, format: DocumentFormat) -> Option<(u64, u64)> {
+    let (start, end) = line.split_once("-->")?;
+    Some((
+        timestamp_millis(start.trim(), format)?,
+        timestamp_millis(end.split_whitespace().next().unwrap_or(""), format)?,
+    ))
+}
+
+// 校验字幕 cue 的完整时间范围行。
+fn valid_timestamp_line(line: &str, format: DocumentFormat) -> bool {
+    subtitle_timestamp_range(line, format).is_some()
+}
+
+// 提取字幕 cue，并生成不包含源文本的可读性 warning。
+fn subtitle_warnings(
+    format: DocumentFormat,
+    text: &str,
+    max_line_chars: usize,
+    max_reading_speed: u64,
+) -> Result<Vec<DocumentWarning>, DocumentError> {
+    let lines = split_lines(text)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    let mut cursor = 0usize;
+    let mut cue_number = 0usize;
+    while cursor < lines.len() {
+        while cursor < lines.len() && lines[cursor].trim().is_empty() {
+            cursor += 1;
+        }
+        if cursor >= lines.len() {
+            break;
+        }
+        let trimmed = lines[cursor].trim();
+        if matches!(format, DocumentFormat::WebVtt)
+            && (cursor == 0 && trimmed.starts_with("WEBVTT")
+                || matches!(trimmed, "NOTE" | "STYLE" | "REGION"))
+        {
+            cursor += 1;
+            while cursor < lines.len() && !lines[cursor].trim().is_empty() {
+                cursor += 1;
+            }
+            continue;
+        }
+        let timestamp_line = if subtitle_timestamp_range(trimmed, format).is_some() {
+            trimmed
+        } else {
+            cursor += 1;
+            lines
+                .get(cursor)
+                .map(String::as_str)
+                .and_then(|line| subtitle_timestamp_range(line.trim(), format).map(|_| line.trim()))
+                .ok_or(DocumentError::InvalidStructure)?
+        };
+        let (start, end) = subtitle_timestamp_range(timestamp_line, format)
+            .ok_or(DocumentError::InvalidStructure)?;
+        cursor += 1;
+        cue_number += 1;
+        let text_start = cursor;
+        while cursor < lines.len() && !lines[cursor].trim().is_empty() {
+            cursor += 1;
+        }
+        let cue_lines = &lines[text_start..cursor];
+        if cue_lines.is_empty() {
+            return Err(DocumentError::InvalidStructure);
+        }
+        let long_line = cue_lines
+            .iter()
+            .any(|line| line.chars().count() > max_line_chars);
+        if long_line {
+            warnings.push(DocumentWarning {
+                kind: DocumentWarningKind::SubtitleLineLengthExceeded,
+                page: None,
+                cue: Some(cue_number),
+            });
+        }
+        let duration_millis = end.saturating_sub(start);
+        if duration_millis > 0 {
+            let non_whitespace_chars = cue_lines
+                .iter()
+                .flat_map(|line| line.chars())
+                .filter(|character| !character.is_whitespace())
+                .count();
+            let character_count = u64::try_from(non_whitespace_chars).unwrap_or(u64::MAX);
+            let chars_scaled = character_count.saturating_mul(1_000);
+            let speed_limit_scaled = max_reading_speed.saturating_mul(duration_millis);
+            if chars_scaled > speed_limit_scaled {
+                warnings.push(DocumentWarning {
+                    kind: DocumentWarningKind::SubtitleReadingSpeedHigh,
+                    page: None,
+                    cue: Some(cue_number),
+                });
+            }
+        }
+    }
+    Ok(warnings)
 }
 
 // 返回字幕结构行是否必须原样保留。
@@ -1867,6 +2007,13 @@ trailer
         let source = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
         let mut job = DocumentJob::from_utf8("captions.srt", source.as_bytes()).expect("srt");
         assert_eq!(job.pending_count(), 1);
+        assert!(job.warnings().expect("subtitle warnings").is_empty());
+        assert_eq!(
+            job.warnings_with_subtitle_limits(3, 17)
+                .expect("custom subtitle warnings")
+                .len(),
+            1
+        );
         assert_eq!(job.segments[0].kind, DocumentSegmentKind::Verbatim);
         assert_eq!(job.segments[1].kind, DocumentSegmentKind::Verbatim);
         job.apply_translation(2, "你好").expect("cue text");
@@ -1914,6 +2061,27 @@ trailer
         assert_eq!(
             DocumentJob::from_utf8("captions.vtt", b"WEBVTT\n\n00:00.000 --> nope\nHello"),
             Err(DocumentError::InvalidStructure)
+        );
+    }
+
+    #[test]
+    fn subtitle_warnings_identify_long_lines_and_fast_reading_cues() {
+        let source = "1\n00:00:00,000 --> 00:00:01,000\nThis subtitle line is deliberately much longer than forty-two characters.\n\n";
+        let job = DocumentJob::from_utf8("captions.srt", source.as_bytes()).expect("srt");
+        assert_eq!(
+            job.warnings().expect("subtitle warnings"),
+            vec![
+                DocumentWarning {
+                    kind: DocumentWarningKind::SubtitleLineLengthExceeded,
+                    page: None,
+                    cue: Some(1),
+                },
+                DocumentWarning {
+                    kind: DocumentWarningKind::SubtitleReadingSpeedHigh,
+                    page: None,
+                    cue: Some(1),
+                },
+            ]
         );
     }
 
@@ -2365,6 +2533,7 @@ trailer
             vec![DocumentWarning {
                 kind: DocumentWarningKind::PdfReconstructionLimited,
                 page: None,
+                cue: None,
             }]
         );
         job.apply_translation(0, "Bonjour").expect("first page");
@@ -2407,6 +2576,7 @@ trailer
                 .contains(&DocumentWarning {
                     kind: DocumentWarningKind::PdfImageOnlyPage,
                     page: Some(1),
+                    cue: None,
                 })
         );
 
@@ -2438,6 +2608,7 @@ trailer
                 .contains(&DocumentWarning {
                     kind: DocumentWarningKind::PdfUncertainReadingOrder,
                     page: Some(1),
+                    cue: None,
                 })
         );
     }
