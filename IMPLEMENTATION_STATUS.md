@@ -316,3 +316,27 @@ Validated locally with Rust 1.93.0:
 - `cargo test -p linguamesh-storage --all-targets --all-features --offline` passed: 15 tests,
   0 failed.
 - `git diff --check` passed.
+
+## 2026-07-18 — Linux translation memory storage contract
+
+Assumption: translation memory is an optional local cache for standard requests; Incognito never
+reads or writes it, disabling the policy preserves existing entries, and cache identity changes
+when any relevant request input or versioned translation policy changes.
+
+Implemented:
+
+- Schema 5 adds a singleton translation-memory policy and a bounded, inspectable entry table.
+- Identity includes normalized source text, locales, model/provider identity, chunking options,
+  serialized glossary, protected-span policy, prompt-template version, and quality mode.
+- Storage exposes lookup, bounded write, newest-first inspection, exact deletion, clear-all, and
+  persisted enable/disable APIs without storing credentials.
+- Regression tests cover identity mismatches, policy persistence, Incognito isolation, exact delete,
+  clear-all, size limits, and schema migration.
+
+Validated locally with Rust 1.93.0:
+
+- `cargo fmt --all -- --check` passed.
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` passed.
+- `cargo build --workspace --locked` passed.
+- `cargo test --workspace --all-targets --all-features --offline` passed: 59 tests, 0 failed.
+- `git diff --check` passed.

@@ -18,9 +18,11 @@ configured provider cannot be revoked, so session closure drops the HTTP future 
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
 
-SQLite schema version 2 adds provider preset/adapter/enabled state, active-provider selection, and
-per-profile last-model selection. The migration is transactional, preserves schema-1 profile
-metadata while clearing untrusted legacy secret references, enables WAL, secure deletion, and
+SQLite migrations currently reach schema version 5. Schema 2 adds provider preset/adapter/enabled
+state, active-provider selection, and per-profile last-model selection; later migrations add bounded
+translation history and optional translation-memory policy/entries. The migrations are transactional,
+preserve schema-1 profile metadata while clearing untrusted legacy secret references, enable WAL,
+secure deletion, and
 foreign-key enforcement for every connection, and never defines a credential-value column. Every
 supported on-disk open retries the truncating checkpoint so a busy post-migration attempt fails
 closed without abandoning cleanup. On Linux's default Unix VFS, SQLite's no-follow open flag

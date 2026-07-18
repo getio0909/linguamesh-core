@@ -14,16 +14,29 @@ const TRANSLATION_HISTORY_MIGRATION: &str =
     include_str!("../../../migrations/0003_translation_history.sql");
 const TRANSLATION_HISTORY_POLICY_MIGRATION: &str =
     include_str!("../../../migrations/0004_translation_history_policy.sql");
-const LATEST_SCHEMA_VERSION: u32 = 4;
+const TRANSLATION_MEMORY_MIGRATION: &str =
+    include_str!("../../../migrations/0005_translation_memory.sql");
+const LATEST_SCHEMA_VERSION: u32 = 5;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
 pub const MAX_TRANSLATION_HISTORY_TEXT_BYTES: usize = 4 * 1024 * 1024;
+/// 限制本地翻译记忆条目的数量，避免数据库无限增长。
+pub const MAX_TRANSLATION_MEMORY_ENTRIES: usize = 100;
+/// 限制单条翻译记忆源文本和译文的大小。
+pub const MAX_TRANSLATION_MEMORY_TEXT_BYTES: usize = 4 * 1024 * 1024;
+/// 翻译记忆身份中的保护策略版本。
+pub const TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY: &str = "protected-spans-v1";
+/// 翻译记忆身份中的提示模板版本。
+pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "prompt-template-v1";
+/// 翻译记忆身份中的质量模式。
+pub const TRANSLATION_MEMORY_QUALITY_MODE: &str = "standard";
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
     (3, TRANSLATION_HISTORY_MIGRATION),
     (4, TRANSLATION_HISTORY_POLICY_MIGRATION),
+    (5, TRANSLATION_MEMORY_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -43,6 +56,27 @@ pub struct TranslationHistoryEntry {
     pub target_locale: String,
     /// 使用的模型标识。
     pub model_id: String,
+}
+
+/// 描述一条可复用的本地翻译记忆。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranslationMemoryEntry {
+    /// 由全部相关请求输入构成的稳定缓存键。
+    pub cache_key: String,
+    /// 记录写入时的 Unix 秒时间戳。
+    pub created_at: i64,
+    /// 原始源文本。
+    pub source_text: String,
+    /// 已完成的译文。
+    pub translated_text: String,
+    /// 可选的源语言标签。
+    pub source_locale: Option<String>,
+    /// 目标语言标签。
+    pub target_locale: String,
+    /// 使用的模型标识。
+    pub model_id: String,
+    /// 可审计的身份字段 JSON，不包含秘密值。
+    pub identity_json: String,
 }
 
 /// 管理明确迁移的本地数据库。
@@ -199,6 +233,151 @@ impl Storage {
             )
             .map(|_| ())
             .map_err(|error| map_error(&error))
+    }
+
+    /// 返回是否允许新的标准请求读写本地翻译记忆。
+    pub fn translation_memory_enabled(&self) -> Result<bool, TranslationError> {
+        self.connection
+            .query_row(
+                "SELECT enabled FROM translation_memory_policy WHERE singleton = 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 持久化本地翻译记忆策略，不删除既有条目。
+    pub fn set_translation_memory_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), TranslationError> {
+        self.connection
+            .execute(
+                "INSERT INTO translation_memory_policy (singleton, enabled) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled",
+                params![enabled],
+            )
+            .map(|_| ())
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 返回本地翻译记忆条目数。
+    pub fn translation_memory_count(&self) -> Result<usize, TranslationError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM translation_memory", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 按请求输入查找可复用的本地翻译记忆。
+    pub fn lookup_translation_memory(
+        &self,
+        request: &TranslationRequest,
+    ) -> Result<Option<TranslationMemoryEntry>, TranslationError> {
+        if request.is_incognito() || !self.translation_memory_enabled()? {
+            return Ok(None);
+        }
+        let key = translation_memory_key(request)?;
+        self.connection
+            .query_row(
+                "SELECT cache_key, created_at, source_text, translated_text, source_locale, target_locale, model_id, identity_json FROM translation_memory WHERE cache_key = ?1",
+                params![key],
+                translation_memory_from_row,
+            )
+            .optional()
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 写入一条非隐身翻译记忆并裁剪最旧条目。
+    pub fn record_translation_memory(
+        &mut self,
+        request: &TranslationRequest,
+        translated_text: &str,
+    ) -> Result<(), TranslationError> {
+        if request.is_incognito() || !self.translation_memory_enabled()? {
+            return Ok(());
+        }
+        if request.source_text.len() > MAX_TRANSLATION_MEMORY_TEXT_BYTES
+            || translated_text.len() > MAX_TRANSLATION_MEMORY_TEXT_BYTES
+        {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Translation memory entry exceeds the local size limit.",
+            ));
+        }
+        let key = translation_memory_key(request)?;
+        let identity_json = translation_memory_identity_json(request)?;
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "INSERT INTO translation_memory (cache_key, source_text, translated_text, source_locale, target_locale, model_id, identity_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(cache_key) DO UPDATE SET source_text = excluded.source_text, translated_text = excluded.translated_text, source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, identity_json = excluded.identity_json, created_at = unixepoch()",
+                params![
+                    key,
+                    request.source_text.as_str(),
+                    translated_text,
+                    request.source_locale.as_deref(),
+                    request.target_locale.as_str(),
+                    request.model_id.as_str(),
+                    identity_json,
+                ],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM translation_memory WHERE cache_key IN (SELECT cache_key FROM translation_memory ORDER BY created_at DESC, cache_key DESC LIMIT -1 OFFSET ?1)",
+                params![i64::try_from(MAX_TRANSLATION_MEMORY_ENTRIES).unwrap_or(i64::MAX)],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction.commit().map_err(|error| map_error(&error))
+    }
+
+    /// 按最新写入顺序返回有限数量的本地翻译记忆。
+    pub fn translation_memory(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<TranslationMemoryEntry>, TranslationError> {
+        let limit = limit.min(MAX_TRANSLATION_MEMORY_ENTRIES);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT cache_key, created_at, source_text, translated_text, source_locale, target_locale, model_id, identity_json FROM translation_memory ORDER BY created_at DESC, cache_key DESC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        statement
+            .query_map(
+                params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                translation_memory_from_row,
+            )
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 清空全部本地翻译记忆。
+    pub fn clear_translation_memory(&mut self) -> Result<(), TranslationError> {
+        self.connection
+            .execute("DELETE FROM translation_memory", [])
+            .map(|_| ())
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 删除指定缓存键对应的本地翻译记忆。
+    pub fn delete_translation_memory_entry(
+        &mut self,
+        cache_key: &str,
+    ) -> Result<bool, TranslationError> {
+        let deleted = self
+            .connection
+            .execute(
+                "DELETE FROM translation_memory WHERE cache_key = ?1",
+                params![cache_key],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(deleted != 0)
     }
 
     /// 按最新写入顺序返回有限数量的本地翻译历史。
@@ -648,6 +827,54 @@ fn map_error(error: &rusqlite::Error) -> TranslationError {
     )
 }
 
+fn translation_memory_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<TranslationMemoryEntry> {
+    Ok(TranslationMemoryEntry {
+        cache_key: row.get(0)?,
+        created_at: row.get(1)?,
+        source_text: row.get(2)?,
+        translated_text: row.get(3)?,
+        source_locale: row.get(4)?,
+        target_locale: row.get(5)?,
+        model_id: row.get(6)?,
+        identity_json: row.get(7)?,
+    })
+}
+
+fn translation_memory_identity_json(
+    request: &TranslationRequest,
+) -> Result<String, TranslationError> {
+    let identity = serde_json::json!({
+        "normalized_source": normalize_translation_memory_source(&request.source_text),
+        "source_locale": &request.source_locale,
+        "target_locale": &request.target_locale,
+        "max_chunk_bytes": request.max_chunk_bytes,
+        "glossary": &request.glossary,
+        "protected_span_policy": TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY,
+        "prompt_template_version": TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION,
+        "quality_mode": TRANSLATION_MEMORY_QUALITY_MODE,
+        "provider_model": {
+            "provider": &request.provider_identity,
+            "model": &request.model_id,
+        },
+    });
+    serde_json::to_string(&identity).map_err(|error| {
+        TranslationError::new(
+            ErrorKind::InvalidConfiguration,
+            format!("Translation memory identity could not be serialized: {error}"),
+        )
+    })
+}
+
+fn translation_memory_key(request: &TranslationRequest) -> Result<String, TranslationError> {
+    translation_memory_identity_json(request)
+}
+
+fn normalize_translation_memory_source(source: &str) -> String {
+    source.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{INITIAL_MIGRATION, Storage};
@@ -682,7 +909,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 4);
+        assert_eq!(storage.schema_version().expect("version"), 5);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -811,6 +1038,91 @@ mod tests {
         assert_eq!(storage.translation_history_count().expect("count"), 1);
     }
 
+    #[test]
+    fn translation_memory_reuses_only_matching_request_identity() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let request = TranslationRequest::new("  Hello   world\n", "zh-CN", "model-a")
+            .with_max_chunk_bytes(2048);
+        storage
+            .record_translation_memory(&request, "你好世界")
+            .expect("record memory");
+        let hit = storage
+            .lookup_translation_memory(&request)
+            .expect("lookup memory")
+            .expect("matching memory");
+        assert_eq!(hit.translated_text, "你好世界");
+        assert!(hit.identity_json.contains("Hello world"));
+
+        let different_model =
+            TranslationRequest::new("Hello world", "zh-CN", "model-b").with_max_chunk_bytes(2048);
+        assert!(
+            storage
+                .lookup_translation_memory(&different_model)
+                .expect("different model lookup")
+                .is_none()
+        );
+        let different_chunking =
+            TranslationRequest::new("Hello world", "zh-CN", "model-a").with_max_chunk_bytes(4096);
+        assert!(
+            storage
+                .lookup_translation_memory(&different_chunking)
+                .expect("different chunk lookup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn translation_memory_policy_and_controls_persist_without_leaking_incognito() {
+        let directory = tempfile::tempdir().expect("directory");
+        let database_path = directory.path().join("translation-memory.sqlite3");
+        let mut storage = Storage::open(&database_path).expect("storage");
+        let request = TranslationRequest::new("hello", "zh-CN", "model");
+        storage
+            .record_translation_memory(&request, "你好")
+            .expect("record memory");
+        assert_eq!(storage.translation_memory_count().expect("count"), 1);
+        assert!(storage.translation_memory_enabled().expect("policy"));
+        storage
+            .set_translation_memory_enabled(false)
+            .expect("disable memory");
+        let disabled = TranslationRequest::new("disabled", "zh-CN", "model");
+        storage
+            .record_translation_memory(&disabled, "禁用")
+            .expect("disabled record");
+        assert_eq!(storage.translation_memory_count().expect("count"), 1);
+        assert!(
+            storage
+                .lookup_translation_memory(&disabled)
+                .expect("disabled lookup")
+                .is_none()
+        );
+        let incognito = TranslationRequest::new("private", "zh-CN", "model")
+            .with_privacy_mode(TranslationPrivacyMode::Incognito);
+        storage
+            .set_translation_memory_enabled(true)
+            .expect("enable memory");
+        storage
+            .record_translation_memory(&incognito, "私密")
+            .expect("incognito record");
+        assert_eq!(storage.translation_memory_count().expect("count"), 1);
+        let entries = storage.translation_memory(10).expect("list memory");
+        assert_eq!(entries.len(), 1);
+        assert!(
+            storage
+                .delete_translation_memory_entry(&entries[0].cache_key)
+                .expect("delete memory")
+        );
+        assert_eq!(storage.translation_memory_count().expect("count"), 0);
+        storage
+            .record_translation_memory(&request, "你好")
+            .expect("record again");
+        storage.clear_translation_memory().expect("clear memory");
+        assert_eq!(storage.translation_memory_count().expect("count"), 0);
+        drop(storage);
+        let reopened = Storage::open(&database_path).expect("reopened storage");
+        assert!(reopened.translation_memory_enabled().expect("policy"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn symbolic_link_database_is_rejected_before_migration() {
@@ -925,7 +1237,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 4);
+        assert_eq!(storage.schema_version().expect("version"), 5);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -1007,7 +1319,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 4);
+        assert_eq!(storage.schema_version().expect("version"), 5);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

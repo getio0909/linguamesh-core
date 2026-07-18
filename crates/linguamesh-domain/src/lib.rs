@@ -1643,6 +1643,9 @@ pub struct TranslationRequest {
     pub target_locale: String,
     /// 明确选择的模型标识。
     pub model_id: String,
+    /// 可选的提供商身份，用于区分语义不同的同名模型。
+    #[serde(default)]
+    pub provider_identity: Option<String>,
     /// 可选的请求级词汇表，不写入持久化配置。
     #[serde(default)]
     pub glossary: Option<Glossary>,
@@ -1669,6 +1672,7 @@ impl TranslationRequest {
             source_locale: None,
             target_locale: target_locale.into(),
             model_id: model_id.into(),
+            provider_identity: None,
             glossary: None,
             max_chunk_bytes: None,
             privacy_mode: TranslationPrivacyMode::Standard,
@@ -1679,6 +1683,13 @@ impl TranslationRequest {
     #[must_use]
     pub fn with_glossary(mut self, glossary: Glossary) -> Self {
         self.glossary = Some(glossary);
+        self
+    }
+
+    /// 设置本次请求使用的非秘密提供商身份。
+    #[must_use]
+    pub fn with_provider_identity(mut self, provider_identity: impl Into<String>) -> Self {
+        self.provider_identity = Some(provider_identity.into());
         self
     }
 
