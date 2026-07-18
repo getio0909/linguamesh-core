@@ -3,6 +3,7 @@ members = [
     "crates/linguamesh-application",
     "crates/linguamesh-cli",
     "crates/linguamesh-domain",
+    "crates/linguamesh-document",
     "crates/linguamesh-engine",
     "crates/linguamesh-ffi",
     "crates/linguamesh-protocol",

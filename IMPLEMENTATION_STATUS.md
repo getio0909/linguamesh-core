@@ -35,6 +35,20 @@ shutdown. `contracts/abi/linguamesh.h` records the current native boundary.
 This checkpoint does not claim complete Milestone 1 provider configuration, complete C ABI
 behavior, native SDK artifacts, document support, or a stable release.
 
+## 2026-07-18 — TXT/Markdown document contract
+
+Assumption: the first Linux-first document slice treats TXT and Markdown as bounded UTF-8 line
+documents; Markdown fenced code and blank structure remain verbatim, while prose lines are
+translated independently and reconstructed only after every prose segment is complete.
+
+Implemented `linguamesh-document` with extension validation, 4 MiB input/output bounds, BOM removal,
+line-ending preservation, Markdown fence classification, serializable segment/job state, pending
+segment counting, exact segment updates, and fail-closed reconstruction. Five focused unit tests
+cover format detection, BOM/line endings, verbatim fences, incomplete reconstruction, and size/UTF-8
+rejection. Full workspace fmt, strict Clippy, locked build, offline workspace tests, and diff checks
+passed locally. Native document queues, persistent interrupted-job recovery, archive codecs, and
+stable release evidence remain open.
+
 ## 2026-07-17 — Milestone 2 partial checkpoint
 
 Assumption: this partial checkpoint establishes tested wrapper source, verified prerelease SDK
