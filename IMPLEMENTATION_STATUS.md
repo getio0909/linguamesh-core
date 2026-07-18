@@ -76,6 +76,24 @@ slow job, reconnects to a fresh worker/provider, and completes the saved job wit
 Android, Windows, and macOS remain intentionally out of scope; archive codecs, automatic provider
 discovery, and multi-job queue selection remain open.
 
+## 2026-07-18 — Linux subtitle document checkpoint
+
+Assumption: SRT and WebVTT translation keeps cue IDs, headers, timestamps, ordering, and original
+line endings verbatim. Only cue text becomes translatable; no automatic timing or line-length rewrite
+is performed.
+
+Implemented `linguamesh-document` support for bounded UTF-8 `.srt` and `.vtt` jobs. The codec validates
+SubRip/WebVTT headers, cue ordering, timestamp syntax, and required cue text before creating segments;
+reconstruction validates the subtitle structure again. Linux's native file chooser accepts both suffixes
+and maps malformed subtitle structure to a safe import error. TXT/Markdown behavior remains unchanged;
+HTML/JSON/CSV and archive formats remain future slices.
+
+Validated locally:
+
+- Core document tests: 7 passed, including cue-ID/timestamp preservation and malformed-structure rejection.
+- Linux `cargo check --all-targets --all-features --offline`, strict Clippy, and 95 library tests passed;
+  one existing environment-dependent test remains intentionally ignored.
+
 ## 2026-07-18 — TXT/Markdown document contract
 
 Assumption: the first Linux-first document slice treats TXT and Markdown as bounded UTF-8 line

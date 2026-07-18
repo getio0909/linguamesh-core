@@ -11,6 +11,10 @@ pub enum DocumentFormat {
     Txt,
     /// UTF-8 Markdown 文本。
     Markdown,
+    /// UTF-8 `SubRip` 字幕。
+    Srt,
+    /// UTF-8 `WebVTT` 字幕。
+    WebVtt,
 }
 
 impl DocumentFormat {
@@ -23,6 +27,8 @@ impl DocumentFormat {
         match extension.as_str() {
             "txt" => Ok(Self::Txt),
             "md" | "markdown" => Ok(Self::Markdown),
+            "srt" => Ok(Self::Srt),
+            "vtt" => Ok(Self::WebVtt),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -63,7 +69,7 @@ impl DocumentJobState {
 pub enum DocumentSegmentKind {
     /// 可以交给翻译引擎处理的文本。
     Prose,
-    /// 必须原样保留的 Markdown 结构或代码块。
+    /// 必须原样保留的 Markdown 或字幕结构。
     Verbatim,
 }
 
@@ -119,6 +125,7 @@ impl DocumentJob {
         let format = DocumentFormat::from_name(&source_name)?;
         let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
         let text = std::str::from_utf8(contents).map_err(|_| DocumentError::InvalidUtf8)?;
+        validate_structure(format, text)?;
         Ok(Self::from_text(source_name, format, text))
     }
 
@@ -126,6 +133,7 @@ impl DocumentJob {
     #[must_use]
     pub fn from_text(source_name: impl Into<String>, format: DocumentFormat, text: &str) -> Self {
         let mut in_fenced_code = false;
+        let subtitle_kinds = subtitle_line_kinds(format, text);
         let segments = split_lines(text)
             .into_iter()
             .enumerate()
@@ -133,8 +141,9 @@ impl DocumentJob {
                 let trimmed = line.trim_start();
                 let is_fence = matches!(format, DocumentFormat::Markdown)
                     && (trimmed.starts_with("```") || trimmed.starts_with("~~~"));
-                let kind = if matches!(format, DocumentFormat::Markdown)
-                    && (in_fenced_code || is_fence || line.trim().is_empty())
+                let kind = if subtitle_kinds.get(index).copied().unwrap_or(false)
+                    || (matches!(format, DocumentFormat::Markdown)
+                        && (in_fenced_code || is_fence || line.trim().is_empty()))
                 {
                     DocumentSegmentKind::Verbatim
                 } else {
@@ -208,6 +217,7 @@ impl DocumentJob {
         if output.len() > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::OutputTooLarge);
         }
+        validate_structure(self.format, &output)?;
         Ok(output)
     }
 }
@@ -224,6 +234,9 @@ pub enum DocumentError {
     /// 文件后缀不受支持。
     #[error("The document format is not supported.")]
     UnsupportedFormat,
+    /// 字幕结构不完整或包含无效时间轴。
+    #[error("The subtitle structure is invalid.")]
+    InvalidStructure,
     /// 译文导致输出超过上限。
     #[error("The reconstructed document exceeds the 4 MiB limit.")]
     OutputTooLarge,
@@ -257,6 +270,170 @@ fn split_lines(text: &str) -> Vec<(String, String)> {
     lines
 }
 
+// 校验字幕时间戳的时钟字段和毫秒字段。
+fn valid_timestamp_line(line: &str, format: DocumentFormat) -> bool {
+    let Some((start, end)) = line.split_once("-->") else {
+        return false;
+    };
+    valid_timestamp(start.trim(), format)
+        && valid_timestamp(end.split_whitespace().next().unwrap_or(""), format)
+}
+
+// 校验 SRT 或 WebVTT 的单个时间戳。
+fn valid_timestamp(value: &str, format: DocumentFormat) -> bool {
+    let separator = if matches!(format, DocumentFormat::Srt) {
+        ','
+    } else {
+        '.'
+    };
+    let Some((clock, milliseconds)) = value.rsplit_once(separator) else {
+        return false;
+    };
+    if milliseconds.len() != 3
+        || !milliseconds
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        return false;
+    }
+    let fields = clock.split(':').collect::<Vec<_>>();
+    if !(fields.len() == 2 || fields.len() == 3)
+        || fields.iter().any(|field| {
+            field.is_empty() || !field.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return false;
+    }
+    let minute = fields
+        .get(fields.len() - 2)
+        .and_then(|field| field.parse::<u32>().ok());
+    let second = fields.last().and_then(|field| field.parse::<u32>().ok());
+    minute.is_some_and(|value| value < 60) && second.is_some_and(|value| value < 60)
+}
+
+// 返回字幕结构行是否必须原样保留。
+fn subtitle_line_kinds(format: DocumentFormat, text: &str) -> Vec<bool> {
+    if !matches!(format, DocumentFormat::Srt | DocumentFormat::WebVtt) {
+        return Vec::new();
+    }
+    let lines = split_lines(text);
+    let mut kinds = Vec::with_capacity(lines.len());
+    let mut cue_start = true;
+    let mut expecting_timestamp = false;
+    let mut metadata = false;
+    for (index, (line, _)) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let is_blank = trimmed.is_empty();
+        let is_timestamp = valid_timestamp_line(trimmed, format);
+        let is_header =
+            matches!(format, DocumentFormat::WebVtt) && index == 0 && trimmed.starts_with("WEBVTT");
+        let is_metadata = matches!(format, DocumentFormat::WebVtt)
+            && matches!(trimmed, "NOTE" | "STYLE" | "REGION");
+        let structural = is_blank
+            || is_header
+            || metadata
+            || is_metadata
+            || expecting_timestamp
+            || (cue_start && is_timestamp)
+            || (matches!(format, DocumentFormat::Srt)
+                && cue_start
+                && trimmed.chars().all(|c| c.is_ascii_digit())
+                && !trimmed.is_empty())
+            || (matches!(format, DocumentFormat::WebVtt)
+                && cue_start
+                && !is_timestamp
+                && !is_header);
+        kinds.push(structural);
+        if is_blank {
+            cue_start = true;
+            expecting_timestamp = false;
+            metadata = false;
+        } else if is_metadata {
+            metadata = true;
+            cue_start = false;
+        } else if metadata {
+            cue_start = false;
+        } else if expecting_timestamp {
+            expecting_timestamp = false;
+            cue_start = false;
+        } else if cue_start && !is_timestamp {
+            expecting_timestamp = true;
+            cue_start = false;
+        } else if is_timestamp {
+            cue_start = false;
+        }
+    }
+    kinds
+}
+
+// 校验字幕头、cue 顺序、时间轴和每个 cue 的文本。
+fn validate_structure(format: DocumentFormat, text: &str) -> Result<(), DocumentError> {
+    if !matches!(format, DocumentFormat::Srt | DocumentFormat::WebVtt) {
+        return Ok(());
+    }
+    let lines = split_lines(text);
+    if lines.is_empty() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    if matches!(format, DocumentFormat::WebVtt)
+        && !lines
+            .first()
+            .is_some_and(|(line, _)| line.trim_start().starts_with("WEBVTT"))
+    {
+        return Err(DocumentError::InvalidStructure);
+    }
+    let mut cue_start = true;
+    let mut expecting_timestamp = false;
+    let mut cue_count = 0usize;
+    let mut cue_has_text = false;
+    for (line, _) in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if expecting_timestamp || (cue_count > 0 && !cue_has_text) {
+                return Err(DocumentError::InvalidStructure);
+            }
+            cue_start = true;
+            expecting_timestamp = false;
+            cue_has_text = false;
+            continue;
+        }
+        if matches!(format, DocumentFormat::WebVtt)
+            && cue_count == 0
+            && (trimmed.starts_with("WEBVTT") || matches!(trimmed, "NOTE" | "STYLE" | "REGION"))
+        {
+            cue_start = false;
+            continue;
+        }
+        if expecting_timestamp {
+            if !valid_timestamp_line(trimmed, format) {
+                return Err(DocumentError::InvalidStructure);
+            }
+            cue_count += 1;
+            expecting_timestamp = false;
+            cue_start = false;
+            cue_has_text = false;
+        } else if cue_start && valid_timestamp_line(trimmed, format) {
+            cue_count += 1;
+            cue_start = false;
+            cue_has_text = false;
+        } else if cue_start {
+            let valid_id = matches!(format, DocumentFormat::WebVtt)
+                || (matches!(format, DocumentFormat::Srt)
+                    && trimmed.chars().all(|character| character.is_ascii_digit()));
+            if !valid_id {
+                return Err(DocumentError::InvalidStructure);
+            }
+            expecting_timestamp = true;
+        } else {
+            cue_has_text = true;
+        }
+    }
+    if expecting_timestamp || cue_count == 0 || (!cue_start && !cue_has_text) {
+        return Err(DocumentError::InvalidStructure);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -272,6 +449,14 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("notes.txt"),
             Ok(DocumentFormat::Txt)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("captions.SRT"),
+            Ok(DocumentFormat::Srt)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("captions.vtt"),
+            Ok(DocumentFormat::WebVtt)
         );
         assert_eq!(
             DocumentFormat::from_name("notes.docx"),
@@ -325,6 +510,44 @@ mod tests {
         assert_eq!(
             DocumentJob::from_utf8("notes.txt", &[0xff]),
             Err(DocumentError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn subtitles_preserve_timing_and_translate_only_cue_text() {
+        let source = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
+        let mut job = DocumentJob::from_utf8("captions.srt", source.as_bytes()).expect("srt");
+        assert_eq!(job.pending_count(), 1);
+        assert_eq!(job.segments[0].kind, DocumentSegmentKind::Verbatim);
+        assert_eq!(job.segments[1].kind, DocumentSegmentKind::Verbatim);
+        job.apply_translation(2, "你好").expect("cue text");
+        assert_eq!(
+            job.reconstruct().expect("reconstruct"),
+            "1\n00:00:01,000 --> 00:00:02,500\n你好\n\n"
+        );
+        let webvtt = "WEBVTT\n\ncue-1\n00:00.000 --> 00:01.000\nHello\n";
+        let mut job = DocumentJob::from_utf8("captions.vtt", webvtt.as_bytes()).expect("vtt");
+        let index = job
+            .segments
+            .iter()
+            .position(|segment| segment.kind == DocumentSegmentKind::Prose)
+            .expect("cue text");
+        job.apply_translation(index, "你好").expect("cue text");
+        assert_eq!(
+            job.reconstruct().expect("reconstruct"),
+            "WEBVTT\n\ncue-1\n00:00.000 --> 00:01.000\n你好\n"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_subtitle_structure() {
+        assert_eq!(
+            DocumentJob::from_utf8("captions.srt", b"1\nnot a timestamp\nHello"),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("captions.vtt", b"WEBVTT\n\n00:00.000 --> nope\nHello"),
+            Err(DocumentError::InvalidStructure)
         );
     }
 }

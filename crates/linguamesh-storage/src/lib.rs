@@ -1082,6 +1082,8 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
     match format {
         DocumentFormat::Txt => "txt",
         DocumentFormat::Markdown => "markdown",
+        DocumentFormat::Srt => "srt",
+        DocumentFormat::WebVtt => "webvtt",
     }
 }
 
@@ -1089,6 +1091,8 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
     match value {
         "txt" => Ok(DocumentFormat::Txt),
         "markdown" => Ok(DocumentFormat::Markdown),
+        "srt" => Ok(DocumentFormat::Srt),
+        "webvtt" => Ok(DocumentFormat::WebVtt),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
