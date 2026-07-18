@@ -27,6 +27,8 @@ pub enum DocumentFormat {
     Json,
     /// OOXML DOCX 文档包。
     Docx,
+    /// OOXML PPTX 演示文稿包。
+    Pptx,
 }
 
 impl DocumentFormat {
@@ -45,6 +47,7 @@ impl DocumentFormat {
             "html" | "htm" => Ok(Self::Html),
             "json" => Ok(Self::Json),
             "docx" => Ok(Self::Docx),
+            "pptx" => Ok(Self::Pptx),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -126,7 +129,7 @@ pub struct DocumentJob {
     pub source_name: String,
     /// 按原始顺序排列的文档段。
     pub segments: Vec<DocumentSegment>,
-    /// DOCX 原始包字节；普通文本任务不保存此字段。
+    /// DOCX 或 PPTX 原始包字节；普通文本任务不保存此字段。
     #[serde(default)]
     pub package: Option<Vec<u8>>,
 }
@@ -140,9 +143,9 @@ impl DocumentJob {
         let source_name = source_name.into();
         if matches!(
             DocumentFormat::from_name(&source_name)?,
-            DocumentFormat::Docx
+            DocumentFormat::Docx | DocumentFormat::Pptx
         ) {
-            return Self::from_docx_bytes(source_name, contents);
+            return Self::from_ooxml_bytes(source_name, contents);
         }
         Self::from_utf8_with_json_paths(source_name, contents, None, None)
     }
@@ -152,19 +155,36 @@ impl DocumentJob {
         source_name: impl Into<String>,
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
+        Self::from_ooxml_bytes(source_name, contents)
+    }
+
+    /// 从受限 PPTX 包创建可恢复文档任务。
+    pub fn from_pptx_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
+        Self::from_ooxml_bytes(source_name, contents)
+    }
+
+    fn from_ooxml_bytes(
+        source_name: impl Into<String>,
+        contents: &[u8],
+    ) -> Result<Self, DocumentError> {
         if contents.len() > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::TooLarge);
         }
         let source_name = source_name.into();
-        if !matches!(
-            DocumentFormat::from_name(&source_name)?,
-            DocumentFormat::Docx
-        ) {
+        let format = DocumentFormat::from_name(&source_name)?;
+        if !matches!(format, DocumentFormat::Docx | DocumentFormat::Pptx) {
             return Err(DocumentError::UnsupportedFormat);
         }
-        let segments = docx::inspect(contents)?;
+        let segments = match format {
+            DocumentFormat::Docx => docx::inspect(contents)?,
+            DocumentFormat::Pptx => docx::inspect_pptx(contents)?,
+            _ => return Err(DocumentError::UnsupportedFormat),
+        };
         Ok(Self {
-            format: DocumentFormat::Docx,
+            format,
             source_name,
             segments,
             package: Some(contents.to_vec()),
@@ -350,12 +370,16 @@ impl DocumentJob {
 
     /// 重建完整 UTF-8 文档；未完成的可翻译段会被拒绝。
     pub fn reconstruct(&self) -> Result<String, DocumentError> {
-        if matches!(self.format, DocumentFormat::Docx) {
+        if matches!(self.format, DocumentFormat::Docx | DocumentFormat::Pptx) {
             let package = self
                 .package
                 .as_deref()
                 .ok_or(DocumentError::InvalidStructure)?;
-            let _ = docx::reconstruct(self, package)?;
+            let _ = match self.format {
+                DocumentFormat::Docx => docx::reconstruct(self, package)?,
+                DocumentFormat::Pptx => docx::reconstruct_pptx(self, package)?,
+                _ => unreachable!(),
+            };
             return docx::preview(self);
         }
         let mut output = String::new();
@@ -372,15 +396,18 @@ impl DocumentJob {
         Ok(output)
     }
 
-    /// 重建 DOCX 二进制包，普通文本格式返回 UTF-8 输出字节。
+    /// 重建 DOCX 或 PPTX 二进制包，普通文本格式返回 UTF-8 输出字节。
     pub fn reconstruct_bytes(&self) -> Result<Vec<u8>, DocumentError> {
-        if matches!(self.format, DocumentFormat::Docx) {
-            return docx::reconstruct(
-                self,
-                self.package
-                    .as_deref()
-                    .ok_or(DocumentError::InvalidStructure)?,
-            );
+        if matches!(self.format, DocumentFormat::Docx | DocumentFormat::Pptx) {
+            let package = self
+                .package
+                .as_deref()
+                .ok_or(DocumentError::InvalidStructure)?;
+            return match self.format {
+                DocumentFormat::Docx => docx::reconstruct(self, package),
+                DocumentFormat::Pptx => docx::reconstruct_pptx(self, package),
+                _ => unreachable!(),
+            };
         }
         Ok(self.reconstruct()?.into_bytes())
     }
@@ -1439,6 +1466,40 @@ mod tests {
         writer.finish().expect("docx archive").into_inner()
     }
 
+    fn pptx_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("ppt/presentation.xml", options)
+            .expect("presentation");
+        writer
+            .write_all(br#"<p:presentation xmlns:p="urn:ppt"><p:sldMasterIdLst/></p:presentation>"#)
+            .expect("presentation bytes");
+        writer
+            .start_file("ppt/slides/slide1.xml", options)
+            .expect("slide");
+        writer
+            .write_all(
+                br#"<p:sld xmlns:p="urn:ppt" xmlns:a="urn:dml"><p:cSld><p:spTree><a:p><a:r><a:t>Slide &amp; title</a:t></a:r></a:p><a:p><a:r><a:t>Body</a:t></a:r></a:p></p:spTree></p:cSld></p:sld>"#,
+            )
+            .expect("slide bytes");
+        writer
+            .start_file("ppt/notesSlides/notesSlide1.xml", options)
+            .expect("notes");
+        writer
+            .write_all(br#"<p:notes xmlns:p="urn:ppt" xmlns:a="urn:dml"><a:p><a:r><a:t>Speaker note</a:t></a:r></a:p></p:notes>"#)
+            .expect("notes bytes");
+        writer
+            .start_file("ppt/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[5, 6, 7]).expect("image bytes");
+        writer.finish().expect("pptx archive").into_inner()
+    }
+
     #[test]
     fn detects_supported_formats_case_insensitively() {
         assert_eq!(
@@ -1472,6 +1533,10 @@ mod tests {
         assert_eq!(
             DocumentFormat::from_name("notes.docx"),
             Ok(DocumentFormat::Docx)
+        );
+        assert_eq!(
+            DocumentFormat::from_name("slides.PPTX"),
+            Ok(DocumentFormat::Pptx)
         );
     }
 
@@ -1887,6 +1952,47 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn pptx_preserves_slides_notes_and_resources() {
+        let source = pptx_fixture();
+        let mut job = DocumentJob::from_utf8("sample.pptx", &source).expect("pptx");
+        assert_eq!(job.format, DocumentFormat::Pptx);
+        assert_eq!(job.pending_count(), 3);
+        let prose_indices = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| segment.kind == DocumentSegmentKind::Prose)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in prose_indices {
+            job.apply_translation(index, "译文").expect("translation");
+        }
+        let rebuilt = job.reconstruct_bytes().expect("rebuild pptx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut slide = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide entry")
+            .read_to_string(&mut slide)
+            .expect("slide xml");
+        assert!(slide.contains("译文"));
+        let mut notes = String::new();
+        archive
+            .by_name("ppt/notesSlides/notesSlide1.xml")
+            .expect("notes entry")
+            .read_to_string(&mut notes)
+            .expect("notes xml");
+        assert!(notes.contains("译文"));
+        let mut image = Vec::new();
+        archive
+            .by_name("ppt/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [5, 6, 7]);
     }
 
     #[test]

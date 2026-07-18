@@ -10,7 +10,36 @@ use zip::write::ZipWriter;
 
 use crate::{DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, MAX_DOCUMENT_BYTES};
 
-const MAX_DOCX_ENTRIES: usize = 512;
+const MAX_OOXML_ENTRIES: usize = 512;
+
+#[derive(Clone, Copy)]
+pub(crate) enum PackageKind {
+    Docx,
+    Pptx,
+}
+
+impl PackageKind {
+    fn main_part(self) -> &'static str {
+        match self {
+            Self::Docx => "word/document.xml",
+            Self::Pptx => "ppt/presentation.xml",
+        }
+    }
+
+    fn paragraph_close(self) -> &'static str {
+        match self {
+            Self::Docx => "</w:p>",
+            Self::Pptx => "</a:p>",
+        }
+    }
+
+    fn text_open(self) -> &'static str {
+        match self {
+            Self::Docx => "<w:t",
+            Self::Pptx => "<a:t",
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct TextSpan {
@@ -19,13 +48,13 @@ struct TextSpan {
 }
 
 /// 检查 DOCX 包路径、条目数量和解压后的总大小，并返回排序后的条目名称。
-fn archive_names(package: &[u8]) -> Result<Vec<String>, DocumentError> {
+fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, DocumentError> {
     if package.len() > MAX_DOCUMENT_BYTES {
         return Err(DocumentError::TooLarge);
     }
     let mut archive =
         ZipArchive::new(Cursor::new(package)).map_err(|_| DocumentError::InvalidStructure)?;
-    if archive.is_empty() || archive.len() > MAX_DOCX_ENTRIES {
+    if archive.is_empty() || archive.len() > MAX_OOXML_ENTRIES {
         return Err(DocumentError::InvalidStructure);
     }
     let mut total_size = 0usize;
@@ -52,28 +81,53 @@ fn archive_names(package: &[u8]) -> Result<Vec<String>, DocumentError> {
         names.push(name.to_owned());
     }
     names.sort_unstable();
-    if !seen.contains("[Content_Types].xml") || !seen.contains("word/document.xml") {
+    if !seen.contains("[Content_Types].xml") || !seen.contains(kind.main_part()) {
+        return Err(DocumentError::InvalidStructure);
+    }
+    if matches!(kind, PackageKind::Pptx)
+        && !names
+            .iter()
+            .any(|name| name.starts_with("ppt/slides/slide") && has_xml_extension(name))
+    {
         return Err(DocumentError::InvalidStructure);
     }
     Ok(names)
 }
 
-/// 只处理包含正文、表格、页眉页脚、批注或脚注文本的 OOXML 部件。
-fn translatable_part(name: &str) -> bool {
-    if !name.starts_with("word/") || !has_xml_extension(name) {
+/// 只处理包含可见文本的 OOXML 部件，保留所有关系和二进制资源。
+fn translatable_part(name: &str, kind: PackageKind) -> bool {
+    if !has_xml_extension(name) {
         return false;
     }
-    matches!(
-        name,
-        "word/document.xml"
-            | "word/footnotes.xml"
-            | "word/endnotes.xml"
-            | "word/comments.xml"
-            | "word/glossary/document.xml"
-    ) || name
-        .strip_prefix("word/header")
-        .or_else(|| name.strip_prefix("word/footer"))
-        .is_some_and(has_xml_extension)
+    match kind {
+        PackageKind::Docx => {
+            if !name.starts_with("word/") {
+                return false;
+            }
+            matches!(
+                name,
+                "word/document.xml"
+                    | "word/footnotes.xml"
+                    | "word/endnotes.xml"
+                    | "word/comments.xml"
+                    | "word/glossary/document.xml"
+            ) || name
+                .strip_prefix("word/header")
+                .or_else(|| name.strip_prefix("word/footer"))
+                .is_some_and(has_xml_extension)
+        }
+        PackageKind::Pptx => [
+            "ppt/slides/slide",
+            "ppt/notesSlides/notesSlide",
+            "ppt/slideMasters/slideMaster",
+            "ppt/slideLayouts/slideLayout",
+            "ppt/handoutMasters/handoutMaster",
+            "ppt/notesMasters/notesMaster",
+            "ppt/comments/comment",
+        ]
+        .iter()
+        .any(|prefix| name.starts_with(prefix)),
+    }
 }
 
 /// 判断归档部件是否为 XML 文件而不依赖大小写形式。
@@ -169,11 +223,19 @@ fn element_name(raw: &str) -> Option<&str> {
 
 /// 将 XML 文本节点转为有序文档段，并为每个段保留段落换行提示。
 pub(crate) fn inspect(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
-    let names = archive_names(package)?;
+    inspect_kind(package, PackageKind::Docx)
+}
+
+pub(crate) fn inspect_pptx(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
+    inspect_kind(package, PackageKind::Pptx)
+}
+
+fn inspect_kind(package: &[u8], kind: PackageKind) -> Result<Vec<DocumentSegment>, DocumentError> {
+    let names = archive_names(package, kind)?;
     let mut archive =
         ZipArchive::new(Cursor::new(package)).map_err(|_| DocumentError::InvalidStructure)?;
     let mut segments = Vec::new();
-    for name in names.iter().filter(|name| translatable_part(name)) {
+    for name in names.iter().filter(|name| translatable_part(name, kind)) {
         let mut file = archive
             .by_name(name)
             .map_err(|_| DocumentError::InvalidStructure)?;
@@ -187,19 +249,17 @@ pub(crate) fn inspect(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentEr
             let text = unescape(raw)
                 .map_err(|_| DocumentError::InvalidStructure)?
                 .into_owned();
-            let line_ending =
-                if xml[span.content_end..]
-                    .find("</w:p>")
-                    .is_some_and(|paragraph_end| {
-                        xml[span.content_end..]
-                            .find("<w:t")
-                            .is_none_or(|next_text| paragraph_end < next_text)
-                    })
-                {
-                    "\n"
-                } else {
-                    ""
-                };
+            let line_ending = if xml[span.content_end..]
+                .find(kind.paragraph_close())
+                .is_some_and(|paragraph_end| {
+                    xml[span.content_end..]
+                        .find(kind.text_open())
+                        .is_none_or(|next_text| paragraph_end < next_text)
+                }) {
+                "\n"
+            } else {
+                ""
+            };
             let kind = if text.chars().any(|character| !character.is_whitespace()) {
                 DocumentSegmentKind::Prose
             } else {
@@ -268,9 +328,24 @@ fn rewrite_xml(
     Ok(output.into_bytes())
 }
 
-/// 重建 DOCX ZIP，保留所有未参与翻译的包部件和资源。
+/// 重建 OOXML ZIP，保留所有未参与翻译的包部件和资源。
 pub(crate) fn reconstruct(job: &DocumentJob, package: &[u8]) -> Result<Vec<u8>, DocumentError> {
-    let names = archive_names(package)?;
+    reconstruct_kind(job, package, PackageKind::Docx)
+}
+
+pub(crate) fn reconstruct_pptx(
+    job: &DocumentJob,
+    package: &[u8],
+) -> Result<Vec<u8>, DocumentError> {
+    reconstruct_kind(job, package, PackageKind::Pptx)
+}
+
+fn reconstruct_kind(
+    job: &DocumentJob,
+    package: &[u8],
+    kind: PackageKind,
+) -> Result<Vec<u8>, DocumentError> {
+    let names = archive_names(package, kind)?;
     let mut archive =
         ZipArchive::new(Cursor::new(package)).map_err(|_| DocumentError::InvalidStructure)?;
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -285,7 +360,7 @@ pub(crate) fn reconstruct(job: &DocumentJob, package: &[u8]) -> Result<Vec<u8>, 
         file.read_to_end(&mut data)
             .map_err(|_| DocumentError::InvalidStructure)?;
         drop(file);
-        if translatable_part(&name) {
+        if translatable_part(&name, kind) {
             let xml = std::str::from_utf8(&data).map_err(|_| DocumentError::InvalidStructure)?;
             data = rewrite_xml(xml, &job.segments, &mut segment_cursor)?;
         }

@@ -29,7 +29,8 @@ const DOCUMENT_FORMATS_MIGRATION: &str =
     include_str!("../../../migrations/0009_document_formats.sql");
 const DOCUMENT_PACKAGES_MIGRATION: &str =
     include_str!("../../../migrations/0010_document_packages.sql");
-const LATEST_SCHEMA_VERSION: u32 = 10;
+const DOCUMENT_PPTX_MIGRATION: &str = include_str!("../../../migrations/0011_document_pptx.sql");
+const LATEST_SCHEMA_VERSION: u32 = 11;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -65,6 +66,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (8, DOCUMENT_JOB_OPTIONS_MIGRATION),
     (9, DOCUMENT_FORMATS_MIGRATION),
     (10, DOCUMENT_PACKAGES_MIGRATION),
+    (11, DOCUMENT_PPTX_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1002,7 +1004,7 @@ fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(),
             "The document contains too many segments.",
         ));
     }
-    if matches!(job.format, DocumentFormat::Docx) != job.package.is_some() {
+    if matches!(job.format, DocumentFormat::Docx | DocumentFormat::Pptx) != job.package.is_some() {
         return Err(document_configuration_error(
             "The DOCX package payload is missing or attached to another format.",
         ));
@@ -1108,6 +1110,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Html => "html",
         DocumentFormat::Json => "json",
         DocumentFormat::Docx => "docx",
+        DocumentFormat::Pptx => "pptx",
     }
 }
 
@@ -1121,6 +1124,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "html" => Ok(DocumentFormat::Html),
         "json" => Ok(DocumentFormat::Json),
         "docx" => Ok(DocumentFormat::Docx),
+        "pptx" => Ok(DocumentFormat::Pptx),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1555,7 +1559,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 10);
+        assert_eq!(storage.schema_version().expect("version"), 11);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1766,6 +1770,73 @@ mod tests {
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [7, 8, 9]);
+    }
+
+    #[test]
+    fn pptx_package_and_segments_survive_reopen() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("ppt/presentation.xml", options)
+            .expect("presentation");
+        writer
+            .write_all(b"<p:presentation xmlns:p=\"urn:ppt\"/>")
+            .expect("presentation bytes");
+        writer
+            .start_file("ppt/slides/slide1.xml", options)
+            .expect("slide");
+        writer
+            .write_all(br#"<p:sld xmlns:p="urn:ppt" xmlns:a="urn:dml"><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:sld>"#)
+            .expect("slide bytes");
+        writer
+            .start_file("ppt/media/image.bin", options)
+            .expect("image");
+        writer.write_all(&[4, 5, 6]).expect("image bytes");
+        let package = writer.finish().expect("package").into_inner();
+
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("pptx-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8("sample.pptx", &package).expect("pptx job");
+        storage
+            .save_document_job("pptx-job", &job, DocumentJobState::Pending)
+            .expect("save pptx job");
+        let text = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "Hello")
+            .expect("pptx text segment");
+        storage
+            .update_document_segment("pptx-job", text, "你好")
+            .expect("translate pptx text");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("pptx-job")
+            .expect("load pptx job")
+            .expect("pptx snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Pptx);
+        let rebuilt = snapshot.job.reconstruct_bytes().expect("reconstruct pptx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut slide = String::new();
+        archive
+            .by_name("ppt/slides/slide1.xml")
+            .expect("slide entry")
+            .read_to_string(&mut slide)
+            .expect("slide xml");
+        assert!(slide.contains("你好"));
+        let mut image = Vec::new();
+        archive
+            .by_name("ppt/media/image.bin")
+            .expect("image entry")
+            .read_to_end(&mut image)
+            .expect("image bytes");
+        assert_eq!(image, [4, 5, 6]);
     }
 
     #[test]
@@ -2178,7 +2249,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 10);
+        assert_eq!(storage.schema_version().expect("version"), 11);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2260,7 +2331,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 10);
+        assert_eq!(storage.schema_version().expect("version"), 11);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
