@@ -25,7 +25,9 @@ const DOCUMENT_JOB_PAUSE_MIGRATION: &str =
     include_str!("../../../migrations/0007_document_job_pause.sql");
 const DOCUMENT_JOB_OPTIONS_MIGRATION: &str =
     include_str!("../../../migrations/0008_document_job_options.sql");
-const LATEST_SCHEMA_VERSION: u32 = 8;
+const DOCUMENT_FORMATS_MIGRATION: &str =
+    include_str!("../../../migrations/0009_document_formats.sql");
+const LATEST_SCHEMA_VERSION: u32 = 9;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -59,6 +61,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (6, DOCUMENT_JOBS_MIGRATION),
     (7, DOCUMENT_JOB_PAUSE_MIGRATION),
     (8, DOCUMENT_JOB_OPTIONS_MIGRATION),
+    (9, DOCUMENT_FORMATS_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1084,6 +1087,7 @@ fn document_format_name(format: DocumentFormat) -> &'static str {
         DocumentFormat::Markdown => "markdown",
         DocumentFormat::Srt => "srt",
         DocumentFormat::WebVtt => "webvtt",
+        DocumentFormat::Csv => "csv",
     }
 }
 
@@ -1093,6 +1097,7 @@ fn parse_document_format(value: &str) -> Result<DocumentFormat, TranslationError
         "markdown" => Ok(DocumentFormat::Markdown),
         "srt" => Ok(DocumentFormat::Srt),
         "webvtt" => Ok(DocumentFormat::WebVtt),
+        "csv" => Ok(DocumentFormat::Csv),
         _ => Err(TranslationError::new(
             ErrorKind::Persistence,
             "The stored document format is invalid.",
@@ -1522,7 +1527,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 8);
+        assert_eq!(storage.schema_version().expect("version"), 9);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1565,6 +1570,50 @@ mod tests {
         );
         assert!(reopened.delete_document_job("job-1").expect("delete job"));
         assert!(reopened.document_job("job-1").expect("lookup").is_none());
+    }
+
+    #[test]
+    fn csv_document_format_and_encoded_translation_survive_reopen() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("csv-document-job.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let job = DocumentJob::from_utf8_with_csv_columns(
+            "comments.csv",
+            b"id,comment\n1,\"Hello, world\"\n",
+            Some(&[1]),
+        )
+        .expect("csv job");
+        storage
+            .save_document_job("csv-job", &job, DocumentJobState::Pending)
+            .expect("save csv job");
+        let comment = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text.starts_with("\"Hello"))
+            .expect("comment segment");
+        let header = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "comment")
+            .expect("header segment");
+        storage
+            .update_document_segment("csv-job", comment, "译文, 世界")
+            .expect("translate csv field");
+        storage
+            .update_document_segment("csv-job", header, "comment")
+            .expect("translate csv header");
+        drop(storage);
+
+        let reopened = Storage::open(&path).expect("reopen storage");
+        let snapshot = reopened
+            .document_job("csv-job")
+            .expect("load csv job")
+            .expect("csv snapshot");
+        assert_eq!(snapshot.job.format, DocumentFormat::Csv);
+        assert_eq!(
+            snapshot.job.reconstruct().expect("reconstruct csv"),
+            "id,comment\n1,\"译文, 世界\"\n"
+        );
     }
 
     #[test]
@@ -1977,7 +2026,7 @@ mod tests {
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 8);
+        assert_eq!(storage.schema_version().expect("version"), 9);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2059,7 +2108,7 @@ mod tests {
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 8);
+        assert_eq!(storage.schema_version().expect("version"), 9);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

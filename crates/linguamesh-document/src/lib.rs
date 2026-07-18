@@ -1,5 +1,7 @@
 #![doc = "`LinguaMesh` 文本文档检查、分段和重建契约。"]
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -15,6 +17,8 @@ pub enum DocumentFormat {
     Srt,
     /// UTF-8 `WebVTT` 字幕。
     WebVtt,
+    /// UTF-8 逗号或兼容分隔符表格。
+    Csv,
 }
 
 impl DocumentFormat {
@@ -29,6 +33,7 @@ impl DocumentFormat {
             "md" | "markdown" => Ok(Self::Markdown),
             "srt" => Ok(Self::Srt),
             "vtt" => Ok(Self::WebVtt),
+            "csv" => Ok(Self::Csv),
             _ => Err(DocumentError::UnsupportedFormat),
         }
     }
@@ -118,6 +123,17 @@ impl DocumentJob {
         source_name: impl Into<String>,
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
+        Self::from_utf8_with_csv_columns(source_name, contents, None)
+    }
+
+    /// 从受限 UTF-8 内容创建文档任务，并可为 CSV 指定要翻译的列。
+    ///
+    /// `None` 表示 CSV 的所有列都可翻译；非 CSV 格式忽略该选项。
+    pub fn from_utf8_with_csv_columns(
+        source_name: impl Into<String>,
+        contents: &[u8],
+        selected_columns: Option<&[usize]>,
+    ) -> Result<Self, DocumentError> {
         if contents.len() > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::TooLarge);
         }
@@ -126,12 +142,21 @@ impl DocumentJob {
         let contents = contents.strip_prefix(b"\xef\xbb\xbf").unwrap_or(contents);
         let text = std::str::from_utf8(contents).map_err(|_| DocumentError::InvalidUtf8)?;
         validate_structure(format, text)?;
+        if matches!(format, DocumentFormat::Csv) {
+            return from_csv_text(source_name, text, selected_columns);
+        }
         Ok(Self::from_text(source_name, format, text))
     }
 
     /// 从已解码的文本创建文档任务。
     #[must_use]
     pub fn from_text(source_name: impl Into<String>, format: DocumentFormat, text: &str) -> Self {
+        let source_name = source_name.into();
+        if matches!(format, DocumentFormat::Csv) {
+            if let Ok(job) = from_csv_text(source_name.clone(), text, None) {
+                return job;
+            }
+        }
         let mut in_fenced_code = false;
         let subtitle_kinds = subtitle_line_kinds(format, text);
         let segments = split_lines(text)
@@ -163,9 +188,26 @@ impl DocumentJob {
             .collect();
         Self {
             format,
-            source_name: source_name.into(),
+            source_name,
             segments,
         }
+    }
+
+    /// 返回一个可翻译段实际提交给提供方的文本。
+    pub fn translation_source_text(&self, index: usize) -> Result<Cow<'_, str>, DocumentError> {
+        let segment = self
+            .segments
+            .get(index)
+            .ok_or(DocumentError::UnknownSegment(index))?;
+        if !matches!(self.format, DocumentFormat::Csv) || segment.kind != DocumentSegmentKind::Prose
+        {
+            return Ok(Cow::Borrowed(segment.source_text.as_str()));
+        }
+        decode_csv_field(
+            &segment.source_text,
+            detect_csv_delimiter(&self.source_text()),
+        )
+        .map(Cow::Owned)
     }
 
     /// 返回未完成的可翻译段数量。
@@ -196,6 +238,8 @@ impl DocumentJob {
         index: usize,
         translated_text: impl Into<String>,
     ) -> Result<(), DocumentError> {
+        let csv_delimiter = matches!(self.format, DocumentFormat::Csv)
+            .then(|| detect_csv_delimiter(&self.source_text()));
         let segment = self
             .segments
             .get_mut(index)
@@ -203,7 +247,11 @@ impl DocumentJob {
         if segment.kind != DocumentSegmentKind::Prose {
             return Err(DocumentError::VerbatimSegment(index));
         }
-        segment.translated_text = Some(translated_text.into());
+        let translated_text = translated_text.into();
+        segment.translated_text = Some(match csv_delimiter {
+            Some(delimiter) => encode_csv_field(&segment.source_text, &translated_text, delimiter),
+            None => translated_text,
+        });
         Ok(())
     }
 
@@ -217,7 +265,9 @@ impl DocumentJob {
         if output.len() > MAX_DOCUMENT_BYTES {
             return Err(DocumentError::OutputTooLarge);
         }
-        validate_structure(self.format, &output)?;
+        let csv_delimiter = matches!(self.format, DocumentFormat::Csv)
+            .then(|| detect_csv_delimiter(&self.source_text()));
+        validate_structure_with_delimiter(self.format, &output, csv_delimiter)?;
         Ok(output)
     }
 }
@@ -234,8 +284,8 @@ pub enum DocumentError {
     /// 文件后缀不受支持。
     #[error("The document format is not supported.")]
     UnsupportedFormat,
-    /// 字幕结构不完整或包含无效时间轴。
-    #[error("The subtitle structure is invalid.")]
+    /// 文档结构不完整或包含无效字段。
+    #[error("The document structure is invalid.")]
     InvalidStructure,
     /// 译文导致输出超过上限。
     #[error("The reconstructed document exceeds the 4 MiB limit.")]
@@ -268,6 +318,240 @@ fn split_lines(text: &str) -> Vec<(String, String)> {
         lines.push((text[start..].to_owned(), String::new()));
     }
     lines
+}
+
+const CSV_DELIMITER_CANDIDATES: [u8; 4] = [b',', b';', b'\t', b'|'];
+const MAX_CSV_RECORDS: usize = 10_000;
+const MAX_CSV_FIELDS: usize = 1_024;
+const MAX_CSV_SEGMENTS: usize = 10_000;
+
+struct CsvRecord {
+    fields: Vec<String>,
+    line_ending: String,
+}
+
+// 依据首条记录中未加引号的分隔符选择稳定的 CSV 分隔符。
+fn detect_csv_delimiter(text: &str) -> char {
+    let mut counts = [0usize; CSV_DELIMITER_CANDIDATES.len()];
+    let bytes = text.as_bytes();
+    let mut in_quotes = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' if in_quotes && bytes.get(index + 1) == Some(&b'"') => index += 2,
+            b'"' => {
+                in_quotes = !in_quotes;
+                index += 1;
+            }
+            b'\r' | b'\n' if !in_quotes => break,
+            byte if !in_quotes => {
+                if let Some(position) = CSV_DELIMITER_CANDIDATES
+                    .iter()
+                    .position(|candidate| *candidate == byte)
+                {
+                    counts[position] += 1;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    let position = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(position, count)| (**count, usize::MAX - *position))
+        .map_or(0, |(position, _)| position);
+    char::from(CSV_DELIMITER_CANDIDATES[position])
+}
+
+// 解析带引号、转义引号和跨行字段的受限 CSV 记录。
+fn parse_csv_records(text: &str, delimiter: char) -> Result<Vec<CsvRecord>, DocumentError> {
+    if text.is_empty() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    let delimiter = u8::try_from(delimiter).map_err(|_| DocumentError::InvalidStructure)?;
+    let bytes = text.as_bytes();
+    let mut records = Vec::new();
+    let mut fields = Vec::new();
+    let mut field_start = 0usize;
+    let mut in_quotes = false;
+    let mut after_quote = false;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' if in_quotes && bytes.get(index + 1) == Some(&b'"') => index += 2,
+            b'"' if in_quotes => {
+                in_quotes = false;
+                after_quote = true;
+                index += 1;
+            }
+            b'"' if index == field_start => {
+                in_quotes = true;
+                index += 1;
+            }
+            b'"' => return Err(DocumentError::InvalidStructure),
+            byte if byte == delimiter && !in_quotes => {
+                if after_quote || !fields.is_empty() || field_start < index {
+                    fields.push(text[field_start..index].to_owned());
+                } else {
+                    fields.push(String::new());
+                }
+                field_start = index + 1;
+                after_quote = false;
+                index += 1;
+            }
+            b'\r' | b'\n' if !in_quotes => {
+                if after_quote || !fields.is_empty() || field_start < index {
+                    fields.push(text[field_start..index].to_owned());
+                } else {
+                    fields.push(String::new());
+                }
+                let line_ending = if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                    index += 2;
+                    "\r\n"
+                } else if bytes[index] == b'\r' {
+                    index += 1;
+                    "\r"
+                } else {
+                    index += 1;
+                    "\n"
+                };
+                if fields.len() > MAX_CSV_FIELDS || records.len() >= MAX_CSV_RECORDS {
+                    return Err(DocumentError::InvalidStructure);
+                }
+                records.push(CsvRecord {
+                    fields,
+                    line_ending: line_ending.to_owned(),
+                });
+                fields = Vec::new();
+                field_start = index;
+                after_quote = false;
+            }
+            _ if after_quote => return Err(DocumentError::InvalidStructure),
+            _ => index += 1,
+        }
+    }
+    if in_quotes || after_quote && field_start > bytes.len() {
+        return Err(DocumentError::InvalidStructure);
+    }
+    if !fields.is_empty() || field_start < bytes.len() || records.is_empty() {
+        fields.push(text[field_start..].to_owned());
+        if fields.len() > MAX_CSV_FIELDS || records.len() >= MAX_CSV_RECORDS {
+            return Err(DocumentError::InvalidStructure);
+        }
+        records.push(CsvRecord {
+            fields,
+            line_ending: String::new(),
+        });
+    }
+    Ok(records)
+}
+
+// 解码 CSV 字段供翻译器使用，同时拒绝不完整的引号结构。
+fn decode_csv_field(raw: &str, delimiter: char) -> Result<String, DocumentError> {
+    if raw.starts_with('"') {
+        if !raw.ends_with('"') || raw.len() < 2 {
+            return Err(DocumentError::InvalidStructure);
+        }
+        let inner = &raw[1..raw.len() - 1];
+        let mut decoded = String::with_capacity(inner.len());
+        let mut characters = inner.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character == '"' {
+                if characters.next() != Some('"') {
+                    return Err(DocumentError::InvalidStructure);
+                }
+                decoded.push('"');
+            } else {
+                decoded.push(character);
+            }
+        }
+        Ok(decoded)
+    } else if raw.contains('"') || raw.contains(delimiter) {
+        Err(DocumentError::InvalidStructure)
+    } else {
+        Ok(raw.to_owned())
+    }
+}
+
+// 按源字段的引号风格编码译文，并为新增结构字符补上必要的引号。
+fn encode_csv_field(raw: &str, translated: &str, delimiter: char) -> String {
+    let quoted = raw.starts_with('"')
+        || translated.contains(delimiter)
+        || translated.contains('"')
+        || translated.contains('\r')
+        || translated.contains('\n');
+    if quoted {
+        format!("\"{}\"", translated.replace('"', "\"\""))
+    } else {
+        translated.to_owned()
+    }
+}
+
+// 将 CSV 记录转换为保留分隔符、引号和行尾的文档段。
+fn from_csv_text(
+    source_name: String,
+    text: &str,
+    selected_columns: Option<&[usize]>,
+) -> Result<DocumentJob, DocumentError> {
+    let delimiter = detect_csv_delimiter(text);
+    let records = parse_csv_records(text, delimiter)?;
+    let max_columns = records
+        .iter()
+        .map(|record| record.fields.len())
+        .max()
+        .unwrap_or(0);
+    let selected = match selected_columns {
+        Some(columns) => {
+            let mut sorted = columns.to_vec();
+            sorted.sort_unstable();
+            if sorted.windows(2).any(|window| window[0] == window[1])
+                || sorted.iter().any(|column| *column >= max_columns)
+            {
+                return Err(DocumentError::InvalidStructure);
+            }
+            sorted
+        }
+        None => (0..max_columns).collect(),
+    };
+    let mut segments = Vec::new();
+    for record in records {
+        let field_count = record.fields.len();
+        for (column, field) in record.fields.into_iter().enumerate() {
+            let kind = if selected.binary_search(&column).is_ok() {
+                DocumentSegmentKind::Prose
+            } else {
+                DocumentSegmentKind::Verbatim
+            };
+            segments.push(DocumentSegment {
+                index: segments.len(),
+                kind,
+                source_text: field,
+                translated_text: None,
+                line_ending: String::new(),
+            });
+            if column + 1 < field_count {
+                segments.push(DocumentSegment {
+                    index: segments.len(),
+                    kind: DocumentSegmentKind::Verbatim,
+                    source_text: delimiter.to_string(),
+                    translated_text: None,
+                    line_ending: String::new(),
+                });
+            }
+        }
+        if let Some(segment) = segments.last_mut() {
+            segment.line_ending = record.line_ending;
+        }
+        if segments.len() > MAX_CSV_SEGMENTS {
+            return Err(DocumentError::InvalidStructure);
+        }
+    }
+    Ok(DocumentJob {
+        format: DocumentFormat::Csv,
+        source_name,
+        segments,
+    })
 }
 
 // 校验字幕时间戳的时钟字段和毫秒字段。
@@ -368,6 +652,22 @@ fn subtitle_line_kinds(format: DocumentFormat, text: &str) -> Vec<bool> {
 
 // 校验字幕头、cue 顺序、时间轴和每个 cue 的文本。
 fn validate_structure(format: DocumentFormat, text: &str) -> Result<(), DocumentError> {
+    validate_structure_with_delimiter(format, text, None)
+}
+
+// 校验文档结构；重建 CSV 时可传入源文件已选择的分隔符。
+fn validate_structure_with_delimiter(
+    format: DocumentFormat,
+    text: &str,
+    delimiter: Option<char>,
+) -> Result<(), DocumentError> {
+    if matches!(format, DocumentFormat::Csv) {
+        parse_csv_records(
+            text,
+            delimiter.unwrap_or_else(|| detect_csv_delimiter(text)),
+        )?;
+        return Ok(());
+    }
     if !matches!(format, DocumentFormat::Srt | DocumentFormat::WebVtt) {
         return Ok(());
     }
@@ -478,6 +778,10 @@ mod tests {
             Ok(DocumentFormat::WebVtt)
         );
         assert_eq!(
+            DocumentFormat::from_name("table.CSV"),
+            Ok(DocumentFormat::Csv)
+        );
+        assert_eq!(
             DocumentFormat::from_name("notes.docx"),
             Err(DocumentError::UnsupportedFormat)
         );
@@ -583,6 +887,129 @@ mod tests {
         );
         assert_eq!(
             DocumentJob::from_utf8("captions.vtt", b"WEBVTT\n\n00:00.000 --> nope\nHello"),
+            Err(DocumentError::InvalidStructure)
+        );
+    }
+
+    #[test]
+    fn csv_selected_columns_decode_and_reconstruct_with_original_shape() {
+        let source = "id,name,notes\r\n1,Alice,\"Hello, 世界\"\n2,Bob\n";
+        let mut job =
+            DocumentJob::from_utf8_with_csv_columns("people.csv", source.as_bytes(), Some(&[1]))
+                .expect("csv");
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prose.len(), 3);
+        assert_eq!(job.translation_source_text(prose[0]).unwrap(), "name");
+        assert_eq!(job.translation_source_text(prose[1]).unwrap(), "Alice");
+        let notes = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "\"Hello, 世界\"")
+            .expect("quoted notes field");
+        assert_eq!(
+            job.translation_source_text(notes).unwrap(),
+            "\"Hello, 世界\""
+        );
+        for (index, translated) in prose.into_iter().zip(["姓名", "爱丽丝", "鲍勃"]) {
+            job.apply_translation(index, translated).unwrap();
+        }
+        assert_eq!(
+            job.reconstruct().unwrap(),
+            "id,姓名,notes\r\n1,爱丽丝,\"Hello, 世界\"\n2,鲍勃\n"
+        );
+        assert_eq!(
+            job.segments
+                .iter()
+                .filter(|segment| segment.kind == DocumentSegmentKind::Verbatim)
+                .map(|segment| segment.source_text.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "id",
+                ",",
+                ",",
+                "notes",
+                "1",
+                ",",
+                ",",
+                "\"Hello, 世界\"",
+                "2",
+                ",",
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_preserves_escaped_quotes_when_translating_quoted_fields() {
+        let source = "id,comment\n1,\"你好, \"\"世界\"\"\"\n";
+        let mut job =
+            DocumentJob::from_utf8_with_csv_columns("comments.csv", source.as_bytes(), Some(&[1]))
+                .expect("csv");
+        let comment = job
+            .segments
+            .iter()
+            .enumerate()
+            .find(|(_, segment)| segment.source_text.starts_with("\"你好"))
+            .map(|(index, _)| index)
+            .expect("comment");
+        let header = job
+            .segments
+            .iter()
+            .enumerate()
+            .find(|(_, segment)| segment.source_text == "comment")
+            .map(|(index, _)| index)
+            .expect("header");
+        assert_eq!(
+            job.translation_source_text(comment).unwrap(),
+            "你好, \"世界\""
+        );
+        job.apply_translation(header, "comment").unwrap();
+        job.apply_translation(comment, "译文, \"世界\"").unwrap();
+        assert_eq!(
+            job.reconstruct().unwrap(),
+            "id,comment\n1,\"译文, \"\"世界\"\"\"\n"
+        );
+    }
+
+    #[test]
+    fn csv_detects_semicolon_delimiters_without_rewriting_rows() {
+        let source = "id;value\r\n1;one\r\n";
+        let mut job =
+            DocumentJob::from_utf8_with_csv_columns("values.csv", source.as_bytes(), Some(&[1]))
+                .expect("semicolon csv");
+        let prose = job
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| {
+                (segment.kind == DocumentSegmentKind::Prose).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in prose {
+            let source_text = job.translation_source_text(index).unwrap().into_owned();
+            job.apply_translation(index, format!("{source_text}-translated"))
+                .unwrap();
+        }
+        assert_eq!(
+            job.reconstruct().unwrap(),
+            "id;value-translated\r\n1;one-translated\r\n"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_csv_structure() {
+        assert_eq!(
+            DocumentJob::from_utf8("table.csv", b"id,name\n1,\"unclosed\n"),
+            Err(DocumentError::InvalidStructure)
+        );
+        assert_eq!(
+            DocumentJob::from_utf8("table.csv", b"id,name\n1,\"quoted\"tail\n"),
             Err(DocumentError::InvalidStructure)
         );
     }

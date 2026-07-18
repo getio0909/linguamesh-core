@@ -18,9 +18,9 @@ configured provider cannot be revoked, so session closure drops the HTTP future 
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
 
-SQLite migrations currently reach schema version 8. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 9. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
-translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT
+translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
 preserve schema-1 profile metadata while clearing untrusted legacy secret references, enable WAL,
 secure deletion, and
@@ -33,14 +33,16 @@ private directories and leaf-file metadata. See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
-UTF-8 TXT, Markdown, SRT, and WebVTT names, enforces a 4 MiB input/output bound, strips an optional
+UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional
 UTF-8 BOM, retains LF/CRLF/CR line endings, and represents Markdown fenced code plus subtitle cue
 IDs, headers, and timing lines as verbatim segments. Prose segments can be completed independently
 and the job reconstructs the original ordering without allowing untranslated or structural segments
-to be overwritten; subtitle reconstruction revalidates timestamps and cue structure. Core schema
+to be overwritten; subtitle reconstruction revalidates timestamps and cue structure, while CSV
+preserves delimiters, quoting, variable-width rows, and selected-column boundaries. Core schema
 6 persists bounded job metadata and ordered segment snapshots without local paths or credential
 values; schema 7 adds a transactionally migrated paused state, and schema 8 adds validated,
-non-secret document translation options. Linux worker startup restores pending/running/paused jobs
+non-secret document translation options; schema 9 expands the stored format check for CSV and the
+subtitle codecs. Linux worker startup restores pending/running/paused jobs
 and exposes explicit segment/state commands; resume/retry reuses the saved provider/model/glossary
 only after the active runtime matches. Archive formats and a multi-job GUI queue remain future work.
 
