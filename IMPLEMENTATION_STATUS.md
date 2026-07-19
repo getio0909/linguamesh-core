@@ -1,5 +1,27 @@
 # Implementation Status
 
+## 2026-07-19 — OOXML archive compression-ratio checkpoint
+
+Assumption: bounded OOXML imports must reject suspicious compression ratios before any archive entry
+is decompressed into a document manifest; the ratio guard complements the existing 4 MiB package,
+512-entry, path, encryption, duplicate-name, and total-uncompressed-size limits.
+
+Implemented a shared Core guard for DOCX, PPTX, and XLSX archive inspection and reconstruction. A
+non-empty entry at or above 1 KiB is rejected when its uncompressed size exceeds 200 times its
+compressed size, including zero-byte compressed descriptors. The rejection is typed as
+`DocumentError::TooLarge` and occurs before XML inspection or output reconstruction.
+
+Validated locally:
+
+- `cargo fmt --all -- --check` — passed.
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` — passed.
+- `cargo test --workspace --all-targets --all-features --offline` — passed: all workspace tests,
+  including 26 document tests and the suspicious-compression fixture; 0 failed.
+- `cargo build --workspace --locked` — passed.
+
+The fixture is deterministic and in-memory; full Linux integration and stable-release evidence
+remain pending.
+
 ## 2026-07-19 — Native Ollama `/api` adapter checkpoint
 
 Assumption: Linux-first local-model support needs both Ollama's native `/api` contract and the

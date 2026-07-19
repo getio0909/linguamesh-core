@@ -2,6 +2,11 @@
 
 Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, and restart recovery without persisting paths or credential values.
 
+OOXML document tests also reject encrypted, symlinked, duplicate, traversal, and suspiciously
+compressed ZIP entries before XML inspection. DOCX, PPTX, and XLSX packages enforce the 4 MiB and
+512-entry limits plus a bounded 200:1 uncompressed-to-compressed ratio for entries at least 1 KiB;
+the compression-ratio fixture uses an in-memory deflated resource and never writes a filesystem path.
+
 Protected-span tests scan URLs, email addresses, Markdown code, and placeholders, split opaque
 markers across streamed deltas, restore every original span exactly once, and reject missing,
 duplicate, or unknown markers. The OpenAI-compatible provider test captures the outbound request to

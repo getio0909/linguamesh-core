@@ -11,6 +11,8 @@ use zip::write::ZipWriter;
 use crate::{DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, MAX_DOCUMENT_BYTES};
 
 const MAX_OOXML_ENTRIES: usize = 512;
+const MAX_OOXML_COMPRESSION_RATIO: u64 = 200;
+const MIN_OOXML_RATIO_CHECK_BYTES: u64 = 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) enum PackageKind {
@@ -76,6 +78,14 @@ fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, Docum
             return Err(DocumentError::InvalidStructure);
         }
         let size = usize::try_from(file.size()).map_err(|_| DocumentError::TooLarge)?;
+        let uncompressed_size = file.size();
+        let compressed_size = file.compressed_size();
+        if uncompressed_size >= MIN_OOXML_RATIO_CHECK_BYTES
+            && (compressed_size == 0
+                || uncompressed_size > compressed_size.saturating_mul(MAX_OOXML_COMPRESSION_RATIO))
+        {
+            return Err(DocumentError::TooLarge);
+        }
         total_size = total_size
             .checked_add(size)
             .ok_or(DocumentError::TooLarge)?;

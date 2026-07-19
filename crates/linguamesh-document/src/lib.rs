@@ -2630,4 +2630,35 @@ trailer
             Err(DocumentError::InvalidStructure)
         );
     }
+
+    #[test]
+    fn rejects_docx_archive_with_suspicious_compression_ratio() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("word/document.xml", options)
+            .expect("document");
+        writer
+            .write_all(
+                br#"<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Safe</w:t></w:r></w:p></w:body></w:document>"#,
+            )
+            .expect("document bytes");
+        let compressed_options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .start_file("word/media/repetitive.bin", compressed_options)
+            .expect("repetitive resource");
+        writer
+            .write_all(&vec![b'x'; 512 * 1024])
+            .expect("repetitive resource bytes");
+        let package = writer.finish().expect("archive").into_inner();
+        assert_eq!(
+            DocumentJob::from_utf8("suspicious.docx", &package),
+            Err(DocumentError::TooLarge)
+        );
+    }
 }
