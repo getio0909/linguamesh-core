@@ -24,10 +24,10 @@ cargo run -p linguamesh-cli -- demo --text "Hello, LinguaMesh" --target zh-CN
 
 The demo starts a loopback fake provider and requires no API key.
 
-The shared OpenAI-compatible path protects common URLs, email addresses, Markdown code spans,
-fenced code, and placeholders while translating. Marker restoration is incremental and fails closed
-if a provider omits, duplicates, or changes a protected span. User glossaries and custom protected
-terms are not yet part of this prerelease slice.
+The shared OpenAI-compatible and native Ollama paths protect common URLs, email addresses, Markdown
+code spans, fenced code, and placeholders while translating. Marker restoration is incremental and
+fails closed if a provider omits, duplicates, or changes a protected span. User glossaries and
+custom protected terms are not yet part of this prerelease slice.
 
 For native client conformance, keep the same deterministic provider running on a chosen loopback
 port:
@@ -40,10 +40,12 @@ The command prints the exact endpoint and stays active until Ctrl+C. Desktop cli
 endpoint directly. For an Android emulator, run `adb reverse tcp:40123 tcp:40123` and configure
 the embedded core with `http://127.0.0.1:40123/v1/`; this preserves the loopback-only HTTP policy.
 
-The testkit also exposes an Ollama-compatible OpenAI endpoint fixture. It returns an Ollama-style
-model identifier (`llama3.2:latest`) from `/v1/models` and streams `/v1/chat/completions` without a
-credential. This proves the local OpenAI-compatible contract used by Ollama's `/v1/` surface; it
-does not claim coverage of Ollama's native `/api` endpoints or a running third-party daemon.
+The testkit exposes both Ollama-compatible surfaces. The `local-loopback` fixture returns an
+Ollama-style model identifier (`llama3.2:latest`) from `/v1/models` and streams
+`/v1/chat/completions`; the `ollama` fixture exercises native `/api/tags` discovery and
+`/api/chat` NDJSON streaming without a credential. These deterministic fixtures prove wire
+contracts only; a running third-party daemon, GPU acceleration, and release readiness remain
+external gates.
 
 ## Secure provider foundation
 

@@ -15,6 +15,14 @@
       "adapter": "openai_chat_completions",
       "model_listing": "openai_models",
       "loopback_only": true
+    },
+    {
+      "id": "ollama",
+      "display_name": "Ollama",
+      "adapter": "ollama_chat",
+      "model_listing": "ollama_tags",
+      "documentation_url": "https://github.com/ollama/ollama/blob/main/docs/api.md",
+      "loopback_only": true
     }
   ]
 }

@@ -755,6 +755,8 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "linguamesh-domain",
  "linguamesh-engine",
+ "linguamesh-provider-api",
+ "linguamesh-provider-ollama",
  "linguamesh-provider-openai",
  "linguamesh-storage",
  "linguamesh-testkit",
@@ -852,6 +854,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "linguamesh-provider-ollama"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "linguamesh-domain",
+ "linguamesh-provider-api",
+ "linguamesh-testkit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

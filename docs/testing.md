@@ -1,12 +1,13 @@
 # Testing
 
-Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, and restart recovery without persisting paths or credential values.
+Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, and restart recovery without persisting paths or credential values.
 
 Protected-span tests scan URLs, email addresses, Markdown code, and placeholders, split opaque
 markers across streamed deltas, restore every original span exactly once, and reject missing,
 duplicate, or unknown markers. The OpenAI-compatible provider test captures the outbound request to
 confirm the source span is not sent as ordinary model text and then exercises restoration through a
-real local SSE response.
+real local SSE response. Native Ollama tests cover `/api/tags` discovery, fragmented UTF-8 NDJSON,
+completion markers, and cancellation through the deterministic fixture.
 
 Native ABI tests submit a real Protobuf translation command to the loopback fake provider, assert
 ordered deltas and exactly one terminal event, and verify cancellation. Run Linux C and C++ consumer

@@ -1,5 +1,31 @@
 # Implementation Status
 
+## 2026-07-19 — Native Ollama `/api` adapter checkpoint
+
+Assumption: Linux-first local-model support needs both Ollama's native `/api` contract and the
+OpenAI-compatible `/v1/` contract, while interoperability with an independently running daemon
+remains outside the deterministic fixture boundary.
+
+Implemented `linguamesh-provider-ollama` with loopback/HTTPS endpoint validation, optional one-shot
+credential handling, `/api/tags` model discovery, `/api/chat` NDJSON streaming, fragmented UTF-8
+decoding, cancellation, bounded responses, protected-span restoration, and exactly-one completion
+validation. The provider catalog now includes the loopback-only `ollama` preset. Core application
+tests and the Linux worker exercise explicit `ollama_chat` profiles without a secret and stream
+`你好，Ollama！` from the native fixture.
+
+Validated locally:
+
+- `cargo fmt --all --check` — passed.
+- `cargo check --workspace --all-targets --all-features --locked` — passed.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` — passed.
+- `cargo test --workspace --all-targets --all-features --offline` — passed: all workspace tests,
+  including 10 application, 4 Ollama-provider, and 6 testkit tests; 0 failed.
+- Linux `cargo test --features demo-provider --lib --offline` — passed: 105 tests, 2 ignored,
+  including the native Ollama worker flow.
+
+The fixture proves the native wire contract and does not claim a running third-party Ollama daemon,
+GPU acceleration, or a stable release.
+
 ## 2026-07-19 — Ollama-compatible loopback contract checkpoint
 
 Assumption: the required local-model acceptance path may use Ollama's OpenAI-compatible `/v1/`

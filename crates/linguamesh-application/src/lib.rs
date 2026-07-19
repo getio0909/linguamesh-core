@@ -5,6 +5,8 @@ use linguamesh_domain::{
     SecretValue, TranslationError,
 };
 use linguamesh_engine::TranslationEngine;
+use linguamesh_provider_api::ModelProvider;
+use linguamesh_provider_ollama::{OllamaConfig, OllamaProvider};
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use std::error::Error;
 use std::fmt;
@@ -220,13 +222,18 @@ impl ProviderManager {
                 "The provider profile is disabled.",
             ));
         }
-        if profile.adapter_type() != "openai_chat_completions" {
+        let is_ollama = profile.adapter_type() == "ollama_chat";
+        if !is_ollama && profile.adapter_type() != "openai_chat_completions" {
             return Err(TranslationError::new(
                 ErrorKind::UnsupportedCapability,
                 "The provider adapter is not supported by this Core build.",
             ));
         }
-        OpenAiCompatibleProvider::validate_endpoint(profile.base_endpoint())?;
+        if is_ollama {
+            OllamaProvider::validate_endpoint(profile.base_endpoint())?;
+        } else {
+            OpenAiCompatibleProvider::validate_endpoint(profile.base_endpoint())?;
+        }
         let credential = match profile.secret_ref() {
             Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
             None => None,
@@ -234,12 +241,21 @@ impl ProviderManager {
         if cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
-        let config = match credential {
-            Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
-            None => OpenAiConfig::without_credential(profile.base_endpoint()),
+        let provider: Arc<dyn ManagedProvider> = if is_ollama {
+            let config = match credential {
+                Some(secret) => OllamaConfig::with_credential(profile.base_endpoint(), secret),
+                None => OllamaConfig::without_credential(profile.base_endpoint()),
+            };
+            Arc::new(OllamaProvider::new(config)?)
+        } else {
+            let config = match credential {
+                Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
+                None => OpenAiConfig::without_credential(profile.base_endpoint()),
+            };
+            Arc::new(OpenAiCompatibleProvider::new(config)?)
         };
-        let provider = Arc::new(OpenAiCompatibleProvider::new(config)?);
-        let engine = TranslationEngine::new(provider.clone());
+        let engine_provider: Arc<dyn ModelProvider> = provider.clone();
+        let engine = TranslationEngine::new(engine_provider);
         let models = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(TranslationError::cancelled()),
@@ -301,7 +317,7 @@ impl fmt::Debug for ProviderManager {
 
 struct ActiveProvider {
     profile_id: ProviderProfileId,
-    provider: Arc<OpenAiCompatibleProvider>,
+    provider: Arc<dyn ManagedProvider>,
     engine: TranslationEngine,
     models: Vec<ModelDescriptor>,
 }
@@ -309,6 +325,22 @@ struct ActiveProvider {
 impl Drop for ActiveProvider {
     fn drop(&mut self) {
         self.provider.close_session();
+    }
+}
+
+trait ManagedProvider: ModelProvider {
+    fn close_session(&self);
+}
+
+impl ManagedProvider for OpenAiCompatibleProvider {
+    fn close_session(&self) {
+        Self::close_session(self);
+    }
+}
+
+impl ManagedProvider for OllamaProvider {
+    fn close_session(&self) {
+        Self::close_session(self);
     }
 }
 
@@ -333,11 +365,25 @@ mod tests {
     const MISSING_SECRET_REF: &str = "secret-service:55555555-5555-4555-8555-555555555555";
 
     fn profile(endpoint: &str, secret_ref: Option<&str>) -> ProviderProfile {
+        profile_with_adapter(
+            endpoint,
+            secret_ref,
+            "local-loopback",
+            "openai_chat_completions",
+        )
+    }
+
+    fn profile_with_adapter(
+        endpoint: &str,
+        secret_ref: Option<&str>,
+        preset_id: &str,
+        adapter: &str,
+    ) -> ProviderProfile {
         ProviderProfile::new(
             ProviderProfileId::parse("provider-profile").expect("profile id"),
             "Provider",
-            "local-loopback",
-            "openai_chat_completions",
+            preset_id,
+            adapter,
             endpoint,
             secret_ref.map(|value| SecretRef::parse(value).expect("secret ref")),
         )
@@ -404,6 +450,38 @@ mod tests {
         assert!(saw_wal);
         assert!(saw_shm);
         drop(storage);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn native_ollama_profile_discovers_and_streams_without_a_secret() {
+        let server = FakeProviderServer::start_ollama_native()
+            .await
+            .expect("server");
+        let provider =
+            profile_with_adapter(&server.ollama_base_url(), None, "ollama", "ollama_chat");
+        let (broker, _requests) = host_secret_channel(1).expect("secret channel");
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("Ollama connection");
+        assert_eq!(models[0].id, "llama3.2:latest");
+        let mut operation = manager
+            .active_engine()
+            .expect("active engine")
+            .translate(TranslationRequest::new("Hello", "zh-CN", "llama3.2:latest"));
+        let mut output = String::new();
+        while let Some(event) = operation.next_event().await {
+            match event {
+                TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed { .. } => break,
+                TranslationEvent::Failed { error, .. } => panic!("Ollama failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(output, "你好，Ollama！");
+        manager.disconnect();
         server.shutdown().await;
     }
 

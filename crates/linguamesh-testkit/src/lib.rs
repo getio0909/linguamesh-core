@@ -2,6 +2,7 @@
 
 use async_stream::stream;
 use axum::Router;
+use axum::body::{Body, Bytes};
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -63,6 +64,12 @@ impl FakeProviderServer {
         Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Ollama).await
     }
 
+    /// 启动原生 Ollama `/api` 模型和 NDJSON 聊天接口的回环服务。
+    pub async fn start_ollama_native() -> std::io::Result<Self> {
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::OllamaNative)
+            .await
+    }
+
     async fn start_with_configuration(
         port: u16,
         expected_token: Option<SecretValue>,
@@ -78,6 +85,8 @@ impl FakeProviderServer {
         let app = Router::new()
             .route("/v1/models", get(models))
             .route("/v1/chat/completions", post(chat_completions))
+            .route("/api/tags", get(ollama_tags))
+            .route("/api/chat", post(ollama_chat))
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
                 model_delay,
@@ -106,6 +115,12 @@ impl FakeProviderServer {
     #[must_use]
     pub fn base_url(&self) -> String {
         format!("http://{}/v1/", self.address)
+    }
+
+    /// 返回包含 `/api/` 的原生 Ollama 回环基础地址。
+    #[must_use]
+    pub fn ollama_base_url(&self) -> String {
+        format!("http://{}/api/", self.address)
     }
 
     /// 返回模型端点已进入处理的请求计数器。
@@ -140,6 +155,7 @@ struct FakeProviderState {
 enum FakeProviderFlavor {
     Standard,
     Ollama,
+    OllamaNative,
 }
 
 async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
@@ -155,11 +171,61 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
             { "id": "fake-translator", "object": "model" },
             { "id": "fake-slow-translator", "object": "model" }
         ]),
-        FakeProviderFlavor::Ollama => json!([
+        FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => json!([
             { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
         ]),
     };
     Json(json!({ "object": "list", "data": models })).into_response()
+}
+
+async fn ollama_tags(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
+    state.model_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    Json(json!({
+        "models": [{ "name": "llama3.2:latest", "model": "llama3.2:latest" }]
+    }))
+    .into_response()
+}
+
+async fn ollama_chat(
+    State(state): State<FakeProviderState>,
+    headers: HeaderMap,
+    Json(request): Json<FakeChatRequest>,
+) -> Response {
+    state.chat_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    let source = request
+        .messages
+        .last()
+        .map(|message| message.content.as_str())
+        .unwrap_or_default();
+    let malformed = source.contains("[malformed]");
+    let disconnect = source.contains("[disconnect]");
+    let output = stream! {
+        for fragment in ["你好", "，", "Ollama", "！"] {
+            tokio::time::sleep(Duration::from_millis(35)).await;
+            if malformed {
+                yield Ok::<Bytes, Infallible>(Bytes::from_static(b"{not-json\n"));
+                return;
+            }
+            let line = json!({
+                "message": { "role": "assistant", "content": fragment },
+                "done": false
+            });
+            yield Ok::<Bytes, Infallible>(Bytes::from(format!("{line}\n")));
+        }
+        if !disconnect {
+            yield Ok::<Bytes, Infallible>(Bytes::from_static(b"{\"done\":true}\n"));
+        }
+    };
+    Response::builder()
+        .header("content-type", "application/x-ndjson")
+        .body(Body::from_stream(output))
+        .expect("Ollama response")
 }
 
 #[derive(Deserialize)]
@@ -200,7 +266,9 @@ async fn chat_completions(
     let output = stream! {
         let fragments = match state.flavor {
             FakeProviderFlavor::Standard => ["你好", "，", "LinguaMesh", "！"],
-            FakeProviderFlavor::Ollama => ["你好", "，", "Ollama", "！"],
+            FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => {
+                ["你好", "，", "Ollama", "！"]
+            }
         };
         for fragment in fragments {
             tokio::time::sleep(delay).await;
@@ -335,6 +403,37 @@ mod tests {
         let body: serde_json::Value = response.json().await.expect("models response");
         assert_eq!(body["data"][0]["id"], "llama3.2:latest");
         assert_eq!(body["data"][0]["owned_by"], "ollama");
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ollama_native_server_exposes_tags_and_ndjson_chat() {
+        let server = FakeProviderServer::start_ollama_native()
+            .await
+            .expect("server");
+        let client = reqwest::Client::new();
+        let tags: serde_json::Value = client
+            .get(format!("{}tags", server.ollama_base_url()))
+            .send()
+            .await
+            .expect("tags request")
+            .json()
+            .await
+            .expect("tags response");
+        assert_eq!(tags["models"][0]["name"], "llama3.2:latest");
+        let response = client
+            .post(format!("{}chat", server.ollama_base_url()))
+            .json(&serde_json::json!({
+                "model": "llama3.2:latest",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Hello"}]
+            }))
+            .send()
+            .await
+            .expect("chat request");
+        let body = response.text().await.expect("chat response");
+        assert!(body.contains("你好"));
+        assert!(body.contains("\"done\":true"));
         server.shutdown().await;
     }
 }

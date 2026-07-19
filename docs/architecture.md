@@ -1,8 +1,9 @@
 # Architecture
 
 The workspace separates stable domain types, protocol envelopes, provider contracts, the
-OpenAI-compatible adapter, persistence, application orchestration, test infrastructure, C ABI, and
-CLI. Dependencies point inward toward domain and provider abstractions. Native clients consume the
+OpenAI-compatible and native Ollama adapters, persistence, application orchestration, test
+infrastructure, C ABI, and CLI. Dependencies point inward toward domain and provider abstractions.
+Native clients consume the
 engine through platform wrappers over the stable C ABI, except Linux where direct Rust integration
 is preferred. The current prerelease wrappers are maintained source; reproducible wrapper
 generation remains future work.
@@ -17,6 +18,13 @@ or in-flight operations, and clears its sole cached credential. A header already
 configured provider cannot be revoked, so session closure drops the HTTP future as soon as the
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
+
+The provider catalog maps `local-loopback` to the OpenAI-compatible `/v1/` contract and `ollama` to
+the native loopback-only `/api/` contract. The latter discovers models through `/api/tags` and
+streams `/api/chat` as newline-delimited JSON; both adapters share endpoint validation,
+cancellation, bounded response handling, protected-span restoration, and redacted credential
+lifetimes. The in-process fixture verifies the wire shape, not interoperability with an
+independently running Ollama daemon.
 
 SQLite migrations currently reach schema version 9. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
