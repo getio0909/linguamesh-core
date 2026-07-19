@@ -31,30 +31,43 @@ pub struct FakeProviderServer {
 impl FakeProviderServer {
     /// 启动兼容 `OpenAI` 模型和流式接口的服务。
     pub async fn start() -> std::io::Result<Self> {
-        Self::start_on_port(0).await
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Standard).await
     }
 
     /// 在指定的 IPv4 回环端口启动服务，端口零表示由系统选择。
     pub async fn start_on_port(port: u16) -> std::io::Result<Self> {
-        Self::start_with_configuration(port, None, Duration::ZERO).await
+        Self::start_with_configuration(port, None, Duration::ZERO, FakeProviderFlavor::Standard)
+            .await
     }
 
     /// 启动在模型响应前等待指定时长的回环服务。
     pub async fn start_with_model_delay(model_delay: Duration) -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, model_delay).await
+        Self::start_with_configuration(0, None, model_delay, FakeProviderFlavor::Standard).await
     }
 
     /// 启动要求精确 Bearer 凭据的回环服务。
     pub async fn start_requiring_bearer_token(
         expected_token: SecretValue,
     ) -> std::io::Result<Self> {
-        Self::start_with_configuration(0, Some(expected_token), Duration::ZERO).await
+        Self::start_with_configuration(
+            0,
+            Some(expected_token),
+            Duration::ZERO,
+            FakeProviderFlavor::Standard,
+        )
+        .await
+    }
+
+    /// 启动返回 Ollama 模型标识的 `OpenAI` 兼容回环服务。
+    pub async fn start_ollama_compatible() -> std::io::Result<Self> {
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Ollama).await
     }
 
     async fn start_with_configuration(
         port: u16,
         expected_token: Option<SecretValue>,
         model_delay: Duration,
+        flavor: FakeProviderFlavor,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let address = listener.local_addr()?;
@@ -68,6 +81,7 @@ impl FakeProviderServer {
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
                 model_delay,
+                flavor,
                 model_request_counter: Arc::clone(&model_request_counter),
                 chat_request_counter: Arc::clone(&chat_request_counter),
             });
@@ -117,8 +131,15 @@ impl FakeProviderServer {
 struct FakeProviderState {
     expected_token: Option<Arc<SecretValue>>,
     model_delay: Duration,
+    flavor: FakeProviderFlavor,
     model_request_counter: Arc<AtomicUsize>,
     chat_request_counter: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy)]
+enum FakeProviderFlavor {
+    Standard,
+    Ollama,
 }
 
 async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
@@ -129,14 +150,16 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
     }
-    Json(json!({
-        "object": "list",
-        "data": [
+    let models = match state.flavor {
+        FakeProviderFlavor::Standard => json!([
             { "id": "fake-translator", "object": "model" },
             { "id": "fake-slow-translator", "object": "model" }
-        ]
-    }))
-    .into_response()
+        ]),
+        FakeProviderFlavor::Ollama => json!([
+            { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
+        ]),
+    };
+    Json(json!({ "object": "list", "data": models })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -175,7 +198,10 @@ async fn chat_completions(
         Duration::from_millis(35)
     };
     let output = stream! {
-        let fragments = ["你好", "，", "LinguaMesh", "！"];
+        let fragments = match state.flavor {
+            FakeProviderFlavor::Standard => ["你好", "，", "LinguaMesh", "！"],
+            FakeProviderFlavor::Ollama => ["你好", "，", "Ollama", "！"],
+        };
         for fragment in fragments {
             tokio::time::sleep(delay).await;
             let data = if malformed {
@@ -292,6 +318,23 @@ mod tests {
             .expect("authorized request");
         assert_eq!(authorized.status(), reqwest::StatusCode::OK);
         assert_eq!(server.model_request_counter().load(Ordering::SeqCst), 2);
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ollama_compatible_server_exposes_openai_model_shape() {
+        let server = FakeProviderServer::start_ollama_compatible()
+            .await
+            .expect("server");
+        let response = reqwest::Client::new()
+            .get(format!("{}models", server.base_url()))
+            .send()
+            .await
+            .expect("models request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("models response");
+        assert_eq!(body["data"][0]["id"], "llama3.2:latest");
+        assert_eq!(body["data"][0]["owned_by"], "ollama");
         server.shutdown().await;
     }
 }

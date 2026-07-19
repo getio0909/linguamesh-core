@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-19 — Ollama-compatible loopback contract checkpoint
+
+Assumption: the required local-model acceptance path may use Ollama's OpenAI-compatible `/v1/`
+surface. Native Ollama `/api` protocol support and interoperability with a running third-party
+daemon remain separate work.
+
+Implemented a deterministic testkit fixture that returns an Ollama-style `llama3.2:latest` model
+from `/v1/models` and streams the same OpenAI Chat Completions shape from `/v1/chat/completions`
+without a credential. The fixture is consumed by the Linux worker's real connect, deliberate model
+selection, and streaming translation test; it is explicitly not a claim about the native `/api`
+surface.
+
+Validated locally:
+
+- `cargo fmt --all --check` — passed.
+- `cargo test -p linguamesh-testkit --locked` — passed: 5 tests, 0 failed.
+- Linux `cargo test --features demo-provider --locked worker::tests::loopback_ollama_compatible_provider_translates_without_secret -- --exact` — passed.
+
 ## 2026-07-17 — First verified checkpoint
 
 Assumption: "first verified checkpoint" refers to the explicit completion condition in

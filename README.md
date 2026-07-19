@@ -40,6 +40,11 @@ The command prints the exact endpoint and stays active until Ctrl+C. Desktop cli
 endpoint directly. For an Android emulator, run `adb reverse tcp:40123 tcp:40123` and configure
 the embedded core with `http://127.0.0.1:40123/v1/`; this preserves the loopback-only HTTP policy.
 
+The testkit also exposes an Ollama-compatible OpenAI endpoint fixture. It returns an Ollama-style
+model identifier (`llama3.2:latest`) from `/v1/models` and streams `/v1/chat/completions` without a
+credential. This proves the local OpenAI-compatible contract used by Ollama's `/v1/` surface; it
+does not claim coverage of Ollama's native `/api` endpoints or a running third-party daemon.
+
 ## Secure provider foundation
 
 The `linguamesh-application` crate exposes a bounded, cancellable host-secret request channel and
