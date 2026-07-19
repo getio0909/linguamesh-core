@@ -15,7 +15,8 @@ real local SSE response. Native Ollama tests cover `/api/tags` discovery, fragme
 completion markers, and cancellation through the deterministic fixture.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
-explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, and invalid
+explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed
+allow/deny lists, locale tags, zero request limits, and invalid
 duplicate or empty profiles. They use only non-secret identifiers and synthetic request metadata.
 
 Native ABI tests submit a real Protobuf translation command to the loopback fake provider, assert

@@ -289,12 +289,22 @@ impl RoutingProfile {
     /// 验证一个路由配置在持久化或选择前满足基础约束。
     pub fn validate(&self) -> Result<(), RoutingError> {
         validate_identifier(&self.id, "routing profile id")?;
-        validate_candidates(&self.candidates)
+        validate_candidates(&self.candidates)?;
+        validate_identifier_list(&self.constraints.provider_allowlist, "provider allowlist")?;
+        validate_identifier_list(&self.constraints.provider_denylist, "provider denylist")?;
+        validate_identifier_list(&self.constraints.model_allowlist, "model allowlist")?;
+        validate_identifier_list(&self.constraints.model_denylist, "model denylist")?;
+        if self.constraints.max_request_bytes == Some(0) {
+            return Err(RoutingError::InvalidConfiguration(
+                "maximum request bytes must be greater than zero",
+            ));
+        }
+        Ok(())
     }
 
     /// 对非秘密请求上下文执行确定性、可解释的候选选择。
     pub fn select(&self, context: &RoutingContext) -> Result<RoutingDecision, RoutingError> {
-        validate_candidates(&self.candidates)?;
+        self.validate()?;
         if context.target_locale.trim().is_empty() {
             return Err(RoutingError::InvalidConfiguration(
                 "target locale must not be empty",
@@ -521,6 +531,8 @@ fn validate_candidates(candidates: &[RoutingCandidate]) -> Result<(), RoutingErr
                 "context capacity must be greater than zero",
             ));
         }
+        validate_locale_list(&candidate.source_locales, "source locale")?;
+        validate_locale_list(&candidate.target_locales, "target locale")?;
     }
     for (index, candidate) in candidates.iter().enumerate() {
         if candidates[..index].iter().any(|previous| {
@@ -529,6 +541,27 @@ fn validate_candidates(candidates: &[RoutingCandidate]) -> Result<(), RoutingErr
             return Err(RoutingError::InvalidConfiguration(
                 "routing candidates must have unique provider/model pairs",
             ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_identifier_list(values: &[String], field: &'static str) -> Result<(), RoutingError> {
+    for value in values {
+        validate_identifier(value, field)?;
+    }
+    Ok(())
+}
+
+fn validate_locale_list(values: &[String], field: &'static str) -> Result<(), RoutingError> {
+    for value in values {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(RoutingError::InvalidConfiguration(field));
         }
     }
     Ok(())
@@ -663,6 +696,37 @@ mod tests {
                 RoutingConstraints::default()
             ),
             Err(RoutingError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn invalid_constraint_lists_and_limits_are_rejected_before_persistence() {
+        let candidate = candidate("provider", "model", true);
+        assert!(matches!(
+            RoutingProfile::new(
+                "invalid-allowlist",
+                RoutingMode::Manual,
+                vec![candidate.clone()],
+                RoutingConstraints {
+                    provider_allowlist: vec![String::new()],
+                    ..RoutingConstraints::default()
+                }
+            ),
+            Err(RoutingError::InvalidConfiguration("provider allowlist"))
+        ));
+        assert!(matches!(
+            RoutingProfile::new(
+                "invalid-limit",
+                RoutingMode::Manual,
+                vec![candidate],
+                RoutingConstraints {
+                    max_request_bytes: Some(0),
+                    ..RoutingConstraints::default()
+                }
+            ),
+            Err(RoutingError::InvalidConfiguration(
+                "maximum request bytes must be greater than zero",
+            ))
         ));
     }
 }

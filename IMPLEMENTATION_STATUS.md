@@ -16,7 +16,8 @@ compatibility now advertises the feature for clients that bind this contract.
 Validated locally:
 
 - `cargo fmt --all -- --check` — passed.
-- `cargo test -p linguamesh-domain --offline routing` — passed: 4 routing tests, 0 failed.
+- `cargo test -p linguamesh-domain --offline routing` — passed: 5 routing tests, 0 failed,
+  including malformed allow/deny lists, locale tags, and zero request limits.
 - `cargo test -p linguamesh-storage --offline` — passed: 30 tests, 0 failed, including routing
   profile migration and round-trip coverage.
 
