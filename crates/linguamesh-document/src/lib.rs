@@ -1768,6 +1768,27 @@ mod tests {
         writer.finish().expect("docx archive").into_inner()
     }
 
+    // 构造带有不受支持安全部件的最小 OOXML 包。
+    fn unsupported_ooxml_fixture(part_name: &str) -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("word/document.xml", options)
+            .expect("document");
+        writer
+            .write_all(br#"<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#)
+            .expect("document bytes");
+        writer
+            .start_file(part_name, options)
+            .expect("unsupported part");
+        writer.write_all(b"unsupported").expect("unsupported bytes");
+        writer.finish().expect("OOXML archive").into_inner()
+    }
+
     fn pptx_fixture() -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         let options = SimpleFileOptions::default();
@@ -1951,6 +1972,16 @@ trailer
             DocumentFormat::from_name("book.PDF"),
             Ok(DocumentFormat::Pdf)
         );
+    }
+
+    #[test]
+    fn rejects_macro_and_signature_ooxml_packages() {
+        for part_name in ["word/vbaProject.bin", "_xmlsignatures/sig1.xml"] {
+            assert_eq!(
+                DocumentJob::from_utf8("notes.docx", &unsupported_ooxml_fixture(part_name)),
+                Err(DocumentError::UnsupportedFormat)
+            );
+        }
     }
 
     #[test]

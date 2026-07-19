@@ -77,6 +77,10 @@ fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, Docum
         if name.is_empty() || name.contains('\\') || !seen.insert(name.to_owned()) {
             return Err(DocumentError::InvalidStructure);
         }
+        // 在解析或重建前拒绝宏项目和数字签名部件，避免无意中声称支持它们。
+        if unsupported_package_part(name) {
+            return Err(DocumentError::UnsupportedFormat);
+        }
         let size = usize::try_from(file.size()).map_err(|_| DocumentError::TooLarge)?;
         let uncompressed_size = file.size();
         let compressed_size = file.compressed_size();
@@ -111,6 +115,14 @@ fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, Docum
         return Err(DocumentError::InvalidStructure);
     }
     Ok(names)
+}
+
+// 识别当前安全重建器不支持的 OOXML 宏和签名部件。
+fn unsupported_package_part(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized.ends_with("/vbaproject.bin")
+        || normalized == "vbaproject.bin"
+        || normalized.starts_with("_xmlsignatures/")
 }
 
 /// 只处理包含可见文本的 OOXML 部件，保留所有关系和二进制资源。
