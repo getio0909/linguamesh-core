@@ -276,14 +276,20 @@ impl RoutingProfile {
         constraints: RoutingConstraints,
     ) -> Result<Self, RoutingError> {
         let id = id.into();
-        validate_identifier(&id, "routing profile id")?;
-        validate_candidates(&candidates)?;
-        Ok(Self {
+        let profile = Self {
             id,
             mode,
             candidates,
             constraints,
-        })
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    /// 验证一个路由配置在持久化或选择前满足基础约束。
+    pub fn validate(&self) -> Result<(), RoutingError> {
+        validate_identifier(&self.id, "routing profile id")?;
+        validate_candidates(&self.candidates)
     }
 
     /// 对非秘密请求上下文执行确定性、可解释的候选选择。

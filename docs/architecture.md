@@ -26,7 +26,7 @@ cancellation, bounded response handling, protected-span restoration, and redacte
 lifetimes. The in-process fixture verifies the wire shape, not interoperability with an
 independently running Ollama daemon.
 
-SQLite migrations currently reach schema version 9. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 15. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -39,6 +39,10 @@ rejects any symbolic-link component in the database path before migrations. Othe
 implementations require platform-specific enforcement and tests; native hosts still enforce
 private directories and leaf-file metadata. See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
+
+Schema 15 adds bounded `routing_profiles` JSON persistence. The stored payload is validated through
+the shared `RoutingProfile` contract and contains only non-secret identifiers, constraints, and
+ranking preferences; endpoints, credentials, and source content are never stored in this table.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional

@@ -5,7 +5,9 @@
 Assumption: provider routing policy must be shared by all native clients and must not carry
 endpoints, credentials, or source content. Platform UI integration remains a separate client slice.
 
-Implemented `routing_planner_v1` in `linguamesh-domain`. `RoutingProfile` supports Manual, Ordered,
+Implemented `routing_planner_v1` in `linguamesh-domain`, and Core schema 15 now persists bounded
+validated routing-profile JSON without endpoints, credentials, or source text. `RoutingProfile`
+supports Manual, Ordered,
 and Automatic selection with bounded, validated provider/model candidates; local, privacy,
 capability, locale, request-size, quality, latency, and cost constraints; stable rejection reasons;
 deterministic ranking; and explicit fallback ordering only when enabled by the profile. Core
@@ -15,6 +17,8 @@ Validated locally:
 
 - `cargo fmt --all -- --check` — passed.
 - `cargo test -p linguamesh-domain --offline routing` — passed: 4 routing tests, 0 failed.
+- `cargo test -p linguamesh-storage --offline` — passed: 30 tests, 0 failed, including routing
+  profile migration and round-trip coverage.
 
 Full workspace validation and Linux compatibility evidence are pending for the published revision.
 

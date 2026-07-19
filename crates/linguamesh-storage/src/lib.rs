@@ -6,7 +6,8 @@ use linguamesh_document::{
 };
 use linguamesh_domain::{
     ErrorKind, Glossary, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
-    ProviderProfileId, SecretRef, TranslationError, TranslationRequest, validate_model_identifier,
+    ProviderProfileId, RoutingProfile, SecretRef, TranslationError, TranslationRequest,
+    validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
@@ -33,7 +34,9 @@ const DOCUMENT_PPTX_MIGRATION: &str = include_str!("../../../migrations/0011_doc
 const DOCUMENT_XLSX_MIGRATION: &str = include_str!("../../../migrations/0012_document_xlsx.sql");
 const DOCUMENT_EPUB_MIGRATION: &str = include_str!("../../../migrations/0013_document_epub.sql");
 const DOCUMENT_PDF_MIGRATION: &str = include_str!("../../../migrations/0014_document_pdf.sql");
-const LATEST_SCHEMA_VERSION: u32 = 14;
+const ROUTING_PROFILES_MIGRATION: &str =
+    include_str!("../../../migrations/0015_routing_profiles.sql");
+const LATEST_SCHEMA_VERSION: u32 = 15;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -58,6 +61,10 @@ pub const MAX_DOCUMENT_JOB_TEXT_BYTES: usize = MAX_DOCUMENT_BYTES;
 pub const MAX_DOCUMENT_JOB_OPTION_TEXT_BYTES: usize = 256;
 /// 限制可恢复文档参数中的词汇表 JSON 大小。
 pub const MAX_DOCUMENT_JOB_GLOSSARY_BYTES: usize = 256 * 1024;
+/// 限制可保存的路由配置数量，避免配置数据库无限增长。
+pub const MAX_ROUTING_PROFILES: usize = 32;
+/// 限制单个路由配置 JSON 大小，确保候选和约束元数据有界。
+pub const MAX_ROUTING_PROFILE_JSON_BYTES: usize = 64 * 1024;
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
@@ -73,6 +80,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (12, DOCUMENT_XLSX_MIGRATION),
     (13, DOCUMENT_EPUB_MIGRATION),
     (14, DOCUMENT_PDF_MIGRATION),
+    (15, ROUTING_PROFILES_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -145,6 +153,19 @@ pub struct DocumentJobOptions {
     pub provider_id: String,
     /// 请求级词汇表；只保存经过校验的结构化规则。
     pub glossary: Option<Glossary>,
+}
+
+/// 描述一条已持久化的非秘密路由配置。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoutingProfileRecord {
+    /// 配置稳定标识。
+    pub id: String,
+    /// 路由配置内容，不含端点、凭据或源文。
+    pub profile: RoutingProfile,
+    /// 配置首次写入时的 Unix 秒时间戳。
+    pub created_at: i64,
+    /// 配置最近一次更新时的 Unix 秒时间戳。
+    pub updated_at: i64,
 }
 
 /// 管理明确迁移的本地数据库。
@@ -957,6 +978,121 @@ impl Storage {
         Ok(changed)
     }
 
+    /// 保存或替换一个不含秘密的路由配置。
+    pub fn save_routing_profile(
+        &mut self,
+        profile: &RoutingProfile,
+    ) -> Result<RoutingProfileRecord, TranslationError> {
+        profile.validate().map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+        })?;
+        let profile_json = serde_json::to_string(profile).map_err(|_| {
+            TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "The routing profile could not be serialized.",
+            )
+        })?;
+        if profile_json.len() > MAX_ROUTING_PROFILE_JSON_BYTES {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "The routing profile exceeds the local size limit.",
+            ));
+        }
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM routing_profiles WHERE profile_id = ?1",
+                params![profile.id.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| map_error(&error))?
+            .is_some();
+        if !exists {
+            let count = transaction
+                .query_row("SELECT COUNT(*) FROM routing_profiles", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| map_error(&error))?;
+            if usize::try_from(count).unwrap_or(usize::MAX) >= MAX_ROUTING_PROFILES {
+                return Err(TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "The local routing profile limit has been reached.",
+                ));
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO routing_profiles (profile_id, profile_json) VALUES (?1, ?2) ON CONFLICT(profile_id) DO UPDATE SET profile_json = excluded.profile_json, updated_at = unixepoch()",
+                params![profile.id.as_str(), profile_json.as_str()],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction.commit().map_err(|error| map_error(&error))?;
+        self.routing_profile(&profile.id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The saved routing profile could not be reloaded.",
+            )
+        })
+    }
+
+    /// 按稳定标识读取一个路由配置。
+    pub fn routing_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<RoutingProfileRecord>, TranslationError> {
+        self.connection
+            .query_row(
+                "SELECT profile_id, profile_json, created_at, updated_at FROM routing_profiles WHERE profile_id = ?1",
+                params![profile_id],
+                routing_profile_from_row,
+            )
+            .optional()
+            .map_err(|error| map_error(&error))?
+            .map(|(id, profile_json, created_at, updated_at)| {
+                parse_routing_profile_record(id, &profile_json, created_at, updated_at)
+            })
+            .transpose()
+    }
+
+    /// 返回按更新时间排序的全部路由配置。
+    pub fn routing_profiles(&self) -> Result<Vec<RoutingProfileRecord>, TranslationError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT profile_id, profile_json, created_at, updated_at FROM routing_profiles ORDER BY updated_at DESC, profile_id ASC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        statement
+            .query_map(
+                params![i64::try_from(MAX_ROUTING_PROFILES).unwrap_or(i64::MAX)],
+                routing_profile_from_row,
+            )
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))?
+            .into_iter()
+            .map(|(id, profile_json, created_at, updated_at)| {
+                parse_routing_profile_record(id, &profile_json, created_at, updated_at)
+            })
+            .collect()
+    }
+
+    /// 删除一个路由配置。
+    pub fn delete_routing_profile(&mut self, profile_id: &str) -> Result<bool, TranslationError> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM routing_profiles WHERE profile_id = ?1",
+                params![profile_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(changed > 0)
+    }
+
     fn migrate(&mut self) -> Result<(), TranslationError> {
         let transaction = self
             .connection
@@ -1325,6 +1461,44 @@ fn load_document_job_options(
     Ok(Some(options))
 }
 
+fn routing_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, String, i64, i64)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+}
+
+fn parse_routing_profile_record(
+    id: String,
+    profile_json: &str,
+    created_at: i64,
+    updated_at: i64,
+) -> Result<RoutingProfileRecord, TranslationError> {
+    let profile: RoutingProfile = serde_json::from_str(profile_json).map_err(|_| {
+        TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored routing profile is invalid.",
+        )
+    })?;
+    profile.validate().map_err(|_| {
+        TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored routing profile is invalid.",
+        )
+    })?;
+    if profile.id != id || profile_json.len() > MAX_ROUTING_PROFILE_JSON_BYTES {
+        return Err(TranslationError::new(
+            ErrorKind::Persistence,
+            "The stored routing profile is invalid.",
+        ));
+    }
+    Ok(RoutingProfileRecord {
+        id,
+        profile,
+        created_at,
+        updated_at,
+    })
+}
+
 const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
 const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
 const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
@@ -1546,8 +1720,9 @@ mod tests {
     use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, Storage};
     use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
-        ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, SecretRef,
-        TranslationPrivacyMode, TranslationRequest,
+        ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, RoutingCandidate,
+        RoutingConstraints, RoutingMode, RoutingProfile, SecretRef, TranslationPrivacyMode,
+        TranslationRequest,
     };
     use rusqlite::Connection;
     use std::fs;
@@ -1579,7 +1754,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 14);
+        assert_eq!(storage.schema_version().expect("version"), 15);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1587,6 +1762,42 @@ mod tests {
             Some("manual-model")
         );
         assert_eq!(storage.manual_models().expect("models").len(), 1);
+    }
+
+    #[test]
+    fn routing_profiles_round_trip_without_secrets() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let candidate = RoutingCandidate::new("local", "model", true, 4096).expect("candidate");
+        let profile = RoutingProfile::new(
+            "safe-routing",
+            RoutingMode::Automatic,
+            vec![candidate],
+            RoutingConstraints {
+                local_only: true,
+                explicit_fallback_allowed: true,
+                ..RoutingConstraints::default()
+            },
+        )
+        .expect("routing profile");
+        let saved = storage.save_routing_profile(&profile).expect("save");
+        assert_eq!(saved.profile, profile);
+        assert_eq!(storage.schema_version().expect("version"), 15);
+        assert_eq!(
+            storage.routing_profile("safe-routing").expect("read"),
+            Some(saved)
+        );
+        assert_eq!(storage.routing_profiles().expect("list").len(), 1);
+        assert!(
+            storage
+                .delete_routing_profile("safe-routing")
+                .expect("delete")
+        );
+        assert!(
+            storage
+                .routing_profile("safe-routing")
+                .expect("missing")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2472,7 +2683,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 14);
+        assert_eq!(storage.schema_version().expect("version"), 15);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2554,7 +2765,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 14);
+        assert_eq!(storage.schema_version().expect("version"), 15);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
