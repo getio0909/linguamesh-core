@@ -26,7 +26,7 @@ cancellation, bounded response handling, protected-span restoration, and redacte
 lifetimes. The in-process fixture verifies the wire shape, not interoperability with an
 independently running Ollama daemon.
 
-SQLite migrations currently reach schema version 15. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 16. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -40,7 +40,9 @@ implementations require platform-specific enforcement and tests; native hosts st
 private directories and leaf-file metadata. See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 
-Schema 15 adds bounded `routing_profiles` JSON persistence. The stored payload is validated through
+Schema 15 adds bounded `routing_profiles` JSON persistence. Schema 16 adds an optional
+`routing_profile_id` to document-job options so a routed job can reselect its saved profile after a
+process restart. The stored payload is validated through
 the shared `RoutingProfile` contract and contains only non-secret identifiers, constraints, and
 ranking preferences; endpoints, credentials, and source content are never stored in this table.
 
@@ -56,7 +58,8 @@ values; schema 7 adds a transactionally migrated paused state, and schema 8 adds
 non-secret document translation options; schema 9 expands the stored format check for CSV and the
 subtitle codecs. Linux worker startup restores pending/running/paused jobs
 and exposes explicit segment/state commands; resume/retry reuses the saved provider/model/glossary
-only after the active runtime matches. Archive formats and a multi-job GUI queue remain future work.
+or reconnects the saved routing profile when one is recorded. Archive formats and a multi-job GUI
+queue remain future work.
 
 `linguamesh-engine::core_compatibility` reports Core semantic version, ABI major, protocol version,
 bundled provider-catalog version, and stable enabled-feature identifiers. Clients compare every

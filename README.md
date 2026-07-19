@@ -39,9 +39,10 @@ components, and an explicit fallback order when the profile allows fallback. End
 credentials, and source content remain outside the planner contract; native clients must still
 present and apply the selected profile according to their host policy.
 
-Core schema 15 persists validated routing profiles as bounded JSON for reuse after restart. The
-storage API rejects invalid or oversized profiles and never stores endpoints, credentials, or
-source text in the routing-profile table.
+Core schema 16 persists validated routing profiles as bounded JSON and records an optional
+document-job routing-profile ID for deterministic re-selection after restart. The storage API
+rejects invalid or oversized profiles and never stores endpoints, credentials, or source text in the
+routing-profile metadata.
 
 For native client conformance, keep the same deterministic provider running on a chosen loopback
 port:

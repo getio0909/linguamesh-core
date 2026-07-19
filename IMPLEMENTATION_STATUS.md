@@ -1,5 +1,25 @@
 # Implementation Status
 
+## 2026-07-19 — Document routing-profile restart migration checkpoint
+
+Assumption: a routed document job must retain only the non-secret routing-profile identifier so a
+restart can re-run deterministic selection without persisting endpoints, credentials, or source
+content; legacy schema-15 jobs continue to use their saved provider/model options.
+
+Core schema 16 adds the transactional `0016_document_routing_profile.sql` migration and nullable
+`document_job_options.routing_profile_id`. Storage validation bounds the identifier, schema-15
+databases migrate in place, and the storage regression round-trips the new field without any
+credential-shaped columns or values.
+
+Validated locally:
+
+- `cargo fmt --all -- --check` — passed.
+- `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` — passed.
+- `cargo test --workspace --all-targets --all-features --offline` — passed: all workspace tests,
+  including 31 storage tests; 0 failed.
+
+Linux integration and remote SDK evidence are recorded in the client and central repositories.
+
 ## 2026-07-19 — Explainable routing planner contract checkpoint
 
 Assumption: provider routing policy must be shared by all native clients and must not carry

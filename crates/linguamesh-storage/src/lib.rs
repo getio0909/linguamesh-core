@@ -36,7 +36,9 @@ const DOCUMENT_EPUB_MIGRATION: &str = include_str!("../../../migrations/0013_doc
 const DOCUMENT_PDF_MIGRATION: &str = include_str!("../../../migrations/0014_document_pdf.sql");
 const ROUTING_PROFILES_MIGRATION: &str =
     include_str!("../../../migrations/0015_routing_profiles.sql");
-const LATEST_SCHEMA_VERSION: u32 = 15;
+const DOCUMENT_ROUTING_PROFILE_MIGRATION: &str =
+    include_str!("../../../migrations/0016_document_routing_profile.sql");
+const LATEST_SCHEMA_VERSION: u32 = 16;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -81,6 +83,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (13, DOCUMENT_EPUB_MIGRATION),
     (14, DOCUMENT_PDF_MIGRATION),
     (15, ROUTING_PROFILES_MIGRATION),
+    (16, DOCUMENT_ROUTING_PROFILE_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -151,6 +154,8 @@ pub struct DocumentJobOptions {
     pub model_id: String,
     /// 明确选择的提供商配置标识，不包含端点或秘密。
     pub provider_id: String,
+    /// 可选的已保存路由配置标识，用于重启后重新选择同一候选。
+    pub routing_profile_id: Option<String>,
     /// 请求级词汇表；只保存经过校验的结构化规则。
     pub glossary: Option<Glossary>,
 }
@@ -315,13 +320,14 @@ impl Storage {
         let changed = self
             .connection
             .execute(
-                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(job_id) DO UPDATE SET source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, provider_id = excluded.provider_id, glossary_json = excluded.glossary_json, updated_at = unixepoch()",
+                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, routing_profile_id, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(job_id) DO UPDATE SET source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, provider_id = excluded.provider_id, routing_profile_id = excluded.routing_profile_id, glossary_json = excluded.glossary_json, updated_at = unixepoch()",
                 params![
                     job_id,
                     options.source_locale.as_deref(),
                     options.target_locale.as_str(),
                     options.model_id.as_str(),
                     options.provider_id.as_str(),
+                    options.routing_profile_id.as_deref(),
                     glossary_json.as_deref(),
                 ],
             )
@@ -1216,6 +1222,12 @@ fn validate_document_job_options(options: &DocumentJobOptions) -> Result<(), Tra
     ProviderProfileId::parse(&options.provider_id).map_err(|_| {
         document_configuration_error("The document provider identifier is invalid.")
     })?;
+    if let Some(routing_profile_id) = options.routing_profile_id.as_deref() {
+        validate_document_option_text(
+            routing_profile_id,
+            "The document routing profile identifier is invalid.",
+        )?;
+    }
     if let Some(glossary) = options.glossary.as_ref() {
         glossary
             .validate()
@@ -1418,7 +1430,7 @@ fn load_document_job_options(
 ) -> Result<Option<DocumentJobOptions>, TranslationError> {
     let stored = connection
         .query_row(
-            "SELECT source_locale, target_locale, model_id, provider_id, glossary_json FROM document_job_options WHERE job_id = ?1",
+            "SELECT source_locale, target_locale, model_id, provider_id, routing_profile_id, glossary_json FROM document_job_options WHERE job_id = ?1",
             params![job_id],
             |row| {
                 Ok((
@@ -1427,12 +1439,21 @@ fn load_document_job_options(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| map_error(&error))?;
-    let Some((source_locale, target_locale, model_id, provider_id, glossary_json)) = stored else {
+    let Some((
+        source_locale,
+        target_locale,
+        model_id,
+        provider_id,
+        routing_profile_id,
+        glossary_json,
+    )) = stored
+    else {
         return Ok(None);
     };
     let glossary = glossary_json
@@ -1450,6 +1471,7 @@ fn load_document_job_options(
         target_locale,
         model_id,
         provider_id,
+        routing_profile_id,
         glossary,
     };
     validate_document_job_options(&options).map_err(|_| {
@@ -1717,7 +1739,7 @@ fn normalize_translation_memory_source(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, Storage};
+    use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, MIGRATIONS, Storage};
     use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
         ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, RoutingCandidate,
@@ -1754,7 +1776,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 15);
+        assert_eq!(storage.schema_version().expect("version"), 16);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1762,6 +1784,44 @@ mod tests {
             Some("manual-model")
         );
         assert_eq!(storage.manual_models().expect("models").len(), 1);
+    }
+
+    #[test]
+    fn schema_fifteen_document_options_migrate_with_routing_profile_id() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("schema-fifteen.sqlite3");
+        let connection = Connection::open(&path).expect("legacy database");
+        for &(version, migration) in MIGRATIONS.iter().take(15) {
+            connection
+                .execute_batch(migration)
+                .expect("legacy migration");
+            connection
+                .execute(
+                    "UPDATE schema_metadata SET version = ?1 WHERE singleton = 1",
+                    [version],
+                )
+                .expect("legacy schema version");
+        }
+        drop(connection);
+
+        let mut storage = Storage::open(&path).expect("schema 16 migration");
+        assert_eq!(storage.schema_version().expect("version"), 16);
+        let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
+        storage
+            .save_document_job("route-job", &job, DocumentJobState::Pending)
+            .expect("save route job");
+        let options = DocumentJobOptions {
+            source_locale: Some("en".to_owned()),
+            target_locale: "zh-CN".to_owned(),
+            model_id: "fake-translator".to_owned(),
+            provider_id: "route-provider".to_owned(),
+            routing_profile_id: Some("route-profile".to_owned()),
+            glossary: None,
+        };
+        let snapshot = storage
+            .save_document_job_options("route-job", &options)
+            .expect("save migrated options");
+        assert_eq!(snapshot.options, Some(options));
     }
 
     #[test]
@@ -1781,7 +1841,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 15);
+        assert_eq!(storage.schema_version().expect("version"), 16);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2310,6 +2370,7 @@ trailer
             target_locale: "zh-CN".to_owned(),
             model_id: "model-options".to_owned(),
             provider_id: "legacy-profile".to_owned(),
+            routing_profile_id: Some("document-route".to_owned()),
             glossary: Some(glossary),
         };
         let saved = storage
@@ -2326,11 +2387,12 @@ trailer
         assert_eq!(loaded.options, Some(options));
         let mut statement = reopened
             .connection
-            .prepare("SELECT glossary_json FROM document_job_options")
+            .prepare("SELECT routing_profile_id, glossary_json FROM document_job_options")
             .expect("options query");
-        let glossary_json: String = statement
-            .query_row([], |row| row.get(0))
+        let (routing_profile_id, glossary_json): (Option<String>, String) = statement
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("glossary row");
+        assert_eq!(routing_profile_id.as_deref(), Some("document-route"));
         assert!(!glossary_json.contains("api_key"));
         assert!(!glossary_json.contains("credential"));
     }
@@ -2683,7 +2745,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 15);
+        assert_eq!(storage.schema_version().expect("version"), 16);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2765,7 +2827,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 15);
+        assert_eq!(storage.schema_version().expect("version"), 16);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
