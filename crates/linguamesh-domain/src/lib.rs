@@ -7,6 +7,14 @@ use thiserror::Error;
 use url::{Host, Url};
 use uuid::{Uuid, Variant, Version};
 
+mod routing;
+
+pub use routing::{
+    MAX_ROUTING_CANDIDATES, MAX_ROUTING_IDENTIFIER_BYTES, RoutingCandidate, RoutingConstraints,
+    RoutingContext, RoutingDecision, RoutingError, RoutingMode, RoutingPreference, RoutingProfile,
+    RoutingRank, RoutingRejection, RoutingRejectionReason,
+};
+
 /// 标识一次翻译操作。
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct OperationId(String);

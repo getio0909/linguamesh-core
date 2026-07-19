@@ -59,6 +59,13 @@ bundled provider-catalog version, and stable enabled-feature identifiers. Client
 version dimension and require their feature subset before provider work; exact prerelease version
 matching is intentional until a compatible range policy is defined.
 
+The `routing_planner_v1` feature exposes the domain-level `RoutingProfile` contract. Manual and
+Ordered modes preserve user intent; Automatic mode produces a stable, explainable ranking. All
+candidate filtering is fail-closed against explicit local/privacy, capability, size, locale, and
+quality constraints, and fallback candidates are returned only when the profile explicitly permits
+them. The planner carries no endpoints, credentials, or source text. Platform clients remain
+responsible for binding saved profiles and user-visible routing controls to this contract.
+
 The OpenAI-compatible translation path automatically protects common structured source spans before
 prompt construction. URLs, email addresses, Markdown code spans, fenced code, and common placeholder
 forms become collision-checked opaque markers; an incremental restorer validates marker identity and

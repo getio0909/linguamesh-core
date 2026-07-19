@@ -29,6 +29,16 @@ code spans, fenced code, and placeholders while translating. Marker restoration 
 fails closed if a provider omits, duplicates, or changes a protected span. User glossaries and
 custom protected terms are not yet part of this prerelease slice.
 
+## Explainable routing planner
+
+`linguamesh-domain` exposes `RoutingProfile` for deterministic Manual, Ordered, and Automatic
+candidate selection. Profiles contain only non-secret provider/model identifiers and explicit
+constraints such as local-only, privacy-sensitive, capability, size, locale, quality, latency, and
+cost requirements. `RoutingDecision` returns eligible candidates, rejection reasons, ranking
+components, and an explicit fallback order when the profile allows fallback. Endpoint values,
+credentials, and source content remain outside the planner contract; native clients must still
+present and apply the selected profile according to their host policy.
+
 For native client conformance, keep the same deterministic provider running on a chosen loopback
 port:
 

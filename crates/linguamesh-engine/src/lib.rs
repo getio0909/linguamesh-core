@@ -27,6 +27,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "long_text_chunking_v1",
     "provider_profile_persistence_v1",
     "bounded_text_document_v1",
+    "routing_planner_v1",
     "streaming_text_v1",
     "text_translation_v1",
 ];

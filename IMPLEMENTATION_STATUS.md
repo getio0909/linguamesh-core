@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-19 — Explainable routing planner contract checkpoint
+
+Assumption: provider routing policy must be shared by all native clients and must not carry
+endpoints, credentials, or source content. Platform UI integration remains a separate client slice.
+
+Implemented `routing_planner_v1` in `linguamesh-domain`. `RoutingProfile` supports Manual, Ordered,
+and Automatic selection with bounded, validated provider/model candidates; local, privacy,
+capability, locale, request-size, quality, latency, and cost constraints; stable rejection reasons;
+deterministic ranking; and explicit fallback ordering only when enabled by the profile. Core
+compatibility now advertises the feature for clients that bind this contract.
+
+Validated locally:
+
+- `cargo fmt --all -- --check` — passed.
+- `cargo test -p linguamesh-domain --offline routing` — passed: 4 routing tests, 0 failed.
+
+Full workspace validation and Linux compatibility evidence are pending for the published revision.
+
 ## 2026-07-19 — OOXML archive compression-ratio checkpoint
 
 Assumption: bounded OOXML imports must reject suspicious compression ratios before any archive entry

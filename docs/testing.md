@@ -14,6 +14,10 @@ confirm the source span is not sent as ordinary model text and then exercises re
 real local SSE response. Native Ollama tests cover `/api/tags` discovery, fragmented UTF-8 NDJSON,
 completion markers, and cancellation through the deterministic fixture.
 
+Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
+explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, and invalid
+duplicate or empty profiles. They use only non-secret identifiers and synthetic request metadata.
+
 Native ABI tests submit a real Protobuf translation command to the loopback fake provider, assert
 ordered deltas and exactly one terminal event, and verify cancellation. Run Linux C and C++ consumer
 smoke tests with `bash tools/test-native-sdk.sh`. The FFI suite also verifies bounded concurrent
