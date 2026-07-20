@@ -1,5 +1,30 @@
 # Implementation Status
 
+## 2026-07-20 — Anthropic Messages adapter checkpoint
+
+Assumption: Anthropic's Messages API is configured with a user-supplied model identifier because
+Anthropic does not expose a general-purpose model-list endpoint for this integration. The selected
+model is validated before any host secret request, and remote HTTPS keeps the host's configured
+proxy policy while loopback HTTP fixtures bypass ambient proxies.
+
+Implemented `linguamesh-provider-anthropic` with `/v1/messages` streaming, the required
+`anthropic-version` and `x-api-key` headers, bounded SSE decoding, cancellation, protected-span
+restoration, typed HTTP errors, redacted diagnostics, and session credential clearing. The provider
+catalog and `ProviderManager` now expose the `anthropic_messages` adapter and manual model listing.
+
+Validated locally:
+
+- `cargo fmt --all` — passed.
+- `cargo check --workspace --all-targets --all-features --locked --offline` — passed.
+- `cargo clippy --workspace --all-targets --all-features --locked --offline -- -D warnings` — passed.
+- `cargo test --workspace --all-targets --all-features --locked --offline` — passed: 11 application,
+  4 Anthropic-provider, and all existing workspace tests; 0 failed.
+- `cargo deny check advisories bans licenses sources` — passed all four checks with existing
+  non-blocking duplicate-version and unmatched-license warnings.
+
+The deterministic fixture proves the Messages wire contract only; production credential approval,
+human translated-copy review, native-client UI binding, and a stable release remain open.
+
 ## 2026-07-20 — Trusted Linux descriptor-backed storage open
 
 Assumption: a Linux host that pins a private database inode with `openat2` must be able to hand

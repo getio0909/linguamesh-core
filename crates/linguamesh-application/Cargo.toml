@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 linguamesh-domain.workspace = true
 linguamesh-engine.workspace = true
+linguamesh-provider-anthropic.workspace = true
 linguamesh-provider-api.workspace = true
 linguamesh-provider-ollama.workspace = true
 linguamesh-provider-openai.workspace = true

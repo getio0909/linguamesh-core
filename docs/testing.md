@@ -11,8 +11,10 @@ Protected-span tests scan URLs, email addresses, Markdown code, and placeholders
 markers across streamed deltas, restore every original span exactly once, and reject missing,
 duplicate, or unknown markers. The OpenAI-compatible provider test captures the outbound request to
 confirm the source span is not sent as ordinary model text and then exercises restoration through a
-real local SSE response. Native Ollama tests cover `/api/tags` discovery, fragmented UTF-8 NDJSON,
-completion markers, and cancellation through the deterministic fixture.
+real local SSE response. Anthropic tests capture the Messages headers and JSON body, decode
+fragmented UTF-8 SSE events, enforce the completion marker, redact diagnostics, and cancel while
+waiting for response headers. Native Ollama tests cover `/api/tags` discovery, fragmented UTF-8
+NDJSON, completion markers, and cancellation through the deterministic fixture.
 
 Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
 round-trip the optional document-job routing-profile ID without introducing endpoint or credential

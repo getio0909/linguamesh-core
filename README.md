@@ -62,6 +62,11 @@ Ollama-style model identifier (`llama3.2:latest`) from `/v1/models` and streams
 contracts only; a running third-party daemon, GPU acceleration, and release readiness remain
 external gates.
 
+The `anthropic` catalog entry uses the Anthropic Messages `/v1/messages` contract. Anthropic model
+identifiers are entered manually because the adapter has no general model-list request; the
+selected model is required before the host secret broker is queried. Local fixtures cover the
+required version and API-key headers, streaming SSE, cancellation, and protected-span restoration.
+
 ## Secure provider foundation
 
 The `linguamesh-application` crate exposes a bounded, cancellable host-secret request channel and

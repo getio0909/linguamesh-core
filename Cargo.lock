@@ -755,6 +755,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "linguamesh-domain",
  "linguamesh-engine",
+ "linguamesh-provider-anthropic",
  "linguamesh-provider-api",
  "linguamesh-provider-ollama",
  "linguamesh-provider-openai",
@@ -835,6 +836,23 @@ name = "linguamesh-protocol"
 version = "0.1.0-alpha.2"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "linguamesh-provider-anthropic"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "linguamesh-domain",
+ "linguamesh-provider-api",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

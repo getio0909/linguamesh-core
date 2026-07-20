@@ -23,6 +23,13 @@
       "model_listing": "ollama_tags",
       "documentation_url": "https://github.com/ollama/ollama/blob/main/docs/api.md",
       "loopback_only": true
+    },
+    {
+      "id": "anthropic",
+      "display_name": "Anthropic Messages",
+      "adapter": "anthropic_messages",
+      "model_listing": "manual",
+      "documentation_url": "https://docs.anthropic.com/en/api/messages"
     }
   ]
 }

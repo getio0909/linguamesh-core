@@ -5,6 +5,7 @@ use linguamesh_domain::{
     SecretValue, TranslationError,
 };
 use linguamesh_engine::TranslationEngine;
+use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use linguamesh_provider_api::ModelProvider;
 use linguamesh_provider_ollama::{OllamaConfig, OllamaProvider};
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
@@ -223,7 +224,8 @@ impl ProviderManager {
             ));
         }
         let is_ollama = profile.adapter_type() == "ollama_chat";
-        if !is_ollama && profile.adapter_type() != "openai_chat_completions" {
+        let is_anthropic = profile.adapter_type() == "anthropic_messages";
+        if !is_ollama && !is_anthropic && profile.adapter_type() != "openai_chat_completions" {
             return Err(TranslationError::new(
                 ErrorKind::UnsupportedCapability,
                 "The provider adapter is not supported by this Core build.",
@@ -231,9 +233,26 @@ impl ProviderManager {
         }
         if is_ollama {
             OllamaProvider::validate_endpoint(profile.base_endpoint())?;
+        } else if is_anthropic {
+            AnthropicProvider::validate_endpoint(profile.base_endpoint())?;
         } else {
             OpenAiCompatibleProvider::validate_endpoint(profile.base_endpoint())?;
         }
+        let anthropic_model_id = if is_anthropic {
+            Some(
+                profile
+                    .selected_model()
+                    .ok_or_else(|| {
+                        TranslationError::new(
+                            ErrorKind::InvalidConfiguration,
+                            "Select a manual Anthropic model before connecting.",
+                        )
+                    })?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
         let credential = match profile.secret_ref() {
             Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
             None => None,
@@ -247,6 +266,20 @@ impl ProviderManager {
                 None => OllamaConfig::without_credential(profile.base_endpoint()),
             };
             Arc::new(OllamaProvider::new(config)?)
+        } else if is_anthropic {
+            let model_id = anthropic_model_id.ok_or_else(|| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Select a manual Anthropic model before connecting.",
+                )
+            })?;
+            let config = match credential {
+                Some(secret) => {
+                    AnthropicConfig::with_credential(profile.base_endpoint(), model_id, secret)
+                }
+                None => AnthropicConfig::without_credential(profile.base_endpoint(), model_id),
+            };
+            Arc::new(AnthropicProvider::new(config)?)
         } else {
             let config = match credential {
                 Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
@@ -339,6 +372,12 @@ impl ManagedProvider for OpenAiCompatibleProvider {
 }
 
 impl ManagedProvider for OllamaProvider {
+    fn close_session(&self) {
+        Self::close_session(self);
+    }
+}
+
+impl ManagedProvider for AnthropicProvider {
     fn close_session(&self) {
         Self::close_session(self);
     }
@@ -483,6 +522,30 @@ mod tests {
         assert_eq!(output, "你好，Ollama！");
         manager.disconnect();
         server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn anthropic_profile_requires_manual_model_before_secret_request() {
+        let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
+        let provider = profile_with_adapter(
+            "https://api.anthropic.com/v1/",
+            Some(PROVIDER_SECRET_REF),
+            "anthropic",
+            "anthropic_messages",
+        );
+        let error = ProviderManager::new(broker)
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect_err("missing manual model");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+        assert_eq!(
+            error.message,
+            "Select a manual Anthropic model before connecting."
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(20), requests.recv()).await,
+            Err(_) | Ok(None)
+        ));
     }
 
     #[tokio::test]

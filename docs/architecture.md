@@ -19,12 +19,13 @@ configured provider cannot be revoked, so session closure drops the HTTP future 
 runtime can observe cancellation. Platform secure storage and session fallback policy remain
 native-host responsibilities.
 
-The provider catalog maps `local-loopback` to the OpenAI-compatible `/v1/` contract and `ollama` to
-the native loopback-only `/api/` contract. The latter discovers models through `/api/tags` and
-streams `/api/chat` as newline-delimited JSON; both adapters share endpoint validation,
-cancellation, bounded response handling, protected-span restoration, and redacted credential
-lifetimes. The in-process fixture verifies the wire shape, not interoperability with an
-independently running Ollama daemon.
+The provider catalog maps `local-loopback` to the OpenAI-compatible `/v1/` contract, `ollama` to
+the native loopback-only `/api/` contract, and `anthropic` to the manual-model `/v1/messages`
+contract. Ollama discovers models through `/api/tags` and streams `/api/chat` as newline-delimited
+JSON; Anthropic streams Messages SSE events and requires the selected model before any host secret
+request. The adapters share endpoint validation, cancellation, bounded response handling,
+protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
+shapes, not interoperability with independently running third-party services.
 
 SQLite migrations currently reach schema version 16. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
