@@ -5,9 +5,10 @@ use linguamesh_document::{
     MAX_DOCUMENT_BYTES,
 };
 use linguamesh_domain::{
-    ErrorKind, Glossary, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
-    ProviderProfileId, RoutingProfile, SecretRef, TranslationError, TranslationPreset,
-    TranslationQualityMode, TranslationRequest, validate_model_identifier,
+    ErrorKind, Glossary, MAX_ROUTING_PROFILE_JSON_BYTES, ModelDescriptor, ModelSource,
+    ProfileValidationError, ProviderProfile, ProviderProfileId, RoutingProfile, SecretRef,
+    TranslationError, TranslationPreset, TranslationQualityMode, TranslationRequest,
+    deserialize_routing_profile, serialize_routing_profile, validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Component, Path};
@@ -70,7 +71,6 @@ pub const MAX_DOCUMENT_JOB_PRESET_BYTES: usize = 8 * 1024;
 /// 限制可保存的路由配置数量，避免配置数据库无限增长。
 pub const MAX_ROUTING_PROFILES: usize = 32;
 /// 限制单个路由配置 JSON 大小，确保候选和约束元数据有界。
-pub const MAX_ROUTING_PROFILE_JSON_BYTES: usize = 64 * 1024;
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
     (2, PROVIDER_PROFILE_STATE_MIGRATION),
@@ -1024,18 +1024,9 @@ impl Storage {
         profile.validate().map_err(|error| {
             TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
         })?;
-        let profile_json = serde_json::to_string(profile).map_err(|_| {
-            TranslationError::new(
-                ErrorKind::InvalidConfiguration,
-                "The routing profile could not be serialized.",
-            )
+        let profile_json = serialize_routing_profile(profile).map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
         })?;
-        if profile_json.len() > MAX_ROUTING_PROFILE_JSON_BYTES {
-            return Err(TranslationError::new(
-                ErrorKind::InvalidConfiguration,
-                "The routing profile exceeds the local size limit.",
-            ));
-        }
         let transaction = self
             .connection
             .transaction()
@@ -1590,13 +1581,7 @@ fn parse_routing_profile_record(
     created_at: i64,
     updated_at: i64,
 ) -> Result<RoutingProfileRecord, TranslationError> {
-    let profile: RoutingProfile = serde_json::from_str(profile_json).map_err(|_| {
-        TranslationError::new(
-            ErrorKind::Persistence,
-            "The stored routing profile is invalid.",
-        )
-    })?;
-    profile.validate().map_err(|_| {
+    let profile = deserialize_routing_profile(profile_json).map_err(|_| {
         TranslationError::new(
             ErrorKind::Persistence,
             "The stored routing profile is invalid.",

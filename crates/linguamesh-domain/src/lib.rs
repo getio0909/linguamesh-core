@@ -10,9 +10,10 @@ use uuid::{Uuid, Variant, Version};
 mod routing;
 
 pub use routing::{
-    MAX_ROUTING_CANDIDATES, MAX_ROUTING_IDENTIFIER_BYTES, RoutingCandidate, RoutingConstraints,
-    RoutingContext, RoutingDecision, RoutingError, RoutingMode, RoutingPreference, RoutingProfile,
-    RoutingRank, RoutingRejection, RoutingRejectionReason,
+    MAX_ROUTING_CANDIDATES, MAX_ROUTING_IDENTIFIER_BYTES, MAX_ROUTING_PROFILE_JSON_BYTES,
+    RoutingCandidate, RoutingConstraints, RoutingContext, RoutingDecision, RoutingError,
+    RoutingMode, RoutingPreference, RoutingProfile, RoutingRank, RoutingRejection,
+    RoutingRejectionReason, deserialize_routing_profile, serialize_routing_profile,
 };
 
 /// 标识一次翻译操作。

@@ -5,6 +5,8 @@ use thiserror::Error;
 pub const MAX_ROUTING_CANDIDATES: usize = 32;
 /// 限制路由配置标识和候选标识的长度。
 pub const MAX_ROUTING_IDENTIFIER_BYTES: usize = 128;
+/// 限制路由配置交换文件的大小，避免导入导出制造不受控的元数据。
+pub const MAX_ROUTING_PROFILE_JSON_BYTES: usize = 64 * 1024;
 
 /// 描述路由选择的运行模式。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -485,6 +487,114 @@ impl RoutingProfile {
     }
 }
 
+/// 将经过校验的路由配置编码为不含端点、凭据或用户内容的 JSON。
+pub fn serialize_routing_profile(profile: &RoutingProfile) -> Result<String, RoutingError> {
+    profile.validate()?;
+    let contents = serde_json::to_string(profile)
+        .map_err(|_| RoutingError::InvalidConfiguration("routing profile JSON is invalid"))?;
+    if contents.len() > MAX_ROUTING_PROFILE_JSON_BYTES {
+        return Err(RoutingError::InvalidConfiguration(
+            "routing profile JSON exceeds the size limit",
+        ));
+    }
+    Ok(contents)
+}
+
+/// 从受限 JSON 读取路由配置，并拒绝不符合领域约束的内容。
+pub fn deserialize_routing_profile(contents: &str) -> Result<RoutingProfile, RoutingError> {
+    if contents.len() > MAX_ROUTING_PROFILE_JSON_BYTES {
+        return Err(RoutingError::InvalidConfiguration(
+            "routing profile JSON exceeds the size limit",
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(contents)
+        .map_err(|_| RoutingError::InvalidConfiguration("routing profile JSON is invalid"))?;
+    validate_exchange_fields(&value)?;
+    let profile: RoutingProfile = serde_json::from_value(value)
+        .map_err(|_| RoutingError::InvalidConfiguration("routing profile JSON is invalid"))?;
+    profile.validate()?;
+    Ok(profile)
+}
+
+fn validate_exchange_fields(value: &serde_json::Value) -> Result<(), RoutingError> {
+    let Some(profile) = value.as_object() else {
+        return Err(RoutingError::InvalidConfiguration(
+            "routing profile JSON is invalid",
+        ));
+    };
+    ensure_fields(profile, &["id", "mode", "candidates", "constraints"])?;
+    let Some(candidates) = profile
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Err(RoutingError::InvalidConfiguration(
+            "routing profile JSON is invalid",
+        ));
+    };
+    for candidate in candidates {
+        let Some(candidate) = candidate.as_object() else {
+            return Err(RoutingError::InvalidConfiguration(
+                "routing profile JSON is invalid",
+            ));
+        };
+        ensure_fields(
+            candidate,
+            &[
+                "provider_id",
+                "model_id",
+                "local",
+                "supports_streaming",
+                "supports_document",
+                "context_capacity_bytes",
+                "quality_tier",
+                "estimated_latency_ms",
+                "estimated_cost_micros",
+                "source_locales",
+                "target_locales",
+            ],
+        )?;
+    }
+    if let Some(constraints) = profile.get("constraints") {
+        let Some(constraints) = constraints.as_object() else {
+            return Err(RoutingError::InvalidConfiguration(
+                "routing profile JSON is invalid",
+            ));
+        };
+        ensure_fields(
+            constraints,
+            &[
+                "local_only",
+                "allow_remote",
+                "provider_allowlist",
+                "provider_denylist",
+                "model_allowlist",
+                "model_denylist",
+                "require_streaming",
+                "require_document",
+                "minimum_quality_tier",
+                "max_request_bytes",
+                "preference",
+                "privacy_sensitive",
+                "explicit_fallback_allowed",
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_fields(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<(), RoutingError> {
+    if object.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err(RoutingError::InvalidConfiguration(
+            "routing profile JSON contains unsupported fields",
+        ))
+    }
+}
+
 /// 描述路由配置或选择失败。
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum RoutingError {
@@ -570,8 +680,9 @@ fn validate_locale_list(values: &[String], field: &'static str) -> Result<(), Ro
 #[cfg(test)]
 mod tests {
     use super::{
-        RoutingCandidate, RoutingConstraints, RoutingContext, RoutingError, RoutingMode,
-        RoutingPreference, RoutingProfile, RoutingRejectionReason,
+        MAX_ROUTING_PROFILE_JSON_BYTES, RoutingCandidate, RoutingConstraints, RoutingContext,
+        RoutingError, RoutingMode, RoutingPreference, RoutingProfile, RoutingRejectionReason,
+        deserialize_routing_profile, serialize_routing_profile,
     };
 
     fn candidate(provider_id: &str, model_id: &str, local: bool) -> RoutingCandidate {
@@ -726,6 +837,53 @@ mod tests {
             ),
             Err(RoutingError::InvalidConfiguration(
                 "maximum request bytes must be greater than zero",
+            ))
+        ));
+    }
+
+    #[test]
+    fn routing_profile_exchange_round_trip_is_bounded_and_non_secret() {
+        let profile = RoutingProfile::new(
+            "portable",
+            RoutingMode::Ordered,
+            vec![candidate("local", "model", true)],
+            RoutingConstraints {
+                local_only: true,
+                ..RoutingConstraints::default()
+            },
+        )
+        .expect("profile");
+        let encoded = serialize_routing_profile(&profile).expect("encode");
+        assert!(encoded.len() <= MAX_ROUTING_PROFILE_JSON_BYTES);
+        assert!(!encoded.contains("endpoint"));
+        assert!(!encoded.contains("secret"));
+        assert_eq!(
+            deserialize_routing_profile(&encoded).expect("decode"),
+            profile
+        );
+    }
+
+    #[test]
+    fn routing_profile_exchange_rejects_malformed_and_oversized_json() {
+        assert!(matches!(
+            deserialize_routing_profile("not-json"),
+            Err(RoutingError::InvalidConfiguration(
+                "routing profile JSON is invalid"
+            ))
+        ));
+        let oversized = "x".repeat(MAX_ROUTING_PROFILE_JSON_BYTES + 1);
+        assert!(matches!(
+            deserialize_routing_profile(&oversized),
+            Err(RoutingError::InvalidConfiguration(
+                "routing profile JSON exceeds the size limit"
+            ))
+        ));
+        assert!(matches!(
+            deserialize_routing_profile(
+                r#"{"id":"safe","mode":"manual","candidates":[],"constraints":{},"secret":"hidden"}"#
+            ),
+            Err(RoutingError::InvalidConfiguration(
+                "routing profile JSON contains unsupported fields"
             ))
         ));
     }
