@@ -45,6 +45,9 @@ compatibility dimension, canonical profile validation and redacted `Debug`, sche
 on-disk reopen, active-profile and per-profile model persistence, cascade/disable behavior, and on
 Unix, rejection of a symbolic-link database before migration. They also prove the absence of a
 synthetic credential-shaped canary from every database-directory artifact after authenticated use.
+A Linux-only storage regression additionally opens a descriptor-backed `/proc/self/fd/<fd>` path
+after the host pins its private database inode; ordinary paths still require the Core no-follow
+flag, and non-descriptor trusted paths are rejected.
 A schema-1 fixture starts with a credential value and proves the
 secure-delete migration
 plus truncating checkpoint removes it from all database artifacts, including after a reader makes

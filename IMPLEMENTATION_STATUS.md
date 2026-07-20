@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-20 — Trusted Linux descriptor-backed storage open
+
+Assumption: a Linux host that pins a private database inode with `openat2` must be able to hand
+that already-open descriptor to Core without reopening a replaceable pathname; ordinary Core opens
+must continue rejecting symbolic-link paths.
+
+- `Storage::open_from_trusted_descriptor` accepts only an exact `/proc/self/fd/<fd>` path and
+  opens it through a narrowly scoped trusted-host path. `Storage::open` retains
+  `SQLITE_OPEN_NOFOLLOW` for every ordinary path.
+- The Linux client now opens the private parent with `RESOLVE_NO_SYMLINKS`, opens the final file
+  with `O_NOFOLLOW | O_CLOEXEC`, and keeps that descriptor alive through Core migration/open.
+- Local format, strict Clippy, workspace tests, and the Linux pinned-parent replacement regression
+  passed. The trusted descriptor API also has a Linux storage regression and rejects non-descriptor
+  paths. This is a host-integration hardening checkpoint, not a stable-release claim.
+
 ## 2026-07-19 — Document routing-profile restart migration checkpoint
 
 Assumption: a routed document job must retain only the non-secret routing-profile identifier so a

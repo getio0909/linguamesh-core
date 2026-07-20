@@ -35,7 +35,10 @@ secure deletion, and
 foreign-key enforcement for every connection, and never defines a credential-value column. Every
 supported on-disk open retries the truncating checkpoint so a busy post-migration attempt fails
 closed without abandoning cleanup. On Linux's default Unix VFS, SQLite's no-follow open flag
-rejects any symbolic-link component in the database path before migrations. Other VFS
+rejects any symbolic-link component in ordinary database paths before migrations. The explicit
+`Storage::open_from_trusted_descriptor` path accepts only `/proc/self/fd/<fd>` and is reserved for a
+host that has already opened a private regular file with no-follow flags; the Linux client pins the
+parent with `openat2(RESOLVE_NO_SYMLINKS)` before creating that descriptor. Other VFS
 implementations require platform-specific enforcement and tests; native hosts still enforce
 private directories and leaf-file metadata. See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).

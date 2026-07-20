@@ -10,7 +10,7 @@ use linguamesh_domain::{
     validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::path::Path;
+use std::path::{Component, Path};
 
 const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_initial.sql");
 const PROVIDER_PROFILE_STATE_MIGRATION: &str =
@@ -181,7 +181,22 @@ pub struct Storage {
 impl Storage {
     /// 打开数据库并应用所有缺失迁移。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, TranslationError> {
-        let flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        Self::open_with_flags(path, OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW)
+    }
+
+    /// 使用宿主已经固定的 Linux 文件描述符路径打开数据库。
+    pub fn open_from_trusted_descriptor(path: impl AsRef<Path>) -> Result<Self, TranslationError> {
+        let path = path.as_ref();
+        if !is_proc_self_fd_path(path) {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Trusted database paths must refer to /proc/self/fd/<fd>.",
+            ));
+        }
+        Self::open_with_flags(path, OpenFlags::default())
+    }
+
+    fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self, TranslationError> {
         let connection =
             Connection::open_with_flags(path, flags).map_err(|error| map_error(&error))?;
         if current_schema_version(&connection)? > LATEST_SCHEMA_VERSION {
@@ -1130,6 +1145,23 @@ impl Storage {
     }
 }
 
+fn is_proc_self_fd_path(path: &Path) -> bool {
+    let mut components = path.components();
+    let is_named = |component: Option<Component<'_>>, expected: &str| matches!(component, Some(Component::Normal(value)) if value == expected);
+    matches!(components.next(), Some(Component::RootDir))
+        && is_named(components.next(), "proc")
+        && is_named(components.next(), "self")
+        && is_named(components.next(), "fd")
+        && matches!(
+            components.next(),
+            Some(Component::Normal(value))
+                if value.to_str().is_some_and(|value| {
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        )
+        && components.next().is_none()
+}
+
 fn validate_document_job_identity(job_id: &str, job: &DocumentJob) -> Result<(), TranslationError> {
     if job_id.is_empty() || job_id.len() > 128 || job_id.chars().any(char::is_control) {
         return Err(document_configuration_error(
@@ -1749,8 +1781,12 @@ mod tests {
     use rusqlite::Connection;
     use std::fs;
     use std::io::{Cursor, Read, Write};
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
+    #[cfg(target_os = "linux")]
+    use std::path::PathBuf;
     use tempfile::tempdir;
     use zip::ZipArchive;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -2653,6 +2689,27 @@ trailer
             )
             .expect("target schema count");
         assert_eq!(table_count, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_descriptor_path_requires_proc_self_fd() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("state.sqlite3");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("database file");
+        let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
+        assert_eq!(storage.schema_version().expect("schema version"), 16);
+        assert!(matches!(
+            Storage::open_from_trusted_descriptor(&path),
+            Err(error) if error.kind == ErrorKind::InvalidConfiguration
+        ));
     }
 
     #[test]
