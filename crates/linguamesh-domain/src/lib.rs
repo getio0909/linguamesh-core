@@ -1189,6 +1189,9 @@ fn split_protected_text(
     if text.is_empty() {
         return Ok(vec![String::new()]);
     }
+    if text.len() <= max_bytes {
+        return Ok(vec![text.to_owned()]);
+    }
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
@@ -2547,6 +2550,16 @@ mod tests {
             restored_text,
             "First sentence with 凌瓦网. Second sentence keeps https://example.com/path."
         );
+    }
+
+    #[test]
+    fn protected_source_keeps_text_that_fits_one_chunk() {
+        let protected = protect_source_text("Hello again");
+        let chunks = protected
+            .chunks(super::DEFAULT_TRANSLATION_CHUNK_BYTES)
+            .expect("single chunk");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text(), "Hello again");
     }
 
     #[test]
