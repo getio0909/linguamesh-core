@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-20 — C ABI compatibility snapshot projection
+
+Assumption: native clients must negotiate the complete shared Core contract through one synchronous
+ABI query before creating provider work; file-lease capability discovery remains a later boundary.
+
+- Added `CompatibilitySnapshot` to the versioned protocol and `lm_engine_get_compatibility` to the
+  C ABI. The query returns an engine-owned `compatibility` Envelope containing Core semantic version,
+  ABI major, protocol version, provider-catalog version, and enabled feature identifiers.
+- The FFI regression decodes every field, validates the buffer ownership/release protocol, and
+  confirms the `compatibility_negotiation_v1` feature is advertised. Protocol tests cover a complete
+  snapshot round trip.
+- Local Core formatting, locked workspace check, strict Clippy, all-target/all-feature tests, and
+  native C/C++ SDK smoke are the required validation for this checkpoint. This remains a prerelease
+  Core boundary; file leases, generated client projections, and release evidence remain open.
+
 ## 2026-07-20 — C ABI host-secret response projection
 
 Assumption: native clients need the same one-time host-secret contract through ABI 1 that the Rust
@@ -13,7 +28,7 @@ application layer already enforces, while secret values remain runtime-only and 
 - FFI event sequencing reserves sequence zero for the host request and starts the translated
   operation at sequence one. A cancellation during secret resolution produces exactly one typed
   cancelled terminal event; provider sessions clear the pending request map on completion.
-- Local protocol/engine/FFI tests passed (`4`, `5`, and `11` tests). The FFI authenticated loopback
+- Local protocol/engine/FFI tests passed (`5`, `5`, and `12` tests). The FFI authenticated loopback
   regression proves `secret_required`, one-shot response handling, replay rejection, streamed
   `你好，LinguaMesh！`, and one completed terminal event without persisting the secret canary.
   Formatting and the FFI all-target check passed. This is a prerelease Core boundary; semantic
@@ -523,7 +538,7 @@ Not verified or not implemented:
 - Swift and Xcode are unavailable locally. The remote Apple job validates the wrapper,
   XCFramework, and universal archive, but client application linkage, signing, symbols,
   notarization, and distribution remain separate gates.
-- C ABI projection of semantic/catalog/feature negotiation and file leases, generated Swift and
+- C ABI file-lease capabilities, generated Swift and
   C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol
   bundles, SBOMs, immutable release checksums, and cross-platform conformance remain incomplete.
 - Engine-handle forgery, stale-handle use, repeated destruction, and destruction racing unjoined
@@ -655,8 +670,8 @@ Remaining for the Linux secure-provider checkpoint:
 
 - Keep the Linux client pinned to the reviewed no-follow Core revision, implement Secret Service
   for persistent credentials, and prove the Linux save/restart/translation path in native CI.
-- The C ABI now projects the one-time host-secret response flow. Semantic/catalog/feature
-  negotiation, file leases, and other complete Milestone 2 host services remain unimplemented.
+- The C ABI now projects the one-time host-secret response flow and the five-dimension compatibility
+  snapshot. File leases and other complete Milestone 2 host services remain unimplemented.
 
 ## 2026-07-18 — Linux history controls contract
 

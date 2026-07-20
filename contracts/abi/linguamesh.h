@@ -55,6 +55,12 @@ LM_API uint32_t lm_engine_get_protocol_version(void);
 
 /* 保留为旧客户端的协议版本别名。 */
 LM_API uint32_t lm_engine_get_version(void);
+
+/* 返回包含核心语义、目录、ABI、协议和功能集合的版本化兼容性 Envelope。 */
+LM_API LmResultCode lm_engine_get_compatibility(
+    LmEngine *engine,
+    LmBuffer *output
+);
 LM_API LmResultCode lm_engine_submit(
     LmEngine *engine,
     const uint8_t *command_data,

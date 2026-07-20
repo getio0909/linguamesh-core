@@ -42,3 +42,11 @@ message HostSecretResponse {
   string resolution = 2;
   string secret = 3;
 }
+
+message CompatibilitySnapshot {
+  string core_version = 1;
+  uint32 abi_major = 2;
+  uint32 protocol_version = 3;
+  string provider_catalog_version = 4;
+  repeated string enabled_features = 5;
+}

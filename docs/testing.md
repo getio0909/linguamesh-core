@@ -52,7 +52,9 @@ ordered deltas and exactly one terminal event, and verify cancellation. Run Linu
 smoke tests with `bash tools/test-native-sdk.sh`. The FFI suite also verifies bounded concurrent
 polling, isolates allocation ownership between engines, rejects forged or duplicate buffer
 descriptors without freeing client memory, permits release after engine shutdown, and proves that
-the 65th outstanding-buffer reservation fails without growing the registry beyond 64. Run
+the 65th outstanding-buffer reservation fails without growing the registry beyond 64. The FFI suite
+also queries and decodes the five-dimension `CompatibilitySnapshot` through the C ABI before any
+translation work. Run
 deterministic Linux packaging twice, then verify its outer and per-file manifests, with
 `bash tools/verify-linux-sdk-package.sh`. That verification also validates the pkg-config metadata
 and links the packaged static library into the C consumer smoke test.

@@ -26,6 +26,8 @@ pub mod message_type {
     pub const SECRET_REQUIRED: &str = "secret_required";
     /// 携带一次性宿主秘密响应。
     pub const HOST_SECRET_RESPONSE: &str = "host_secret_response";
+    /// 返回共享核心兼容性快照。
+    pub const COMPATIBILITY: &str = "compatibility";
 }
 
 /// 包装跨原生边界传输的版本化消息。
@@ -115,6 +117,26 @@ pub struct HostSecretResponse {
     pub secret: String,
 }
 
+/// 描述客户端启动时必须校验的共享核心兼容性维度。
+#[derive(Clone, PartialEq, Message)]
+pub struct CompatibilitySnapshot {
+    /// 核心语义版本。
+    #[prost(string, tag = "1")]
+    pub core_version: String,
+    /// 稳定原生 ABI 主版本。
+    #[prost(uint32, tag = "2")]
+    pub abi_major: u32,
+    /// 命令和事件协议版本。
+    #[prost(uint32, tag = "3")]
+    pub protocol_version: u32,
+    /// 内置提供商目录语义版本。
+    #[prost(string, tag = "4")]
+    pub provider_catalog_version: String,
+    /// 已启用且可由客户端探测的稳定功能标识。
+    #[prost(string, repeated, tag = "5")]
+    pub enabled_features: Vec<String>,
+}
+
 impl Envelope {
     /// 验证调用方能否处理该消息。
     pub fn validate_version(&self) -> Result<(), ProtocolError> {
@@ -144,8 +166,8 @@ pub enum ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Envelope, HostSecretResponse, PROTOCOL_VERSION, ProtocolError, SecretRequiredEvent,
-        TextDeltaEvent, TranslateTextCommand, message_type,
+        CompatibilitySnapshot, Envelope, HostSecretResponse, PROTOCOL_VERSION, ProtocolError,
+        SecretRequiredEvent, TextDeltaEvent, TranslateTextCommand, message_type,
     };
     use prost::Message;
 
@@ -235,6 +257,25 @@ mod tests {
         assert_eq!(
             HostSecretResponse::decode(response.encode_to_vec().as_slice()).expect("response"),
             response
+        );
+    }
+
+    #[test]
+    fn compatibility_snapshot_round_trips_all_dimensions() {
+        let snapshot = CompatibilitySnapshot {
+            core_version: "0.1.0-alpha.2".into(),
+            abi_major: 1,
+            protocol_version: 1,
+            provider_catalog_version: "0.1.0".into(),
+            enabled_features: vec![
+                "text_translation_v1".into(),
+                "typed_rust_host_secret_broker_v1".into(),
+            ],
+        };
+
+        assert_eq!(
+            CompatibilitySnapshot::decode(snapshot.encode_to_vec().as_slice()).expect("snapshot"),
+            snapshot
         );
     }
 }

@@ -6,6 +6,12 @@ contracts: clients must query both before creating an engine and must reject unk
 ABI major `1` replaces the published ABI `0` prerelease source skeleton. ABI 0 had no binary SDK or
 compatible client release; see [`ABI 0 to ABI 1 Migration`](migrations/abi-0-to-1.md).
 
+Before creating an engine, call `lm_engine_get_compatibility` with a zeroed `LmBuffer`. Decode the
+returned `compatibility` Envelope as `CompatibilitySnapshot` and validate `core_version`,
+`abi_major`, `protocol_version`, `provider_catalog_version`, and every required
+`enabled_features` entry. Release the returned buffer with `lm_engine_buffer_free` before using the
+engine. Unknown versions, catalog values, or feature requirements must fail closed.
+
 ## Command and event flow
 
 An engine accepts one active operation. Submit an `Envelope` with non-empty operation and
@@ -54,12 +60,11 @@ responses are checked against the active operation and correlation IDs, reject o
 and reject replay or late responses. Only loopback HTTP or remote HTTPS should be used. A second
 submit while an operation is active returns `LM_RESULT_BUSY`.
 
-The direct Rust application layer still owns the full five-dimension compatibility snapshot and
-file-lease services; those capabilities are not yet projected through this C ABI. ABI calls still
-do not report Core semantic version, provider-catalog version, enabled features, or file-lease
-capabilities. Engine handles still depend on the documented single-destroy and close-after-workers-
-stop contract; stale, forged, or concurrently destroyed handles are not protected by a handle
-registry in ABI major `1`.
+The direct Rust application layer still owns file-lease services. The C ABI now projects the full
+five-dimension compatibility snapshot through `lm_engine_get_compatibility`; file-lease capabilities
+remain unprojected and must not be assumed by native clients. Engine handles still depend on the
+documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
+destroyed handles are not protected by a handle registry in ABI major `1`.
 
 ## Loopback conformance provider
 

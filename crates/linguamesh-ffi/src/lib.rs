@@ -6,10 +6,12 @@ use linguamesh_domain::{
     CorrelationId, ErrorKind, OperationId, SecretRef, SecretValue, TranslationEvent,
     TranslationRequest,
 };
-use linguamesh_engine::{CancellationHandle, TranslationEngine, TranslationOperation};
+use linguamesh_engine::{
+    CancellationHandle, TranslationEngine, TranslationOperation, core_compatibility,
+};
 use linguamesh_protocol::{
-    ABI_VERSION_MAJOR, Envelope, FailureEvent, HostSecretResponse, PROTOCOL_VERSION,
-    SecretRequiredEvent, TextDeltaEvent, TranslateTextCommand, message_type,
+    ABI_VERSION_MAJOR, CompatibilitySnapshot, Envelope, FailureEvent, HostSecretResponse,
+    PROTOCOL_VERSION, SecretRequiredEvent, TextDeltaEvent, TranslateTextCommand, message_type,
 };
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use prost::Message;
@@ -147,6 +149,58 @@ pub const extern "C" fn lm_engine_get_protocol_version() -> u32 {
 #[unsafe(no_mangle)]
 pub const extern "C" fn lm_engine_get_version() -> u32 {
     lm_engine_get_protocol_version()
+}
+
+/// 返回版本化共享核心兼容性快照，并沿用引擎拥有的缓冲区释放协议。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_get_compatibility(
+    engine: *mut LmEngine,
+    output: *mut LmBuffer,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if output.is_null() {
+            return LmResultCode::InvalidArgument;
+        }
+        // SAFETY：输出描述符已经验证为非空并由调用方授予可写访问。
+        let output = unsafe { &mut *output };
+        if !output.data.is_null()
+            || output.len != 0
+            || output.capacity != 0
+            || output.allocation_id != 0
+        {
+            return LmResultCode::InvalidArgument;
+        }
+        // SAFETY：调用方保证非空句柄由本库创建且尚未销毁。
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        if engine.shutdown.load(Ordering::Acquire) {
+            return LmResultCode::Shutdown;
+        }
+        let Ok(buffer_slot) = engine.reserve_buffer_slot() else {
+            return LmResultCode::ResourceExhausted;
+        };
+        let Ok(compatibility) = core_compatibility() else {
+            return LmResultCode::Internal;
+        };
+        let envelope = Envelope {
+            protocol_version: PROTOCOL_VERSION,
+            operation_id: OperationId::new().as_str().to_owned(),
+            correlation_id: CorrelationId::new().as_str().to_owned(),
+            sequence: 0,
+            message_type: message_type::COMPATIBILITY.into(),
+            payload: CompatibilitySnapshot {
+                core_version: compatibility.core_version,
+                abi_major: compatibility.abi_major,
+                protocol_version: compatibility.protocol_version,
+                provider_catalog_version: compatibility.provider_catalog_version,
+                enabled_features: compatibility.enabled_features,
+            }
+            .encode_to_vec(),
+        }
+        .encode_to_vec();
+        engine.write_output_buffer(output, envelope, buffer_slot)
+    })
 }
 
 /// 验证并提交版本化命令消息。
@@ -824,13 +878,14 @@ mod tests {
     use super::{
         LmBuffer, LmEngine, LmResultCode, MAX_OUTSTANDING_BUFFERS, lm_engine_buffer_free,
         lm_engine_cancel, lm_engine_create, lm_engine_destroy, lm_engine_get_abi_version,
-        lm_engine_get_protocol_version, lm_engine_get_version, lm_engine_poll_event,
-        lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
+        lm_engine_get_compatibility, lm_engine_get_protocol_version, lm_engine_get_version,
+        lm_engine_poll_event, lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit,
+        lock_unpoisoned,
     };
     use linguamesh_domain::SecretValue;
     use linguamesh_protocol::{
-        Envelope, HostSecretResponse, PROTOCOL_VERSION, SecretRequiredEvent, TextDeltaEvent,
-        TranslateTextCommand, message_type,
+        CompatibilitySnapshot, Envelope, HostSecretResponse, PROTOCOL_VERSION, SecretRequiredEvent,
+        TextDeltaEvent, TranslateTextCommand, message_type,
     };
     use linguamesh_testkit::FakeProviderServer;
     use prost::Message;
@@ -1188,6 +1243,50 @@ mod tests {
         assert_eq!(lm_engine_get_abi_version(), 1);
         assert_eq!(lm_engine_get_protocol_version(), PROTOCOL_VERSION);
         assert_eq!(lm_engine_get_version(), PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn compatibility_snapshot_is_available_through_abi() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let mut output = LmBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+            allocation_id: 0,
+        };
+        // SAFETY：输出描述符为零初始化且句柄尚未销毁。
+        assert_eq!(
+            unsafe { lm_engine_get_compatibility(engine, &raw mut output) },
+            LmResultCode::Ok
+        );
+        let bytes = unsafe { std::slice::from_raw_parts(output.data, output.len) }.to_vec();
+        // SAFETY：缓冲区由本引擎分配且只释放一次。
+        assert_eq!(
+            unsafe { lm_engine_buffer_free(engine, &raw mut output) },
+            LmResultCode::Ok
+        );
+        let envelope = Envelope::decode(bytes.as_slice()).expect("compatibility envelope");
+        assert_eq!(envelope.message_type, message_type::COMPATIBILITY);
+        assert!(!envelope.operation_id.is_empty());
+        assert!(!envelope.correlation_id.is_empty());
+        let snapshot = CompatibilitySnapshot::decode(envelope.payload.as_slice())
+            .expect("compatibility snapshot");
+        assert_eq!(snapshot.abi_major, 1);
+        assert_eq!(snapshot.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(snapshot.provider_catalog_version, "0.1.0");
+        assert!(
+            snapshot
+                .enabled_features
+                .iter()
+                .any(|feature| feature == "compatibility_negotiation_v1")
+        );
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
     }
 
     #[test]
