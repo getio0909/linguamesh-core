@@ -97,6 +97,13 @@ content as untrusted data, and keeps protected-marker instructions explicit. Cor
 output or Unicode replacement characters before marking an operation completed; it never silently
 turns one request into multiple paid calls.
 
+`TranslationPreset` is also request-scoped and defaults to `General` for legacy payloads. Its stable
+built-ins (`general`, `technical`, and `marketing`) and optional bounded domain, tone, formality,
+audience, regional-locale, script, context, and instruction fields are validated before provider
+work. The same prompt helper renders these values as escaped data, while translation-memory identity
+includes the complete preset so cached output cannot cross user preference boundaries. Document jobs
+remain `General` until their persisted options schema is deliberately extended.
+
 The ABI owns a Tokio runtime, a bounded event channel, and at most one active operation per opaque
 engine handle. A submitted `translate_text` envelope is decoded into the same `TranslationEngine`
 used by Rust callers. A forwarding task encodes ordered domain events back into Protobuf envelopes;

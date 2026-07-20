@@ -198,6 +198,7 @@ impl GeminiProvider {
                         translation_prompt(
                             &request.target_locale,
                             request.quality_mode,
+                            Some(&request.preset),
                             &marker_instruction,
                         ),
                         request.source_text

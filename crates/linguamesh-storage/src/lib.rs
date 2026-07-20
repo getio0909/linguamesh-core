@@ -1772,6 +1772,7 @@ fn translation_memory_identity_json(
         "protected_span_policy": TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY,
         "prompt_template_version": TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION,
         "quality_mode": request.quality_mode.as_str(),
+        "translation_preset": &request.preset,
         "provider_model": {
             "provider": &request.provider_identity,
             "model": &request.model_id,

@@ -31,6 +31,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "bounded_text_document_v1",
     "routing_planner_v1",
     "translation_quality_modes_v1",
+    "translation_presets_v1",
     "streaming_text_v1",
     "text_translation_v1",
 ];
@@ -94,6 +95,10 @@ impl TranslationEngine {
                 return;
             }
             sequence += 1;
+            if let Err(error) = validation_request.validate() {
+                send_error_terminal(&sender, sequence, error).await;
+                return;
+            }
             let stream = provider
                 .translate_stream(request, worker_cancellation.clone())
                 .await;

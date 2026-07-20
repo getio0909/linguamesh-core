@@ -1,5 +1,25 @@
 # Implementation Status
 
+## 2026-07-20 — Request-level translation presets
+
+Assumption: the built-in Linux presets (`General`, `Technical`, and `Marketing`) are the first
+UI surface; document jobs continue to use `General` until their persisted options schema is
+explicitly extended.
+
+- Added the validated `TranslationPreset` contract with bounded domain, tone, formality, audience,
+  regional-locale, script, custom-context, and custom-instruction fields. Built-ins have stable IDs,
+  legacy requests deserialize to `General`, and credential-shaped or control text is rejected before
+  provider work.
+- Added `translation_presets_v1` to the Core compatibility feature set. The versioned provider
+  prompt renders preset fields as escaped data, and translation-memory identity now includes the
+  selected preset so cached output cannot cross preference boundaries.
+- Updated OpenAI-compatible, Responses, Azure, native Ollama, Anthropic, and Gemini request paths
+  to carry the same preset without hidden provider calls.
+
+Local validation: `cargo fmt --all`, workspace offline check, strict Clippy, workspace all-target/all-
+feature tests, and locked build passed. Linux and localization integration are recorded in their
+dependent repositories after the next pinned revisions.
+
 ## 2026-07-20 — Persisted document quality modes
 
 Assumption: document jobs use the same `Fast`, `Balanced`, and `Best` request policy as plain text;

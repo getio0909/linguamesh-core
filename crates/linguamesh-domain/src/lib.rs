@@ -1661,6 +1661,134 @@ impl TranslationQualityMode {
     }
 }
 
+/// 描述一次翻译使用的无秘密语言风格预设。
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TranslationPreset {
+    /// 稳定的预设标识，不作为用户可执行指令。
+    pub id: String,
+    /// 可选的内容领域。
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// 可选的目标语气。
+    #[serde(default)]
+    pub tone: Option<String>,
+    /// 可选的正式程度。
+    #[serde(default)]
+    pub formality: Option<String>,
+    /// 可选的预期读者。
+    #[serde(default)]
+    pub intended_audience: Option<String>,
+    /// 可选的地区约定。
+    #[serde(default)]
+    pub regional_locale: Option<String>,
+    /// 可选的文字脚本偏好。
+    #[serde(default)]
+    pub script: Option<String>,
+    /// 可选的用户上下文，按数据处理而不是按指令执行。
+    #[serde(default)]
+    pub custom_context: Option<String>,
+    /// 可选的用户翻译要求，按数据处理而不是按指令执行。
+    #[serde(default)]
+    pub custom_instructions: Option<String>,
+}
+
+impl TranslationPreset {
+    /// 返回不增加额外风格约束的通用预设。
+    #[must_use]
+    pub fn general() -> Self {
+        Self {
+            id: "general".to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// 返回面向技术文档的确定性预设。
+    #[must_use]
+    pub fn technical() -> Self {
+        Self {
+            id: "technical".to_owned(),
+            domain: Some("software and technical documentation".to_owned()),
+            tone: Some("precise and neutral".to_owned()),
+            formality: Some("formal".to_owned()),
+            intended_audience: Some("technical readers".to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// 返回面向营销文案的本地预设。
+    #[must_use]
+    pub fn marketing() -> Self {
+        Self {
+            id: "marketing".to_owned(),
+            domain: Some("marketing and product copy".to_owned()),
+            tone: Some("engaging and natural".to_owned()),
+            formality: Some("friendly".to_owned()),
+            intended_audience: Some("customers".to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// 根据稳定标识返回内置预设。
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "general" => Some(Self::general()),
+            "technical" => Some(Self::technical()),
+            "marketing" => Some(Self::marketing()),
+            _ => None,
+        }
+    }
+
+    /// 返回用于持久化、缓存和提示词的稳定标识。
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// 验证预设不包含未界定的控制文本或凭据形态。
+    pub fn validate(&self) -> Result<(), ProfileValidationError> {
+        if !is_stable_identifier(&self.id) {
+            return Err(ProfileValidationError::InvalidField("preset_id"));
+        }
+        for (field, value) in [
+            ("preset_domain", self.domain.as_deref()),
+            ("preset_tone", self.tone.as_deref()),
+            ("preset_formality", self.formality.as_deref()),
+            (
+                "preset_intended_audience",
+                self.intended_audience.as_deref(),
+            ),
+            ("preset_regional_locale", self.regional_locale.as_deref()),
+            ("preset_script", self.script.as_deref()),
+            ("preset_custom_context", self.custom_context.as_deref()),
+            (
+                "preset_custom_instructions",
+                self.custom_instructions.as_deref(),
+            ),
+        ] {
+            if let Some(value) = value {
+                validate_preset_text(value, field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+const MAX_TRANSLATION_PRESET_TEXT_BYTES: usize = 512;
+
+fn validate_preset_text(value: &str, field: &'static str) -> Result<(), ProfileValidationError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_TRANSLATION_PRESET_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(ProfileValidationError::InvalidField(field));
+    }
+    if looks_like_credential(value) {
+        return Err(ProfileValidationError::CredentialLikeValue(field));
+    }
+    Ok(())
+}
+
 /// 包含一次提供商无关的翻译请求。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranslationRequest {
@@ -1691,6 +1819,9 @@ pub struct TranslationRequest {
     /// 本次请求的质量与调用策略。
     #[serde(default)]
     pub quality_mode: TranslationQualityMode,
+    /// 本次请求的无秘密语言风格预设。
+    #[serde(default)]
+    pub preset: TranslationPreset,
 }
 
 impl TranslationRequest {
@@ -1713,6 +1844,7 @@ impl TranslationRequest {
             max_chunk_bytes: None,
             privacy_mode: TranslationPrivacyMode::Standard,
             quality_mode: TranslationQualityMode::Balanced,
+            preset: TranslationPreset::general(),
         }
     }
 
@@ -1749,6 +1881,20 @@ impl TranslationRequest {
     pub const fn with_quality_mode(mut self, quality_mode: TranslationQualityMode) -> Self {
         self.quality_mode = quality_mode;
         self
+    }
+
+    /// 设置本次请求使用的无秘密语言风格预设。
+    #[must_use]
+    pub fn with_preset(mut self, preset: TranslationPreset) -> Self {
+        self.preset = preset;
+        self
+    }
+
+    /// 验证请求中的预设边界。
+    pub fn validate(&self) -> Result<(), TranslationError> {
+        self.preset.validate().map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+        })
     }
 
     /// 判断本次请求是否使用隐身模式。
@@ -1893,7 +2039,7 @@ mod tests {
         ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
         Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, ProfileValidationError,
         ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
-        SecretValue, TranslationError, TranslationEvent, TranslationPrivacyMode,
+        SecretValue, TranslationError, TranslationEvent, TranslationPreset, TranslationPrivacyMode,
         TranslationQualityMode, TranslationRequest, protect_source_text,
         protect_source_text_with_glossary,
     };
@@ -1916,6 +2062,7 @@ mod tests {
         let request = TranslationRequest::new("hello", "zh-CN", "model");
         assert_eq!(request.privacy_mode, TranslationPrivacyMode::Standard);
         assert_eq!(request.quality_mode, TranslationQualityMode::Balanced);
+        assert_eq!(request.preset.id(), "general");
         assert!(!request.is_incognito());
     }
 
@@ -1927,6 +2074,31 @@ mod tests {
         let request = TranslationRequest::new("hello", "zh-CN", "model")
             .with_quality_mode(TranslationQualityMode::Best);
         assert_eq!(request.quality_mode, TranslationQualityMode::Best);
+    }
+
+    #[test]
+    fn translation_preset_has_bounded_builtin_values_and_round_trips() {
+        let preset = TranslationPreset::technical();
+        preset.validate().expect("technical preset");
+        let request =
+            TranslationRequest::new("hello", "zh-CN", "model").with_preset(preset.clone());
+        let encoded = serde_json::to_string(&request).expect("serialize preset request");
+        let decoded: TranslationRequest =
+            serde_json::from_str(&encoded).expect("deserialize preset request");
+        assert_eq!(decoded.preset, preset);
+        assert_eq!(
+            TranslationPreset::from_id("marketing").map(|value| value.id),
+            Some("marketing".to_owned())
+        );
+    }
+
+    #[test]
+    fn translation_preset_rejects_control_text_and_credential_shapes() {
+        let mut preset = TranslationPreset::general();
+        preset.custom_instructions = Some("do not\nexecute".to_owned());
+        assert!(preset.validate().is_err());
+        preset.custom_instructions = Some("Bearer abcdefghijklmnopqrstuvwxyz".to_owned());
+        assert!(preset.validate().is_err());
     }
 
     #[test]

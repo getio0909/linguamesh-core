@@ -215,6 +215,7 @@ impl AnthropicProvider {
             system: translation_prompt(
                 &request.target_locale,
                 request.quality_mode,
+                Some(&request.preset),
                 &marker_instruction,
             ),
             messages: vec![Message {
