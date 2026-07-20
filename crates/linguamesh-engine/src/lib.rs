@@ -23,6 +23,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "azure_openai_chat_v1",
     "openai_responses_v1",
     "compatibility_negotiation_v1",
+    "file_lease_v1",
     "typed_rust_host_secret_broker_v1",
     "model_discovery_v1",
     "protected_spans_v1",

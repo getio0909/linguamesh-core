@@ -7,9 +7,11 @@ use thiserror::Error;
 use url::{Host, Url};
 use uuid::{Uuid, Variant, Version};
 
+mod file_lease;
 mod retry;
 mod routing;
 
+pub use file_lease::{FileLease, FileLeaseError, FileLeaseGuard, FileLeaseResource};
 pub use retry::{
     DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_RETRY_CIRCUIT_COOLDOWN_MS,
     DEFAULT_RETRY_CIRCUIT_FAILURE_THRESHOLD, DEFAULT_RETRY_JITTER_PERCENT,

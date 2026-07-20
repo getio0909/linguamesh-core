@@ -60,9 +60,12 @@ responses are checked against the active operation and correlation IDs, reject o
 and reject replay or late responses. Only loopback HTTP or remote HTTPS should be used. A second
 submit while an operation is active returns `LM_RESULT_BUSY`.
 
-The direct Rust application layer still owns file-lease services. The C ABI now projects the full
-five-dimension compatibility snapshot through `lm_engine_get_compatibility`; file-lease capabilities
-remain unprojected and must not be assumed by native clients. Engine handles still depend on the
+The direct Rust application layer now owns the bounded `FileLease` lifecycle for path, descriptor,
+temporary, and output resources. A lease has an opaque ID and can be acquired only while active;
+expiry or explicit revocation makes subsequent guard access fail closed. The C ABI advertises
+`file_lease_v1` in its compatibility snapshot, but does not yet project platform-handle transfer or
+lease creation, expiry, or revocation calls; native clients must not assume those ABI operations.
+Engine handles still depend on the
 documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
 destroyed handles are not protected by a handle registry in ABI major `1`.
 

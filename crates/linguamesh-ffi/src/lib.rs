@@ -882,7 +882,7 @@ mod tests {
         lm_engine_poll_event, lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit,
         lock_unpoisoned,
     };
-    use linguamesh_domain::SecretValue;
+    use linguamesh_domain::{FileLease, FileLeaseError, SecretValue};
     use linguamesh_protocol::{
         CompatibilitySnapshot, Envelope, HostSecretResponse, PROTOCOL_VERSION, SecretRequiredEvent,
         TextDeltaEvent, TranslateTextCommand, message_type,
@@ -1285,8 +1285,26 @@ mod tests {
                 .iter()
                 .any(|feature| feature == "compatibility_negotiation_v1")
         );
+        assert!(
+            snapshot
+                .enabled_features
+                .iter()
+                .any(|feature| feature == "file_lease_v1")
+        );
         // SAFETY：句柄由本测试创建且只销毁一次。
         assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
+    fn ffi_file_lease_expiration_fails_closed_before_resource_access() {
+        let lease = FileLease::temporary_path("/tmp/ffi-lease-input").expect("lease");
+        let guard = lease.acquire().expect("borrow");
+        lease.expire();
+        assert_eq!(guard.resource(), Err(FileLeaseError::Expired));
+        assert_eq!(
+            lease.acquire().expect_err("expired borrow"),
+            FileLeaseError::Expired
+        );
     }
 
     #[test]

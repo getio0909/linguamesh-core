@@ -84,6 +84,12 @@ discovery work, rejection of late secrets, in-flight cancellation and credential
 provider disconnect, and adapter rejection before any secret request. Domain tests reject unsafe
 endpoints before a profile can reach the application layer.
 
+The Core domain suite also covers the `FileLease` lifecycle for desktop, temporary/output, POSIX,
+Android ParcelFileDescriptor, and Windows-handle resource shapes. It rejects invalid resource
+identifiers before work and proves that an acquired guard cannot read its resource after expiry or
+explicit revocation. ABI lease transport is intentionally not claimed until its versioned calls and
+native wrapper ownership rules are specified.
+
 These tests exercise an in-process fake host. Linux Secret Service behavior, session-only fallback,
 and native restart restoration remain client-repository gates. The FFI regression additionally
 emits a versioned `secret_required` event, accepts one matching `host_secret_response`, rejects a

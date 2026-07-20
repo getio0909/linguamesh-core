@@ -1,9 +1,29 @@
 # Implementation Status
 
+## 2026-07-20 — Bounded FileLease lifecycle contract
+
+Assumption: document hosts must be able to hand Core a bounded file resource without exposing
+platform handle details or allowing a borrowed resource to survive expiry or explicit revocation.
+
+- Added the public `FileLease` domain abstraction for desktop and temporary/output paths, POSIX and
+  Android parcel descriptors, and duplicated Windows handles. Lease identifiers are opaque; paths,
+  descriptors, and handles are validated before work, and `acquire` rechecks the active state on
+  every resource access.
+- Expiry and revocation are monotonic and race-safe. A held guard fails closed after either state
+  transition, while the resource value remains private to the guard. This is a lifecycle contract,
+  not an OS-handle duplication or close implementation; native platform ownership remains a client
+  boundary until the ABI projection is specified.
+- Domain tests cover every resource shape, invalid locations/descriptors/handles, and expired or
+  revoked guard access. The `file_lease_v1` feature is now advertised by Core for client negotiation.
+
+Local targeted domain/engine tests and formatting passed. Full workspace, FFI, and dependent Linux
+validation will be recorded after this revision is pinned; no stable release or artifact promotion
+is claimed.
+
 ## 2026-07-20 — C ABI compatibility snapshot projection
 
 Assumption: native clients must negotiate the complete shared Core contract through one synchronous
-ABI query before creating provider work; file-lease capability discovery remains a later boundary.
+ABI query before creating provider work; file-lease resource transport remains a later boundary.
 
 - Added `CompatibilitySnapshot` to the versioned protocol and `lm_engine_get_compatibility` to the
   C ABI. The query returns an engine-owned `compatibility` Envelope containing Core semantic version,
@@ -13,7 +33,8 @@ ABI query before creating provider work; file-lease capability discovery remains
   snapshot round trip.
 - Local Core formatting, locked workspace check, strict Clippy, all-target/all-feature tests, and
   native C/C++ SDK smoke are the required validation for this checkpoint. This remains a prerelease
-  Core boundary; file leases, generated client projections, and release evidence remain open.
+  Core boundary; ABI file-lease projection, generated client projections, and release evidence
+  remain open.
 
 ## 2026-07-20 — C ABI host-secret response projection
 
