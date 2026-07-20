@@ -21,11 +21,13 @@ native-host responsibilities.
 
 The provider catalog maps `local-loopback` to the OpenAI-compatible `/v1/` contract, `ollama` to
 the native loopback-only `/api/` contract, `anthropic` to the manual-model `/v1/messages`
-contract, and `azure-openai` to the deployment-scoped Azure Chat Completions contract. Ollama
-discovers models through `/api/tags` and streams `/api/chat` as newline-delimited JSON; Anthropic
-and Azure require the selected manual model/deployment before any host secret request. Azure uses
-the `api-key` header and a pinned API-version query, never a credential query parameter. The
-adapters share endpoint validation, cancellation, bounded response handling,
+contract, `azure-openai` to the deployment-scoped Azure Chat Completions contract, and
+`openai-responses` to the OpenAI Responses `/v1/responses` contract. Ollama discovers models
+through `/api/tags` and streams `/api/chat` as newline-delimited JSON; Anthropic and Azure require
+the selected manual model/deployment before any host secret request. Azure uses the `api-key`
+header and a pinned API-version query, never a credential query parameter. Responses uses Bearer
+authentication and typed SSE event names, including `response.output_text.delta` and
+`response.completed`. The adapters share endpoint validation, cancellation, bounded response handling,
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 

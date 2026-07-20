@@ -1,5 +1,19 @@
 # Implementation Status
 
+## 2026-07-20 — OpenAI Responses streaming adapter
+
+Assumption: Responses API model discovery remains compatible with `/v1/models`, while translation
+requests use the typed SSE event contract documented by OpenAI; live quota, account, and model
+availability remain external gates.
+
+- Added the `openai_responses` adapter and `openai-responses` catalog preset. The adapter sends
+  developer/user `input` items to `/v1/responses`, authenticates with Bearer credentials, and
+  decodes `response.output_text.delta` plus `response.completed` events while ignoring metadata
+  events and mapping provider failures to typed errors.
+- Added a deterministic Responses fixture, fragmented-event decoder tests, application secret
+  broker coverage, and the `openai_responses_v1` compatibility feature. Targeted Core tests pass;
+  Linux integration and remote CI evidence are pending the next pinned revision.
+
 ## 2026-07-20 — Azure OpenAI Chat Completions adapter
 
 Assumption: Azure deployments are user-entered model identifiers and Azure model discovery is

@@ -21,6 +21,7 @@ pub const CORE_SEMANTIC_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CORE_FEATURES: &[&str] = &[
     "cancellation_v1",
     "azure_openai_chat_v1",
+    "openai_responses_v1",
     "compatibility_negotiation_v1",
     "typed_rust_host_secret_broker_v1",
     "model_discovery_v1",

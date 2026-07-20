@@ -72,6 +72,11 @@ manual deployment name, `api-key` authentication, and the pinned `api-version=20
 The deterministic fixture verifies the deployment path, authentication header, and streamed output
 without a commercial credential.
 
+The `openai-responses` catalog entry uses the OpenAI Responses `/v1/responses` endpoint with
+Bearer authentication and model discovery through `/v1/models`. Its stream decoder consumes typed
+SSE events such as `response.output_text.delta` and `response.completed`, while retaining the
+same cancellation, protected-span, and credential-redaction guarantees.
+
 ## Secure provider foundation
 
 The `linguamesh-application` crate exposes a bounded, cancellable host-secret request channel and

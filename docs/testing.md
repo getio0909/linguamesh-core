@@ -21,6 +21,9 @@ through `ProviderManager` without a credential.
 The Azure fixture covers a deployment-scoped Chat Completions path, `api-key` authentication,
 the pinned API-version query, manual deployment listing, streamed fragments, and redacted
 credential handling without a commercial credential.
+The OpenAI Responses fixture covers `/v1/responses`, Bearer authentication, model discovery,
+fragmented typed SSE events, terminal `response.completed`, and redacted credential handling
+without a commercial credential.
 
 Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
 round-trip the optional document-job routing-profile ID without introducing endpoint or credential

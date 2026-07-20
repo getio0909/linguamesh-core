@@ -9,7 +9,9 @@ use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use linguamesh_provider_api::ModelProvider;
 use linguamesh_provider_gemini::{GeminiConfig, GeminiProvider};
 use linguamesh_provider_ollama::{OllamaConfig, OllamaProvider};
-use linguamesh_provider_openai::{AzureOpenAiConfig, OpenAiCompatibleProvider, OpenAiConfig};
+use linguamesh_provider_openai::{
+    AzureOpenAiConfig, OpenAiCompatibleProvider, OpenAiConfig, OpenAiResponsesConfig,
+};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -229,10 +231,12 @@ impl ProviderManager {
         let is_anthropic = profile.adapter_type() == "anthropic_messages";
         let is_gemini = profile.adapter_type() == "gemini_generate_content";
         let is_azure = profile.adapter_type() == "azure_openai_chat";
+        let is_responses = profile.adapter_type() == "openai_responses";
         if !is_ollama
             && !is_anthropic
             && !is_gemini
             && !is_azure
+            && !is_responses
             && profile.adapter_type() != "openai_chat_completions"
         {
             return Err(TranslationError::new(
@@ -334,6 +338,14 @@ impl ProviderManager {
                 ),
             };
             Arc::new(OpenAiCompatibleProvider::new_azure(config)?)
+        } else if is_responses {
+            let config = match credential {
+                Some(secret) => {
+                    OpenAiResponsesConfig::with_credential(profile.base_endpoint(), secret)
+                }
+                None => OpenAiResponsesConfig::without_credential(profile.base_endpoint()),
+            };
+            Arc::new(OpenAiCompatibleProvider::new_responses(config)?)
         } else {
             let config = match credential {
                 Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
@@ -629,6 +641,49 @@ mod tests {
             }
         }
         assert_eq!(output, "你好，Azure！");
+        host.await.expect("host task");
+        manager.disconnect();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn responses_profile_uses_typed_sse_stream() {
+        let server = FakeProviderServer::start_responses().await.expect("server");
+        let provider = profile_with_adapter(
+            &server.base_url(),
+            Some(PROVIDER_SECRET_REF),
+            "openai-responses",
+            "openai_responses",
+        );
+        let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
+        let host = tokio::spawn(async move {
+            requests
+                .recv()
+                .await
+                .expect("secret request")
+                .provide_secret(SecretValue::new("responses-test-key"))
+                .expect("provide secret");
+        });
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("Responses connection");
+        assert_eq!(models[0].id, "fake-translator");
+        let mut operation = manager
+            .active_engine()
+            .expect("active engine")
+            .translate(TranslationRequest::new("Hello", "zh-CN", "fake-translator"));
+        let mut output = String::new();
+        while let Some(event) = operation.next_event().await {
+            match event {
+                TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed { .. } => break,
+                TranslationEvent::Failed { error, .. } => panic!("Responses failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(output, "你好，Responses！");
         host.await.expect("host task");
         manager.disconnect();
         server.shutdown().await;

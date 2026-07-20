@@ -44,6 +44,13 @@
       "adapter": "azure_openai_chat",
       "model_listing": "manual",
       "documentation_url": "https://learn.microsoft.com/azure/ai-services/openai/reference"
+    },
+    {
+      "id": "openai-responses",
+      "display_name": "OpenAI Responses",
+      "adapter": "openai_responses",
+      "model_listing": "openai_models",
+      "documentation_url": "https://developers.openai.com/api/docs/guides/streaming-responses"
     }
   ]
 }

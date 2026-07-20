@@ -86,6 +86,17 @@ impl FakeProviderServer {
         .await
     }
 
+    /// 启动要求 Bearer 凭据并返回 typed SSE 事件的 Responses API 回环服务。
+    pub async fn start_responses() -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            Some(SecretValue::new("responses-test-key")),
+            Duration::ZERO,
+            FakeProviderFlavor::Responses,
+        )
+        .await
+    }
+
     async fn start_with_configuration(
         port: u16,
         expected_token: Option<SecretValue>,
@@ -105,6 +116,7 @@ impl FakeProviderServer {
                 "/openai/deployments/fake-deployment/chat/completions",
                 post(azure_chat_completions),
             )
+            .route("/v1/responses", post(responses))
             .route("/api/tags", get(ollama_tags))
             .route("/api/chat", post(ollama_chat))
             .route("/v1beta/models", get(gemini_models))
@@ -195,6 +207,7 @@ enum FakeProviderFlavor {
     OllamaNative,
     Gemini,
     Azure,
+    Responses,
 }
 
 // 返回最小的 Gemini 模型发现响应，确保测试只依赖本地回环服务。
@@ -257,7 +270,7 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
         return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
     }
     let models = match state.flavor {
-        FakeProviderFlavor::Standard => json!([
+        FakeProviderFlavor::Standard | FakeProviderFlavor::Responses => json!([
             { "id": "fake-translator", "object": "model" },
             { "id": "fake-slow-translator", "object": "model" }
         ]),
@@ -362,6 +375,7 @@ async fn chat_completions(
             }
             FakeProviderFlavor::Gemini => ["你好", "，", "Gemini", "！"],
             FakeProviderFlavor::Azure => ["你好", "，", "Azure", "！"],
+            FakeProviderFlavor::Responses => ["你好", "，", "Responses", "！"],
         };
         for fragment in fragments {
             tokio::time::sleep(delay).await;
@@ -381,6 +395,38 @@ async fn chat_completions(
         if !disconnect {
             yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
         }
+    };
+    Sse::new(output)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(5)))
+        .into_response()
+}
+
+// 返回 OpenAI Responses API 的 typed SSE 事件序列。
+async fn responses(
+    State(state): State<FakeProviderState>,
+    headers: HeaderMap,
+    Json(_request): Json<serde_json::Value>,
+) -> Response {
+    state.chat_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    let output = stream! {
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("response.created")
+            .data(json!({"type": "response.created"}).to_string()));
+        for fragment in ["你好", "，", "Responses", "！"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            yield Ok::<Event, Infallible>(Event::default()
+                .event("response.output_text.delta")
+                .data(json!({
+                    "type": "response.output_text.delta",
+                    "delta": fragment
+                }).to_string()));
+        }
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("response.completed")
+            .data(json!({"type": "response.completed"}).to_string()));
     };
     Sse::new(output)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(5)))
