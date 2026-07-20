@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-20 — C ABI concurrent control-call checkpoint
+
+Assumption: native clients may issue cancellation, shutdown, and bounded event-poll calls from
+different host threads while keeping the opaque engine alive; the FFI boundary must serialize its
+internal state and fail closed after shutdown without allowing a panic across C.
+
+- Added `concurrent_control_calls_are_serialized_and_fail_closed_after_shutdown` to the FFI suite.
+  Twelve host threads concurrently exercise cancel, shutdown, poll, and engine-scoped buffer
+  release; the test then verifies that post-shutdown polling returns `LM_RESULT_SHUTDOWN` before
+  one final destroy.
+- `cargo fmt --all -- --check`, workspace strict Clippy, workspace all-target/all-feature tests,
+  workspace locked build, and `cargo deny check advisories bans licenses sources` passed. The FFI
+  suite now reports 10 passing tests, including the concurrent control-call regression.
+- This is a test-only Core hardening descendant; the reviewed functional Linux pin remains
+  `a87aaf2bef7cca287c4a6faa8addd340e0245b0e` and no stable release is claimed.
+
 ## 2026-07-20 — Anthropic Messages adapter checkpoint
 
 Assumption: Anthropic's Messages API is configured with a user-supplied model identifier because

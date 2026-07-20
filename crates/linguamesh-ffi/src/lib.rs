@@ -855,6 +855,71 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_control_calls_are_serialized_and_fail_closed_after_shutdown() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let engine_address = engine as usize;
+        let workers = (0..12)
+            .map(|index| {
+                thread::spawn(move || {
+                    let engine = engine_address as *mut LmEngine;
+                    match index % 3 {
+                        0 => {
+                            // SAFETY：所有线程只调用受内部同步保护的控制接口，句柄在 join 前保持有效。
+                            let result = unsafe { lm_engine_cancel(engine) };
+                            assert!(matches!(result, LmResultCode::Ok | LmResultCode::Shutdown));
+                        }
+                        1 => {
+                            // SAFETY：重复关闭是公开的幂等操作，句柄在 join 前保持有效。
+                            assert_eq!(unsafe { lm_engine_shutdown(engine) }, LmResultCode::Ok);
+                        }
+                        _ => {
+                            let mut output = LmBuffer {
+                                data: ptr::null_mut(),
+                                len: 0,
+                                capacity: 0,
+                                allocation_id: 0,
+                            };
+                            // SAFETY：输出描述符仅由当前线程访问，句柄在 join 前保持有效。
+                            let result =
+                                unsafe { lm_engine_poll_event(engine, 10, &raw mut output) };
+                            assert!(matches!(result, LmResultCode::Ok | LmResultCode::Shutdown));
+                            if !output.data.is_null() {
+                                // SAFETY：轮询返回的缓冲区属于同一引擎并在当前线程释放一次。
+                                assert_eq!(
+                                    unsafe { lm_engine_buffer_free(engine, &raw mut output) },
+                                    LmResultCode::Ok
+                                );
+                            }
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("concurrent FFI control call");
+        }
+
+        let mut output = LmBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+            allocation_id: 0,
+        };
+        // SAFETY：所有并发调用均已结束，句柄仍由本测试独占并可安全销毁。
+        assert_eq!(
+            unsafe { lm_engine_poll_event(engine, 0, &raw mut output) },
+            LmResultCode::Shutdown
+        );
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
     fn exported_versions_match_contract_constants() {
         assert_eq!(lm_engine_get_abi_version(), 1);
         assert_eq!(lm_engine_get_protocol_version(), PROTOCOL_VERSION);
