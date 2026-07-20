@@ -1,5 +1,24 @@
 # Implementation Status
 
+## 2026-07-20 — C ABI FileLease lifecycle projection
+
+Assumption: native hosts need a bounded, engine-scoped lease control surface before document
+commands can consume platform resources; resource values must remain private to Core.
+
+- Added `file_lease_v1` C ABI create calls for validated paths, POSIX descriptors, Android parcel
+  descriptors, and Windows handles. Core returns only an engine-scoped numeric token and stores
+  the validated resource in a bounded registry of 64 leases per engine.
+- Added active-state query, monotonic expire/revoke controls, and explicit destroy. Calls are
+  panic-safe, reject wrong-engine or unknown tokens, remain cleanable after shutdown, and never
+  return a path, descriptor, or handle across the ABI.
+- Added C header declarations, a C++20 move-only RAII wrapper with engine-lifetime invalidation,
+  and native C/C++ smoke coverage for ownership, expiry, revocation, engine isolation, and the
+  registry bound. Document-command resource consumption and OS-handle transfer remain open.
+
+Targeted FFI tests and native SDK smoke passed. Full workspace validation and remote CI evidence
+must be recorded before this revision is considered compatible; no stable release or artifact
+promotion is claimed.
+
 ## 2026-07-20 — Bounded FileLease lifecycle contract
 
 Assumption: document hosts must be able to hand Core a bounded file resource without exposing

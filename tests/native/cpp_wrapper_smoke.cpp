@@ -24,6 +24,19 @@ int main() {
     assert(rejected);
 
     auto engine = linguamesh::engine::create();
+    const std::vector<std::uint8_t> path{'/', 't', 'm', 'p', '/', 'l', 'i', 'n', 'g', 'u', 'a',
+                                         'm', 'e', 's', 'h', '-', 'i', 'n', 'p', 'u', 't'};
+    auto lease = engine.create_desktop_path(path);
+    assert(lease.valid());
+    assert(lease.is_active());
+    lease.expire();
+    assert(!lease.is_active());
+    lease.reset();
+    auto descriptor_lease = engine.create_posix_descriptor(0);
+    assert(descriptor_lease.is_active());
+    descriptor_lease.revoke();
+    assert(!descriptor_lease.is_active());
+    descriptor_lease.reset();
     const std::vector<std::uint8_t> malformed{0xff};
     try {
         engine.submit(malformed);

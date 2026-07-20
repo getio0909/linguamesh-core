@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -59,7 +60,7 @@ private:
         case result_code::internal:
             return "LinguaMesh could not initialize an internal resource.";
         case result_code::resource_exhausted:
-            return "LinguaMesh engine has too many outstanding buffers.";
+            return "LinguaMesh engine has too many outstanding resources.";
         }
         return "LinguaMesh returned an unknown result code.";
     }
@@ -179,6 +180,88 @@ private:
     LmBuffer value_{};
 };
 
+struct lease_owner_state final {
+    LmEngine* handle = nullptr;
+};
+
+/// 自动撤销并删除引擎拥有的文件 lease 令牌。
+class file_lease final {
+public:
+    file_lease() noexcept = default;
+    file_lease(const file_lease&) = delete;
+    file_lease& operator=(const file_lease&) = delete;
+
+    file_lease(file_lease&& other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)), lease_id_(std::exchange(other.lease_id_, 0)) {}
+
+    file_lease& operator=(file_lease&& other) noexcept {
+        if (this != &other) {
+            reset_noexcept();
+            owner_ = std::exchange(other.owner_, nullptr);
+            lease_id_ = std::exchange(other.lease_id_, 0);
+        }
+        return *this;
+    }
+
+    ~file_lease() { reset_noexcept(); }
+
+    [[nodiscard]] bool valid() const noexcept {
+        return owner_ != nullptr && owner_->handle != nullptr && lease_id_ != 0;
+    }
+    [[nodiscard]] std::uint64_t id() const noexcept { return lease_id_; }
+
+    [[nodiscard]] bool is_active() const noexcept {
+        if (!valid()) {
+            return false;
+        }
+        std::uint8_t active = 0;
+        return lm_engine_file_lease_is_active(owner_->handle, lease_id_, &active) == LM_RESULT_OK
+            && active != 0;
+    }
+
+    void expire() {
+        require_valid();
+        throw_on_error(lm_engine_file_lease_expire(owner_->handle, lease_id_));
+    }
+
+    void revoke() {
+        require_valid();
+        throw_on_error(lm_engine_file_lease_revoke(owner_->handle, lease_id_));
+    }
+
+    void reset() {
+        if (!valid()) {
+            return;
+        }
+        throw_on_error(lm_engine_file_lease_destroy(owner_->handle, lease_id_));
+        owner_.reset();
+        lease_id_ = 0;
+    }
+
+private:
+    friend class engine;
+
+    file_lease(std::shared_ptr<lease_owner_state> owner, const std::uint64_t lease_id) noexcept
+        : owner_(owner), lease_id_(lease_id) {}
+
+    void require_valid() const {
+        if (!valid()) {
+            throw std::logic_error("LinguaMesh file lease is closed.");
+        }
+    }
+
+    void reset_noexcept() noexcept {
+        if (valid()) {
+            static_cast<void>(lm_engine_file_lease_destroy(owner_->handle, lease_id_));
+        }
+        owner_.reset();
+        lease_id_ = 0;
+    }
+
+    std::shared_ptr<lease_owner_state> owner_;
+    std::uint64_t lease_id_ = 0;
+};
+
 /// 独占持有引擎句柄并提供同步 C++ 边界。
 class engine final {
 public:
@@ -210,13 +293,15 @@ public:
 
     engine(engine&& other) noexcept
         : handle_(std::exchange(other.handle_, nullptr)),
-          shutdown_(std::exchange(other.shutdown_, true)) {}
+          shutdown_(std::exchange(other.shutdown_, true)),
+          lease_owner_(std::exchange(other.lease_owner_, nullptr)) {}
 
     engine& operator=(engine&& other) noexcept {
         if (this != &other) {
             close_noexcept();
             handle_ = std::exchange(other.handle_, nullptr);
             shutdown_ = std::exchange(other.shutdown_, true);
+            lease_owner_ = std::exchange(other.lease_owner_, nullptr);
         }
         return *this;
     }
@@ -231,6 +316,47 @@ public:
     void send_host_response(const std::span<const std::uint8_t> response) {
         require_handle();
         throw_on_error(lm_engine_send_host_response(handle_, response.data(), response.size()));
+    }
+
+    /// 注册一个桌面文件路径 lease；路径只在调用期间借给核心。
+    [[nodiscard]] file_lease create_desktop_path(const std::span<const std::uint8_t> path) {
+        return create_path_lease(path, lm_engine_file_lease_create_desktop_path);
+    }
+
+    /// 注册一个临时文件路径 lease。
+    [[nodiscard]] file_lease create_temporary_path(const std::span<const std::uint8_t> path) {
+        return create_path_lease(path, lm_engine_file_lease_create_temporary_path);
+    }
+
+    /// 注册一个输出目标路径 lease。
+    [[nodiscard]] file_lease create_output_path(const std::span<const std::uint8_t> path) {
+        return create_path_lease(path, lm_engine_file_lease_create_output_path);
+    }
+
+    /// 注册一个 POSIX 文件描述符 lease。
+    [[nodiscard]] file_lease create_posix_descriptor(const std::int64_t descriptor) {
+        require_handle();
+        std::uint64_t lease_id = 0;
+        throw_on_error(lm_engine_file_lease_create_posix_descriptor(
+            handle_, descriptor, &lease_id));
+        return file_lease(lease_owner_, lease_id);
+    }
+
+    /// 注册一个 Android `ParcelFileDescriptor` 导出的 lease。
+    [[nodiscard]] file_lease create_android_parcel_descriptor(const std::int64_t descriptor) {
+        require_handle();
+        std::uint64_t lease_id = 0;
+        throw_on_error(lm_engine_file_lease_create_android_parcel_descriptor(
+            handle_, descriptor, &lease_id));
+        return file_lease(lease_owner_, lease_id);
+    }
+
+    /// 注册一个 Windows 复制句柄 lease。
+    [[nodiscard]] file_lease create_windows_handle(const std::uint64_t handle) {
+        require_handle();
+        std::uint64_t lease_id = 0;
+        throw_on_error(lm_engine_file_lease_create_windows_handle(handle_, handle, &lease_id));
+        return file_lease(lease_owner_, lease_id);
     }
 
     [[nodiscard]] std::vector<std::uint8_t> poll_event(const std::chrono::milliseconds timeout) {
@@ -264,7 +390,22 @@ public:
     [[nodiscard]] bool is_open() const noexcept { return handle_ != nullptr; }
 
 private:
-    explicit engine(LmEngine* handle) noexcept : handle_(handle) {}
+    explicit engine(LmEngine* handle) noexcept
+        : handle_(handle), lease_owner_(std::make_shared<lease_owner_state>()) {
+        lease_owner_->handle = handle;
+    }
+
+    using path_lease_creator = LmResultCode (*) (
+        LmEngine*, const std::uint8_t*, std::size_t, std::uint64_t*);
+
+    [[nodiscard]] file_lease create_path_lease(
+        const std::span<const std::uint8_t> path,
+        const path_lease_creator creator) {
+        require_handle();
+        std::uint64_t lease_id = 0;
+        throw_on_error(creator(handle_, path.data(), path.size(), &lease_id));
+        return file_lease(lease_owner_, lease_id);
+    }
 
     void require_handle() const {
         if (handle_ == nullptr) {
@@ -279,13 +420,18 @@ private:
         if (!shutdown_) {
             static_cast<void>(lm_engine_shutdown(handle_));
         }
+        if (lease_owner_ != nullptr) {
+            lease_owner_->handle = nullptr;
+        }
         static_cast<void>(lm_engine_destroy(handle_));
         handle_ = nullptr;
         shutdown_ = true;
+        lease_owner_.reset();
     }
 
     LmEngine* handle_ = nullptr;
     bool shutdown_ = false;
+    std::shared_ptr<lease_owner_state> lease_owner_;
 };
 
 }

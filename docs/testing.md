@@ -87,8 +87,10 @@ endpoints before a profile can reach the application layer.
 The Core domain suite also covers the `FileLease` lifecycle for desktop, temporary/output, POSIX,
 Android ParcelFileDescriptor, and Windows-handle resource shapes. It rejects invalid resource
 identifiers before work and proves that an acquired guard cannot read its resource after expiry or
-explicit revocation. ABI lease transport is intentionally not claimed until its versioned calls and
-native wrapper ownership rules are specified.
+explicit revocation. Native ABI tests additionally cover engine-scoped numeric lease tokens,
+bounded registry exhaustion, wrong-engine rejection, expiry/revocation, post-shutdown cleanup,
+and the C++ RAII wrapper. These calls control lifecycle only; document-command resource
+consumption and OS-handle transfer remain client-integration gates.
 
 These tests exercise an in-process fake host. Linux Secret Service behavior, session-only fallback,
 and native restart restoration remain client-repository gates. The FFI regression additionally

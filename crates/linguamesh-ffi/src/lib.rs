@@ -3,8 +3,8 @@
 
 use linguamesh_application::{HostSecretBroker, SecretRequestLease, host_secret_channel};
 use linguamesh_domain::{
-    CorrelationId, ErrorKind, OperationId, SecretRef, SecretValue, TranslationEvent,
-    TranslationRequest,
+    CorrelationId, ErrorKind, FileLease, FileLeaseError, OperationId, SecretRef, SecretValue,
+    TranslationEvent, TranslationRequest,
 };
 use linguamesh_engine::{
     CancellationHandle, TranslationEngine, TranslationOperation, core_compatibility,
@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 
 const EVENT_QUEUE_CAPACITY: usize = 64;
 const MAX_OUTSTANDING_BUFFERS: usize = 64;
+const MAX_FILE_LEASES: usize = 64;
+const MAX_FILE_LEASE_LOCATION_BYTES: usize = 4096;
 const MAX_PROTOCOL_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_HOST_SECRET_BYTES: usize = 64 * 1024;
 
@@ -93,9 +95,11 @@ pub struct LmEngine {
     events: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     active: Arc<Mutex<Option<ActiveOperation>>>,
     pending_host_requests: Arc<Mutex<HashMap<String, PendingHostRequest>>>,
+    file_leases: Mutex<HashMap<u64, FileLease>>,
     buffer_allocations: Mutex<HashMap<u64, BufferAllocation>>,
     buffer_slots: Arc<Semaphore>,
     next_buffer_allocation_id: AtomicU64,
+    next_file_lease_id: AtomicU64,
 }
 
 /// 创建新的不透明引擎句柄。
@@ -123,9 +127,11 @@ pub unsafe extern "C" fn lm_engine_create(output: *mut *mut LmEngine) -> LmResul
             events: tokio::sync::Mutex::new(events),
             active: Arc::new(Mutex::new(None)),
             pending_host_requests: Arc::new(Mutex::new(HashMap::new())),
+            file_leases: Mutex::new(HashMap::new()),
             buffer_allocations: Mutex::new(HashMap::new()),
             buffer_slots: Arc::new(Semaphore::new(MAX_OUTSTANDING_BUFFERS)),
             next_buffer_allocation_id: AtomicU64::new(1),
+            next_file_lease_id: AtomicU64::new(1),
         });
         // SAFETY：调用方提供了经过非空验证且可写的输出指针。
         unsafe { output.write(Box::into_raw(engine)) };
@@ -200,6 +206,148 @@ pub unsafe extern "C" fn lm_engine_get_compatibility(
         }
         .encode_to_vec();
         engine.write_output_buffer(output, envelope, buffer_slot)
+    })
+}
+
+/// 在引擎内注册桌面路径文件 lease，并返回不透明数字令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_desktop_path(
+    engine: *mut LmEngine,
+    data: *const u8,
+    len: usize,
+    output: *mut u64,
+) -> LmResultCode {
+    create_path_file_lease(engine, data, len, output, FileLease::desktop_path)
+}
+
+/// 在引擎内注册临时文件路径 lease，并返回不透明数字令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_temporary_path(
+    engine: *mut LmEngine,
+    data: *const u8,
+    len: usize,
+    output: *mut u64,
+) -> LmResultCode {
+    create_path_file_lease(engine, data, len, output, FileLease::temporary_path)
+}
+
+/// 在引擎内注册输出目标路径 lease，并返回不透明数字令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_output_path(
+    engine: *mut LmEngine,
+    data: *const u8,
+    len: usize,
+    output: *mut u64,
+) -> LmResultCode {
+    create_path_file_lease(engine, data, len, output, FileLease::output_path)
+}
+
+/// 在引擎内注册 POSIX 文件描述符 lease，并返回不透明数字令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_posix_descriptor(
+    engine: *mut LmEngine,
+    descriptor: i64,
+    output: *mut u64,
+) -> LmResultCode {
+    ffi_guard(|| {
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        engine.create_file_lease(output, FileLease::posix_descriptor(descriptor))
+    })
+}
+
+/// 在引擎内注册 Android `ParcelFileDescriptor` 导出的 lease，并返回令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_android_parcel_descriptor(
+    engine: *mut LmEngine,
+    descriptor: i64,
+    output: *mut u64,
+) -> LmResultCode {
+    ffi_guard(|| {
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        engine.create_file_lease(output, FileLease::android_parcel_descriptor(descriptor))
+    })
+}
+
+/// 在引擎内注册 Windows 复制句柄 lease，并返回不透明数字令牌。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_create_windows_handle(
+    engine: *mut LmEngine,
+    handle: u64,
+    output: *mut u64,
+) -> LmResultCode {
+    ffi_guard(|| {
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        engine.create_file_lease(output, FileLease::windows_handle(handle))
+    })
+}
+
+/// 查询引擎内 lease 是否仍然有效。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_is_active(
+    engine: *mut LmEngine,
+    lease_id: u64,
+    output: *mut u8,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if lease_id == 0 || output.is_null() {
+            return LmResultCode::InvalidArgument;
+        }
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let leases = lock_unpoisoned(&engine.file_leases);
+        let Some(lease) = leases.get(&lease_id) else {
+            return LmResultCode::InvalidArgument;
+        };
+        // SAFETY：输出指针经过非空验证，调用方负责提供一个可写字节。
+        unsafe { output.write(u8::from(lease.is_active())) };
+        LmResultCode::Ok
+    })
+}
+
+/// 使引擎内 lease 到期；到期后任何借用都必须失败。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_expire(
+    engine: *mut LmEngine,
+    lease_id: u64,
+) -> LmResultCode {
+    update_file_lease_state(engine, lease_id, FileLease::expire)
+}
+
+/// 撤销引擎内 lease；撤销状态不可恢复。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_revoke(
+    engine: *mut LmEngine,
+    lease_id: u64,
+) -> LmResultCode {
+    update_file_lease_state(engine, lease_id, FileLease::revoke)
+}
+
+/// 删除引擎内 lease；删除前先执行不可逆撤销。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_destroy(
+    engine: *mut LmEngine,
+    lease_id: u64,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if lease_id == 0 {
+            return LmResultCode::InvalidArgument;
+        }
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let mut leases = lock_unpoisoned(&engine.file_leases);
+        let Some(lease) = leases.remove(&lease_id) else {
+            return LmResultCode::InvalidArgument;
+        };
+        lease.revoke();
+        LmResultCode::Ok
     })
 }
 
@@ -393,6 +541,44 @@ pub unsafe extern "C" fn lm_engine_buffer_free(
 }
 
 impl LmEngine {
+    fn create_file_lease(
+        &self,
+        output: *mut u64,
+        lease: Result<FileLease, FileLeaseError>,
+    ) -> LmResultCode {
+        if output.is_null() {
+            return LmResultCode::InvalidArgument;
+        }
+        // SAFETY：输出指针经过非空验证，调用方负责提供一个可读写的令牌槽位。
+        if unsafe { output.read() } != 0 {
+            return LmResultCode::InvalidArgument;
+        }
+        if self.shutdown.load(Ordering::Acquire) {
+            return LmResultCode::Shutdown;
+        }
+        let Ok(lease) = lease else {
+            return LmResultCode::InvalidArgument;
+        };
+        let mut leases = lock_unpoisoned(&self.file_leases);
+        if leases.len() >= MAX_FILE_LEASES {
+            return LmResultCode::ResourceExhausted;
+        }
+        let lease_id = loop {
+            let candidate = self.next_file_lease_id.fetch_add(1, Ordering::Relaxed);
+            if candidate == 0 {
+                continue;
+            }
+            if let Entry::Vacant(entry) = leases.entry(candidate) {
+                entry.insert(lease);
+                break candidate;
+            }
+        };
+        drop(leases);
+        // SAFETY：输出指针仍由调用方在本次同步调用中独占。
+        unsafe { output.write(lease_id) };
+        LmResultCode::Ok
+    }
+
     fn submit(&self, envelope: &Envelope) -> LmResultCode {
         if self.shutdown.load(Ordering::Acquire) {
             return LmResultCode::Shutdown;
@@ -653,6 +839,50 @@ impl LmEngine {
     }
 }
 
+fn create_path_file_lease(
+    engine: *mut LmEngine,
+    data: *const u8,
+    len: usize,
+    output: *mut u64,
+    constructor: fn(String) -> Result<FileLease, FileLeaseError>,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if data.is_null() || len == 0 || len > MAX_FILE_LEASE_LOCATION_BYTES {
+            return LmResultCode::InvalidArgument;
+        }
+        // SAFETY：调用方保证数据指针在本次同步调用期间可读，长度已受上限约束。
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        let Ok(value) = String::from_utf8(bytes.to_vec()) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        engine.create_file_lease(output, constructor(value))
+    })
+}
+
+fn update_file_lease_state(
+    engine: *mut LmEngine,
+    lease_id: u64,
+    update: impl FnOnce(&FileLease),
+) -> LmResultCode {
+    ffi_guard(|| {
+        if lease_id == 0 {
+            return LmResultCode::InvalidArgument;
+        }
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let leases = lock_unpoisoned(&engine.file_leases);
+        let Some(lease) = leases.get(&lease_id) else {
+            return LmResultCode::InvalidArgument;
+        };
+        update(lease);
+        LmResultCode::Ok
+    })
+}
+
 async fn forward_events(
     operation_id: String,
     correlation_id: String,
@@ -876,11 +1106,14 @@ fn ffi_guard(operation: impl FnOnce() -> LmResultCode) -> LmResultCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        LmBuffer, LmEngine, LmResultCode, MAX_OUTSTANDING_BUFFERS, lm_engine_buffer_free,
-        lm_engine_cancel, lm_engine_create, lm_engine_destroy, lm_engine_get_abi_version,
-        lm_engine_get_compatibility, lm_engine_get_protocol_version, lm_engine_get_version,
-        lm_engine_poll_event, lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit,
-        lock_unpoisoned,
+        LmBuffer, LmEngine, LmResultCode, MAX_FILE_LEASES, MAX_OUTSTANDING_BUFFERS,
+        lm_engine_buffer_free, lm_engine_cancel, lm_engine_create, lm_engine_destroy,
+        lm_engine_file_lease_create_desktop_path, lm_engine_file_lease_create_posix_descriptor,
+        lm_engine_file_lease_create_temporary_path, lm_engine_file_lease_destroy,
+        lm_engine_file_lease_expire, lm_engine_file_lease_is_active, lm_engine_file_lease_revoke,
+        lm_engine_get_abi_version, lm_engine_get_compatibility, lm_engine_get_protocol_version,
+        lm_engine_get_version, lm_engine_poll_event, lm_engine_send_host_response,
+        lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
     };
     use linguamesh_domain::{FileLease, FileLeaseError, SecretValue};
     use linguamesh_protocol::{
@@ -1304,6 +1537,172 @@ mod tests {
         assert_eq!(
             lease.acquire().expect_err("expired borrow"),
             FileLeaseError::Expired
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn ffi_file_lease_registry_is_bounded_engine_scoped_and_reversible_only_by_destroy() {
+        let mut first_engine: *mut LmEngine = ptr::null_mut();
+        let mut second_engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut first_engine) },
+            LmResultCode::Ok
+        );
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut second_engine) },
+            LmResultCode::Ok
+        );
+
+        let path = b"/tmp/ffi-file-lease";
+        let mut lease_id = 0_u64;
+        // SAFETY：路径切片在调用期间保持有效，输出令牌槽位可写且为零。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_desktop_path(
+                    first_engine,
+                    path.as_ptr(),
+                    path.len(),
+                    &raw mut lease_id,
+                )
+            },
+            LmResultCode::Ok
+        );
+        assert_ne!(lease_id, 0);
+        let mut active = 0_u8;
+        // SAFETY：句柄和输出状态槽位均由本测试独占。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(first_engine, lease_id, &raw mut active) },
+            LmResultCode::Ok
+        );
+        assert_eq!(active, 1);
+        // SAFETY：句柄和租约令牌来自同一引擎。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_expire(first_engine, lease_id) },
+            LmResultCode::Ok
+        );
+        // SAFETY：查询使用同一引擎和仍然存在的租约令牌。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(first_engine, lease_id, &raw mut active) },
+            LmResultCode::Ok
+        );
+        assert_eq!(active, 0);
+        // SAFETY：错误引擎不得访问另一引擎的租约注册表。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(second_engine, lease_id, &raw mut active) },
+            LmResultCode::InvalidArgument
+        );
+        // SAFETY：撤销已经到期的租约保持幂等失效状态。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_revoke(first_engine, lease_id) },
+            LmResultCode::Ok
+        );
+        // SAFETY：租约令牌由本测试创建且只销毁一次。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_destroy(first_engine, lease_id) },
+            LmResultCode::Ok
+        );
+        // SAFETY：重复销毁必须被安全拒绝。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_destroy(first_engine, lease_id) },
+            LmResultCode::InvalidArgument
+        );
+
+        let mut leases = Vec::with_capacity(MAX_FILE_LEASES);
+        for _ in 0..MAX_FILE_LEASES {
+            let mut id = 0_u64;
+            // SAFETY：路径切片和输出槽位在调用期间有效。
+            assert_eq!(
+                unsafe {
+                    lm_engine_file_lease_create_temporary_path(
+                        first_engine,
+                        path.as_ptr(),
+                        path.len(),
+                        &raw mut id,
+                    )
+                },
+                LmResultCode::Ok
+            );
+            leases.push(id);
+        }
+        let mut exhausted = 0_u64;
+        // SAFETY：达到有界容量后验证创建失败且不消费新令牌。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_temporary_path(
+                    first_engine,
+                    path.as_ptr(),
+                    path.len(),
+                    &raw mut exhausted,
+                )
+            },
+            LmResultCode::ResourceExhausted
+        );
+        assert_eq!(exhausted, 0);
+        let released = leases.remove(0);
+        // SAFETY：释放测试中第一个有效租约。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_destroy(first_engine, released) },
+            LmResultCode::Ok
+        );
+        // SAFETY：释放容量后允许创建新的租约。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_posix_descriptor(first_engine, 0, &raw mut exhausted)
+            },
+            LmResultCode::Ok
+        );
+        leases.push(exhausted);
+        for id in leases {
+            // SAFETY：每个令牌均由本测试创建且仍属于第一个引擎。
+            assert_eq!(
+                unsafe { lm_engine_file_lease_destroy(first_engine, id) },
+                LmResultCode::Ok
+            );
+        }
+
+        let mut shutdown_lease = 0_u64;
+        // SAFETY：创建一个租约以验证关闭后的清理操作仍可用。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_posix_descriptor(
+                    first_engine,
+                    0,
+                    &raw mut shutdown_lease,
+                )
+            },
+            LmResultCode::Ok
+        );
+        // SAFETY：关闭只停止新工作，不会使现有租约清理失效。
+        assert_eq!(
+            unsafe { lm_engine_shutdown(first_engine) },
+            LmResultCode::Ok
+        );
+        // SAFETY：关闭后允许撤销并删除现有租约。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_revoke(first_engine, shutdown_lease) },
+            LmResultCode::Ok
+        );
+        // SAFETY：关闭后的租约销毁仍由所属引擎执行。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_destroy(first_engine, shutdown_lease) },
+            LmResultCode::Ok
+        );
+        let mut rejected = 0_u64;
+        // SAFETY：关闭后的创建请求只验证安全拒绝结果。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_posix_descriptor(first_engine, 0, &raw mut rejected)
+            },
+            LmResultCode::Shutdown
+        );
+        // SAFETY：两个句柄均由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(first_engine) }, LmResultCode::Ok);
+        assert_eq!(
+            unsafe { lm_engine_destroy(second_engine) },
+            LmResultCode::Ok
         );
     }
 

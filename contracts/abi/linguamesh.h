@@ -61,6 +61,61 @@ LM_API LmResultCode lm_engine_get_compatibility(
     LmEngine *engine,
     LmBuffer *output
 );
+
+/* 注册路径或平台句柄并返回引擎隔离的不透明 lease 令牌。 */
+LM_API LmResultCode lm_engine_file_lease_create_desktop_path(
+    LmEngine *engine,
+    const uint8_t *data,
+    size_t len,
+    uint64_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_create_temporary_path(
+    LmEngine *engine,
+    const uint8_t *data,
+    size_t len,
+    uint64_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_create_output_path(
+    LmEngine *engine,
+    const uint8_t *data,
+    size_t len,
+    uint64_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_create_posix_descriptor(
+    LmEngine *engine,
+    int64_t descriptor,
+    uint64_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_create_android_parcel_descriptor(
+    LmEngine *engine,
+    int64_t descriptor,
+    uint64_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_create_windows_handle(
+    LmEngine *engine,
+    uint64_t handle,
+    uint64_t *output
+);
+
+/* Lease 控制只接受所属引擎返回的令牌；资源值不会跨 ABI 返回。 */
+LM_API LmResultCode lm_engine_file_lease_is_active(
+    LmEngine *engine,
+    uint64_t lease_id,
+    uint8_t *output
+);
+LM_API LmResultCode lm_engine_file_lease_expire(
+    LmEngine *engine,
+    uint64_t lease_id
+);
+LM_API LmResultCode lm_engine_file_lease_revoke(
+    LmEngine *engine,
+    uint64_t lease_id
+);
+LM_API LmResultCode lm_engine_file_lease_destroy(
+    LmEngine *engine,
+    uint64_t lease_id
+);
+
 LM_API LmResultCode lm_engine_submit(
     LmEngine *engine,
     const uint8_t *command_data,

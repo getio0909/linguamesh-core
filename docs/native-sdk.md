@@ -63,9 +63,12 @@ submit while an operation is active returns `LM_RESULT_BUSY`.
 The direct Rust application layer now owns the bounded `FileLease` lifecycle for path, descriptor,
 temporary, and output resources. A lease has an opaque ID and can be acquired only while active;
 expiry or explicit revocation makes subsequent guard access fail closed. The C ABI advertises
-`file_lease_v1` in its compatibility snapshot, but does not yet project platform-handle transfer or
-lease creation, expiry, or revocation calls; native clients must not assume those ABI operations.
-Engine handles still depend on the
+`file_lease_v1` in its compatibility snapshot and exposes engine-scoped creation, active-state,
+expiry, revocation, and destroy calls. Creation accepts bounded UTF-8 paths or validated numeric
+platform descriptors/handles and returns only a numeric lease token; resource values never cross
+the ABI. Each engine permits at most 64 leases, tokens are not portable between engines, and
+cleanup remains valid after shutdown. These calls define lifecycle control only: document-command
+resource consumption and OS-handle transfer are still open. Engine handles still depend on the
 documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
 destroyed handles are not protected by a handle registry in ABI major `1`.
 

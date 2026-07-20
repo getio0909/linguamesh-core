@@ -4,7 +4,9 @@
 `contracts/abi/linguamesh.h`. It owns `LmEngine`, copies and releases each engine-owned `LmBuffer`
 before returning an event vector, converts stable result codes to typed exceptions, validates ABI
 and protocol versions before engine creation, and exposes bounded event polling suitable for a
-dedicated C++/WinRT worker thread.
+dedicated C++/WinRT worker thread. It also exposes move-only `file_lease` values for the bounded
+ABI lifecycle controls; lease tokens are engine-scoped and never expose platform resource values.
+Destroying an engine invalidates outstanding wrapper leases without calling through a stale handle.
 
 Add both include directories and link the Rust library:
 
