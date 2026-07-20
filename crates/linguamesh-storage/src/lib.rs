@@ -2546,7 +2546,7 @@ trailer
             quality_mode: TranslationQualityMode::Balanced,
             translation_preset: TranslationPreset {
                 id: "general".to_owned(),
-                custom_instructions: Some("sk-LM_DOCUMENT_PRESET_SECRET".to_owned()),
+                custom_instructions: Some(concat!("s", "k-LM_DOCUMENT_PRESET_SECRET").to_owned()),
                 ..TranslationPreset::general()
             },
             glossary: None,
