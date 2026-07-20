@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-20 — C ABI malformed-input stress corpus
+
+Assumption: the ABI submit boundary must remain panic-safe and bounded for arbitrary untrusted
+bytes before native clients can rely on decoder hardening; this deterministic corpus complements,
+but does not replace, sanitizer and coverage-guided fuzzing.
+
+- Added a 4,096-case deterministic pseudo-random corpus with payload lengths capped at the existing
+  1 MiB protocol limit. Every input crosses the real `lm_engine_submit` C boundary and must return
+  a documented rejection or busy result; the engine is destroyed only after the complete corpus.
+- The regression exercises malformed, incompatible, unsupported, and empty messages without a
+  provider request, credentials, or unbounded allocation. It records the remaining sanitizer and
+  coverage-guided fuzzing requirement explicitly instead of overstating this stress test.
+
+The targeted FFI test passed locally. Full Core validation and remote CI must be recorded after the
+next compatibility pin; no stable release or sanitizer/fuzz completion is claimed.
+
 ## 2026-07-20 — C ABI FileLease lifecycle projection
 
 Assumption: native hosts need a bounded, engine-scoped lease control surface before document

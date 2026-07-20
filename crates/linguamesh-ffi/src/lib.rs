@@ -1107,13 +1107,13 @@ fn ffi_guard(operation: impl FnOnce() -> LmResultCode) -> LmResultCode {
 mod tests {
     use super::{
         LmBuffer, LmEngine, LmResultCode, MAX_FILE_LEASES, MAX_OUTSTANDING_BUFFERS,
-        lm_engine_buffer_free, lm_engine_cancel, lm_engine_create, lm_engine_destroy,
-        lm_engine_file_lease_create_desktop_path, lm_engine_file_lease_create_posix_descriptor,
-        lm_engine_file_lease_create_temporary_path, lm_engine_file_lease_destroy,
-        lm_engine_file_lease_expire, lm_engine_file_lease_is_active, lm_engine_file_lease_revoke,
-        lm_engine_get_abi_version, lm_engine_get_compatibility, lm_engine_get_protocol_version,
-        lm_engine_get_version, lm_engine_poll_event, lm_engine_send_host_response,
-        lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
+        MAX_PROTOCOL_MESSAGE_BYTES, lm_engine_buffer_free, lm_engine_cancel, lm_engine_create,
+        lm_engine_destroy, lm_engine_file_lease_create_desktop_path,
+        lm_engine_file_lease_create_posix_descriptor, lm_engine_file_lease_create_temporary_path,
+        lm_engine_file_lease_destroy, lm_engine_file_lease_expire, lm_engine_file_lease_is_active,
+        lm_engine_file_lease_revoke, lm_engine_get_abi_version, lm_engine_get_compatibility,
+        lm_engine_get_protocol_version, lm_engine_get_version, lm_engine_poll_event,
+        lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
     };
     use linguamesh_domain::{FileLease, FileLeaseError, SecretValue};
     use linguamesh_protocol::{
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn lifecycle_and_repeated_shutdown_are_safe() {
         let mut engine: *mut LmEngine = ptr::null_mut();
-        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        // 安全性：测试提供有效的输出指针并遵循句柄所有权协议。
         assert_eq!(
             unsafe { lm_engine_create(&raw mut engine) },
             LmResultCode::Ok
@@ -1760,6 +1760,43 @@ mod tests {
             LmResultCode::MalformedMessage
         );
         // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
+    fn ffi_submit_malformed_input_stress_corpus_is_bounded_and_panic_safe() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+
+        let mut state = 0x9e37_79b9_u32;
+        for iteration in 0..4096 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (state as usize % 4097).min(MAX_PROTOCOL_MESSAGE_BYTES);
+            let mut input = vec![0_u8; len];
+            for byte in &mut input {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            // 安全性：输入语料在本次同步调用期间保持有效，句柄仍由测试独占。
+            let result = unsafe { lm_engine_submit(engine, input.as_ptr(), input.len()) };
+            assert!(
+                matches!(
+                    result,
+                    LmResultCode::InvalidArgument
+                        | LmResultCode::ProtocolIncompatible
+                        | LmResultCode::MalformedMessage
+                        | LmResultCode::UnsupportedMessage
+                        | LmResultCode::Busy
+                ),
+                "unexpected result code {result:?} at corpus iteration {iteration}"
+            );
+        }
+
+        // 安全性：压力语料调用均已返回，句柄由本测试创建且只销毁一次。
         assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
     }
 

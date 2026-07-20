@@ -59,6 +59,12 @@ deterministic Linux packaging twice, then verify its outer and per-file manifest
 `bash tools/verify-linux-sdk-package.sh`. That verification also validates the pkg-config metadata
 and links the packaged static library into the C consumer smoke test.
 
+The FFI suite additionally sends 4,096 deterministic pseudo-random byte strings through
+`lm_engine_submit`, bounded at the 1 MiB protocol limit, and requires every malformed or unsupported
+input to return a controlled result without a panic or provider request. This is a regression stress
+corpus, not coverage-guided fuzzing; sanitizer and fuzz-run coverage remain required before a stable
+release.
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 
