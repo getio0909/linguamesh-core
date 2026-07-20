@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-20 — Persisted document quality modes
+
+Assumption: document jobs use the same `Fast`, `Balanced`, and `Best` request policy as plain text;
+legacy rows without a value are upgraded to `Balanced`.
+
+- Added transactional schema 17 migration `0017_document_quality_mode.sql` and validated parsing
+  of the stable `fast`/`balanced`/`best` names. Document-job options now round-trip the mode while
+  retaining the existing non-secret storage boundary.
+- Added schema-15 migration coverage and restart-safe storage tests; endpoint, credential, and source
+  content fields remain absent from the options table.
+
+Local validation: `cargo fmt --all`, workspace offline check, strict Clippy, workspace all-target/all-feature
+tests (139 passed), locked build, and `git diff --check` passed. Linux integration remains on the next
+pinned Core revision.
+
 ## 2026-07-20 — Translation quality modes and prompt contract
 
 Assumption: `Fast`, `Balanced`, and `Best` remain single provider requests in this prerelease;

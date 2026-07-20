@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 16. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 17. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -50,7 +50,8 @@ private directories and leaf-file metadata. See
 
 Schema 15 adds bounded `routing_profiles` JSON persistence. Schema 16 adds an optional
 `routing_profile_id` to document-job options so a routed job can reselect its saved profile after a
-process restart. The stored payload is validated through
+process restart. Schema 17 adds the validated `quality_mode` (`fast`, `balanced`, or `best`) so
+document jobs retain the user's quality policy across pause, restart, and resume. The stored payload is validated through
 the shared `RoutingProfile` contract and contains only non-secret identifiers, constraints, and
 ranking preferences; endpoints, credentials, and source content are never stored in this table.
 

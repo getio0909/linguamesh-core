@@ -1,6 +1,6 @@
 # Testing
 
-Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, and restart recovery without persisting paths or credential values. Schema 15 routing-profile tests cover bounded JSON persistence, validation, listing, deletion, and the absence of endpoint or credential fields.
+Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, quality-mode persistence, and restart recovery without persisting paths or credential values. Schema 15 routing-profile tests cover bounded JSON persistence, validation, listing, deletion, and the absence of endpoint or credential fields.
 
 OOXML document tests also reject encrypted, symlinked, duplicate, traversal, and suspiciously
 compressed ZIP entries before XML inspection. DOCX, PPTX, and XLSX packages enforce the 4 MiB and
@@ -31,9 +31,9 @@ that non-empty source text cannot reach `Completed` with empty output or Unicode
 characters; received deltas remain available before the typed failure. This validation is
 deterministic and does not create hidden additional provider calls.
 
-Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
-round-trip the optional document-job routing-profile ID without introducing endpoint or credential
-columns.
+Schema 16 migration tests construct a schema-15 database and verify the routing-profile ID; schema
+17 migration tests apply the quality-mode column and round-trip `fast`, `balanced`, and `best`
+without introducing endpoint or credential columns.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed
