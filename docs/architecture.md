@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 17. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 18. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -51,9 +51,11 @@ private directories and leaf-file metadata. See
 Schema 15 adds bounded `routing_profiles` JSON persistence. Schema 16 adds an optional
 `routing_profile_id` to document-job options so a routed job can reselect its saved profile after a
 process restart. Schema 17 adds the validated `quality_mode` (`fast`, `balanced`, or `best`) so
-document jobs retain the user's quality policy across pause, restart, and resume. The stored payload is validated through
-the shared `RoutingProfile` contract and contains only non-secret identifiers, constraints, and
-ranking preferences; endpoints, credentials, and source content are never stored in this table.
+document jobs retain the user's quality policy across pause, restart, and resume. Schema 18 adds
+validated `translation_preset_json`; legacy NULL values resolve to `General`, and the serialized
+preset is bounded to 8 KiB. The stored payload contains only non-secret identifiers, constraints,
+ranking preferences, and bounded style data; endpoints, credentials, and source content are never
+stored in this table.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional
@@ -102,7 +104,7 @@ built-ins (`general`, `technical`, and `marketing`) and optional bounded domain,
 audience, regional-locale, script, context, and instruction fields are validated before provider
 work. The same prompt helper renders these values as escaped data, while translation-memory identity
 includes the complete preset so cached output cannot cross user preference boundaries. Document jobs
-remain `General` until their persisted options schema is deliberately extended.
+persist the selected preset through schema 18 and reuse it after restart or retry.
 
 The ABI owns a Tokio runtime, a bounded event channel, and at most one active operation per opaque
 engine handle. A submitted `translate_text` envelope is decoded into the same `TranslationEngine`

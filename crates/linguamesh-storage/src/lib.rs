@@ -6,8 +6,8 @@ use linguamesh_document::{
 };
 use linguamesh_domain::{
     ErrorKind, Glossary, ModelDescriptor, ModelSource, ProfileValidationError, ProviderProfile,
-    ProviderProfileId, RoutingProfile, SecretRef, TranslationError, TranslationQualityMode,
-    TranslationRequest, validate_model_identifier,
+    ProviderProfileId, RoutingProfile, SecretRef, TranslationError, TranslationPreset,
+    TranslationQualityMode, TranslationRequest, validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Component, Path};
@@ -40,7 +40,9 @@ const DOCUMENT_ROUTING_PROFILE_MIGRATION: &str =
     include_str!("../../../migrations/0016_document_routing_profile.sql");
 const DOCUMENT_QUALITY_MODE_MIGRATION: &str =
     include_str!("../../../migrations/0017_document_quality_mode.sql");
-const LATEST_SCHEMA_VERSION: u32 = 17;
+const DOCUMENT_TRANSLATION_PRESET_MIGRATION: &str =
+    include_str!("../../../migrations/0018_document_translation_preset.sql");
+const LATEST_SCHEMA_VERSION: u32 = 18;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -63,6 +65,8 @@ pub const MAX_DOCUMENT_JOB_TEXT_BYTES: usize = MAX_DOCUMENT_BYTES;
 pub const MAX_DOCUMENT_JOB_OPTION_TEXT_BYTES: usize = 256;
 /// 限制可恢复文档参数中的词汇表 JSON 大小。
 pub const MAX_DOCUMENT_JOB_GLOSSARY_BYTES: usize = 256 * 1024;
+/// 限制可恢复文档参数中的翻译预设 JSON 大小。
+pub const MAX_DOCUMENT_JOB_PRESET_BYTES: usize = 8 * 1024;
 /// 限制可保存的路由配置数量，避免配置数据库无限增长。
 pub const MAX_ROUTING_PROFILES: usize = 32;
 /// 限制单个路由配置 JSON 大小，确保候选和约束元数据有界。
@@ -85,6 +89,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (15, ROUTING_PROFILES_MIGRATION),
     (16, DOCUMENT_ROUTING_PROFILE_MIGRATION),
     (17, DOCUMENT_QUALITY_MODE_MIGRATION),
+    (18, DOCUMENT_TRANSLATION_PRESET_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -159,6 +164,8 @@ pub struct DocumentJobOptions {
     pub routing_profile_id: Option<String>,
     /// 文档每个可翻译段使用的质量与调用策略。
     pub quality_mode: TranslationQualityMode,
+    /// 文档每个可翻译段使用的有界语言风格预设。
+    pub translation_preset: TranslationPreset,
     /// 请求级词汇表；只保存经过校验的结构化规则。
     pub glossary: Option<Glossary>,
 }
@@ -338,7 +345,7 @@ impl Storage {
         let changed = self
             .connection
             .execute(
-                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, routing_profile_id, quality_mode, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(job_id) DO UPDATE SET source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, provider_id = excluded.provider_id, routing_profile_id = excluded.routing_profile_id, quality_mode = excluded.quality_mode, glossary_json = excluded.glossary_json, updated_at = unixepoch()",
+                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, routing_profile_id, quality_mode, translation_preset_json, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(job_id) DO UPDATE SET source_locale = excluded.source_locale, target_locale = excluded.target_locale, model_id = excluded.model_id, provider_id = excluded.provider_id, routing_profile_id = excluded.routing_profile_id, quality_mode = excluded.quality_mode, translation_preset_json = excluded.translation_preset_json, glossary_json = excluded.glossary_json, updated_at = unixepoch()",
                 params![
                     job_id,
                     options.source_locale.as_deref(),
@@ -347,6 +354,12 @@ impl Storage {
                     options.provider_id.as_str(),
                     options.routing_profile_id.as_deref(),
                     options.quality_mode.as_str(),
+                    serde_json::to_string(&options.translation_preset).map_err(|_| {
+                        TranslationError::new(
+                            ErrorKind::InvalidConfiguration,
+                            "The document translation preset could not be serialized.",
+                        )
+                    })?,
                     glossary_json.as_deref(),
                 ],
             )
@@ -1277,6 +1290,18 @@ fn validate_document_job_options(options: &DocumentJobOptions) -> Result<(), Tra
             ));
         }
     }
+    options
+        .translation_preset
+        .validate()
+        .map_err(|_| document_configuration_error("The document translation preset is invalid."))?;
+    let preset_bytes = serde_json::to_vec(&options.translation_preset).map_err(|_| {
+        document_configuration_error("The document translation preset could not be serialized.")
+    })?;
+    if preset_bytes.len() > MAX_DOCUMENT_JOB_PRESET_BYTES {
+        return Err(document_configuration_error(
+            "The document translation preset exceeds the local size limit.",
+        ));
+    }
     Ok(())
 }
 
@@ -1466,7 +1491,7 @@ fn load_document_job_options(
 ) -> Result<Option<DocumentJobOptions>, TranslationError> {
     let stored = connection
         .query_row(
-            "SELECT source_locale, target_locale, model_id, provider_id, routing_profile_id, quality_mode, glossary_json FROM document_job_options WHERE job_id = ?1",
+            "SELECT source_locale, target_locale, model_id, provider_id, routing_profile_id, quality_mode, translation_preset_json, glossary_json FROM document_job_options WHERE job_id = ?1",
             params![job_id],
             |row| {
                 Ok((
@@ -1477,6 +1502,7 @@ fn load_document_job_options(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -1489,6 +1515,7 @@ fn load_document_job_options(
         provider_id,
         routing_profile_id,
         quality_mode,
+        translation_preset_json,
         glossary_json,
     )) = stored
     else {
@@ -1499,6 +1526,17 @@ fn load_document_job_options(
         .map(parse_document_quality_mode)
         .transpose()?
         .unwrap_or_default();
+    let translation_preset = translation_preset_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The stored document translation preset is invalid.",
+            )
+        })?
+        .unwrap_or_else(TranslationPreset::general);
     let glossary = glossary_json
         .as_deref()
         .map(serde_json::from_str)
@@ -1516,6 +1554,7 @@ fn load_document_job_options(
         provider_id,
         routing_profile_id,
         quality_mode,
+        translation_preset,
         glossary,
     };
     validate_document_job_options(&options).map_err(|_| {
@@ -1800,8 +1839,8 @@ mod tests {
     use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
         ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, RoutingCandidate,
-        RoutingConstraints, RoutingMode, RoutingProfile, SecretRef, TranslationPrivacyMode,
-        TranslationQualityMode, TranslationRequest,
+        RoutingConstraints, RoutingMode, RoutingProfile, SecretRef, TranslationPreset,
+        TranslationPrivacyMode, TranslationQualityMode, TranslationRequest,
     };
     use rusqlite::Connection;
     use std::fs;
@@ -1837,7 +1876,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 17);
+        assert_eq!(storage.schema_version().expect("version"), 18);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1865,12 +1904,35 @@ mod tests {
         }
         drop(connection);
 
-        let mut storage = Storage::open(&path).expect("schema 17 migration");
-        assert_eq!(storage.schema_version().expect("version"), 17);
+        let mut storage = Storage::open(&path).expect("schema 18 migration");
+        assert_eq!(storage.schema_version().expect("version"), 18);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
             .expect("save route job");
+        storage
+            .connection
+            .execute(
+                "INSERT INTO document_job_options (job_id, source_locale, target_locale, model_id, provider_id, routing_profile_id, quality_mode, translation_preset_json, glossary_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL)",
+                (
+                    "route-job",
+                    Some("en"),
+                    "zh-CN",
+                    "fake-translator",
+                    "route-provider",
+                    Some("route-profile"),
+                    "balanced",
+                ),
+            )
+            .expect("insert legacy options");
+        let legacy = storage
+            .document_job("route-job")
+            .expect("load legacy options")
+            .expect("legacy job");
+        assert_eq!(
+            legacy.options.expect("legacy options").translation_preset,
+            TranslationPreset::general()
+        );
         let options = DocumentJobOptions {
             source_locale: Some("en".to_owned()),
             target_locale: "zh-CN".to_owned(),
@@ -1878,6 +1940,7 @@ mod tests {
             provider_id: "route-provider".to_owned(),
             routing_profile_id: Some("route-profile".to_owned()),
             quality_mode: TranslationQualityMode::Balanced,
+            translation_preset: TranslationPreset::general(),
             glossary: None,
         };
         let snapshot = storage
@@ -1903,7 +1966,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 17);
+        assert_eq!(storage.schema_version().expect("version"), 18);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2434,6 +2497,7 @@ trailer
             provider_id: "legacy-profile".to_owned(),
             routing_profile_id: Some("document-route".to_owned()),
             quality_mode: TranslationQualityMode::Balanced,
+            translation_preset: TranslationPreset::technical(),
             glossary: Some(glossary),
         };
         let saved = storage
@@ -2450,14 +2514,47 @@ trailer
         assert_eq!(loaded.options, Some(options));
         let mut statement = reopened
             .connection
-            .prepare("SELECT routing_profile_id, glossary_json FROM document_job_options")
+            .prepare("SELECT routing_profile_id, translation_preset_json, glossary_json FROM document_job_options")
             .expect("options query");
-        let (routing_profile_id, glossary_json): (Option<String>, String) = statement
-            .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+        let (routing_profile_id, translation_preset_json, glossary_json): (
+            Option<String>,
+            String,
+            String,
+        ) = statement
+            .query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .expect("glossary row");
         assert_eq!(routing_profile_id.as_deref(), Some("document-route"));
+        assert!(translation_preset_json.contains("technical"));
+        assert!(!translation_preset_json.contains("credential"));
         assert!(!glossary_json.contains("api_key"));
         assert!(!glossary_json.contains("credential"));
+    }
+
+    #[test]
+    fn document_job_options_reject_invalid_translation_preset() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one");
+        storage
+            .save_document_job("job-invalid-preset", &job, DocumentJobState::Pending)
+            .expect("save pending");
+        let options = DocumentJobOptions {
+            source_locale: Some("en".to_owned()),
+            target_locale: "zh-CN".to_owned(),
+            model_id: "model-options".to_owned(),
+            provider_id: "legacy-profile".to_owned(),
+            routing_profile_id: None,
+            quality_mode: TranslationQualityMode::Balanced,
+            translation_preset: TranslationPreset {
+                id: "general".to_owned(),
+                custom_instructions: Some("sk-LM_DOCUMENT_PRESET_SECRET".to_owned()),
+                ..TranslationPreset::general()
+            },
+            glossary: None,
+        };
+        let error = storage
+            .save_document_job_options("job-invalid-preset", &options)
+            .expect_err("credential-shaped preset");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
     }
 
     #[test]
@@ -2732,7 +2829,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 17);
+        assert_eq!(storage.schema_version().expect("schema version"), 18);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -2829,7 +2926,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 17);
+        assert_eq!(storage.schema_version().expect("version"), 18);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -2911,7 +3008,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 17);
+        assert_eq!(storage.schema_version().expect("version"), 18);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

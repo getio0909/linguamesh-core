@@ -1,10 +1,23 @@
 # Implementation Status
 
+## 2026-07-20 — Persisted document translation presets
+
+Assumption: document jobs persist the same bounded, non-secret preset contract as text requests;
+rows created before schema 18 continue with the `General` preset.
+
+- Added transactional schema 18 migration `0018_document_translation_preset.sql`. Document-job
+  options now validate and round-trip the complete `TranslationPreset` JSON, including across
+  close/reopen and resume, while legacy NULL values default to `General`.
+- Added a bounded 8 KiB serialized-preset limit and rejection tests for credential-shaped custom
+  instructions. The storage table still contains no endpoint, credential, or source-content values.
+
+Local validation: targeted storage tests and formatting passed. Full workspace evidence will be
+recorded after the dependent Linux worker propagates the saved preset through restart and retry.
+
 ## 2026-07-20 — Request-level translation presets
 
 Assumption: the built-in Linux presets (`General`, `Technical`, and `Marketing`) are the first
-UI surface; document jobs continue to use `General` until their persisted options schema is
-explicitly extended.
+UI surface; document jobs now persist their selected preset through schema 18.
 
 - Added the validated `TranslationPreset` contract with bounded domain, tone, formality, audience,
   regional-locale, script, custom-context, and custom-instruction fields. Built-ins have stable IDs,

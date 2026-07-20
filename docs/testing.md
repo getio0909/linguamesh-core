@@ -38,7 +38,9 @@ request, and provider fixtures verify that all built-in adapters receive the sam
 
 Schema 16 migration tests construct a schema-15 database and verify the routing-profile ID; schema
 17 migration tests apply the quality-mode column and round-trip `fast`, `balanced`, and `best`
-without introducing endpoint or credential columns.
+without introducing endpoint or credential columns. Schema 18 migration tests round-trip the full
+translation preset, default legacy NULL values to `General`, enforce the 8 KiB bound, and reject
+credential-shaped custom instructions across reopen.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed
