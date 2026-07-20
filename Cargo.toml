@@ -10,6 +10,7 @@ members = [
     "crates/linguamesh-provider-api",
     "crates/linguamesh-provider-anthropic",
     "crates/linguamesh-provider-catalog",
+    "crates/linguamesh-provider-gemini",
     "crates/linguamesh-provider-ollama",
     "crates/linguamesh-provider-openai",
     "crates/linguamesh-storage",
@@ -40,6 +41,7 @@ linguamesh-protocol = { version = "0.1.0-alpha.2", path = "crates/linguamesh-pro
 linguamesh-provider-api = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-api" }
 linguamesh-provider-anthropic = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-anthropic" }
 linguamesh-provider-catalog = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-catalog" }
+linguamesh-provider-gemini = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-gemini" }
 linguamesh-provider-ollama = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-ollama" }
 linguamesh-provider-openai = { version = "0.1.0-alpha.2", path = "crates/linguamesh-provider-openai" }
 linguamesh-storage = { version = "0.1.0-alpha.2", path = "crates/linguamesh-storage" }

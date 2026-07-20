@@ -757,6 +757,7 @@ dependencies = [
  "linguamesh-engine",
  "linguamesh-provider-anthropic",
  "linguamesh-provider-api",
+ "linguamesh-provider-gemini",
  "linguamesh-provider-ollama",
  "linguamesh-provider-openai",
  "linguamesh-storage",
@@ -872,6 +873,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "linguamesh-provider-gemini"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "linguamesh-domain",
+ "linguamesh-provider-api",
+ "linguamesh-testkit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

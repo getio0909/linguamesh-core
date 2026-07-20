@@ -7,6 +7,7 @@ use linguamesh_domain::{
 use linguamesh_engine::TranslationEngine;
 use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use linguamesh_provider_api::ModelProvider;
+use linguamesh_provider_gemini::{GeminiConfig, GeminiProvider};
 use linguamesh_provider_ollama::{OllamaConfig, OllamaProvider};
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use std::error::Error;
@@ -212,6 +213,7 @@ impl ProviderManager {
     }
 
     /// 连接候选配置，并只在成功且未取消时替换活动会话。
+    #[allow(clippy::too_many_lines)]
     pub async fn connect(
         &mut self,
         profile: &ProviderProfile,
@@ -225,7 +227,12 @@ impl ProviderManager {
         }
         let is_ollama = profile.adapter_type() == "ollama_chat";
         let is_anthropic = profile.adapter_type() == "anthropic_messages";
-        if !is_ollama && !is_anthropic && profile.adapter_type() != "openai_chat_completions" {
+        let is_gemini = profile.adapter_type() == "gemini_generate_content";
+        if !is_ollama
+            && !is_anthropic
+            && !is_gemini
+            && profile.adapter_type() != "openai_chat_completions"
+        {
             return Err(TranslationError::new(
                 ErrorKind::UnsupportedCapability,
                 "The provider adapter is not supported by this Core build.",
@@ -235,6 +242,8 @@ impl ProviderManager {
             OllamaProvider::validate_endpoint(profile.base_endpoint())?;
         } else if is_anthropic {
             AnthropicProvider::validate_endpoint(profile.base_endpoint())?;
+        } else if is_gemini {
+            GeminiProvider::validate_endpoint(profile.base_endpoint())?;
         } else {
             OpenAiCompatibleProvider::validate_endpoint(profile.base_endpoint())?;
         }
@@ -280,6 +289,12 @@ impl ProviderManager {
                 None => AnthropicConfig::without_credential(profile.base_endpoint(), model_id),
             };
             Arc::new(AnthropicProvider::new(config)?)
+        } else if is_gemini {
+            let config = match credential {
+                Some(secret) => GeminiConfig::with_credential(profile.base_endpoint(), secret),
+                None => GeminiConfig::without_credential(profile.base_endpoint()),
+            };
+            Arc::new(GeminiProvider::new(config)?)
         } else {
             let config = match credential {
                 Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
@@ -378,6 +393,12 @@ impl ManagedProvider for OllamaProvider {
 }
 
 impl ManagedProvider for AnthropicProvider {
+    fn close_session(&self) {
+        Self::close_session(self);
+    }
+}
+
+impl ManagedProvider for GeminiProvider {
     fn close_session(&self) {
         Self::close_session(self);
     }

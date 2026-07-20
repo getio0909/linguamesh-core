@@ -30,6 +30,13 @@
       "adapter": "anthropic_messages",
       "model_listing": "manual",
       "documentation_url": "https://docs.anthropic.com/en/api/messages"
+    },
+    {
+      "id": "gemini",
+      "display_name": "Google Gemini",
+      "adapter": "gemini_generate_content",
+      "model_listing": "gemini_models",
+      "documentation_url": "https://ai.google.dev/api"
     }
   ]
 }
