@@ -7,8 +7,14 @@ use thiserror::Error;
 use url::{Host, Url};
 use uuid::{Uuid, Variant, Version};
 
+mod retry;
 mod routing;
 
+pub use retry::{
+    DEFAULT_RETRY_BASE_DELAY_MS, DEFAULT_RETRY_CIRCUIT_COOLDOWN_MS,
+    DEFAULT_RETRY_CIRCUIT_FAILURE_THRESHOLD, DEFAULT_RETRY_JITTER_PERCENT,
+    DEFAULT_RETRY_MAX_BACKOFF_MS, RetryPolicy, RetryPolicyError,
+};
 pub use routing::{
     MAX_ROUTING_CANDIDATES, MAX_ROUTING_IDENTIFIER_BYTES, MAX_ROUTING_PROFILE_JSON_BYTES,
     RoutingCandidate, RoutingConstraints, RoutingContext, RoutingDecision, RoutingError,

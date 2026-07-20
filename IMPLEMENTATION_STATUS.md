@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-20 — Shared bounded retry policy contract
+
+Assumption: all native clients should derive retry and circuit-breaker limits from one validated
+Core policy so backoff, provider hints, jitter, and cooldowns cannot drift between platforms.
+
+- Added the public `RetryPolicy` domain type with bounded construction, standard defaults, optional
+  `Retry-After` handling, and typed validation errors. The policy caps backoff at 60 seconds,
+  cooldown at five minutes, jitter at 100%, and consecutive failures at 32.
+- Linux now consumes the Core policy for routing backoff and circuit-breaker thresholds while
+  preserving cancellation and approved fallback behavior.
+
+Local validation: Core formatting, workspace check, strict Clippy, and domain tests passed (34
+tests). Linux formatting, GUI check, strict Clippy, no-default tests (80 passed, 1 ignored), and
+demo-provider tests (144 passed, 3 ignored) passed. CI evidence will be recorded after the pinned
+Core and Linux revisions complete their workflows; no stable release or artifact promotion is
+claimed.
+
 ## 2026-07-20 — Short-text chunking regression fix
 
 Assumption: the default approximate byte budget should only split text when the complete protected

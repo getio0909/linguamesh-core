@@ -39,6 +39,10 @@ components, and an explicit fallback order when the profile allows fallback. End
 credentials, and source content remain outside the planner contract; native clients must still
 present and apply the selected profile according to their host policy.
 
+`RetryPolicy` is the shared bounded contract for approved fallback: it validates exponential
+backoff, jitter, provider `Retry-After` hints, and circuit-breaker thresholds/cooldowns so native
+clients use the same safety limits.
+
 Core schema 16 persists validated routing profiles as bounded JSON and records an optional
 document-job routing-profile ID for deterministic re-selection after restart. The storage API
 rejects invalid or oversized profiles and never stores endpoints, credentials, or source text in the
