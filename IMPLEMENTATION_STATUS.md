@@ -1,5 +1,25 @@
 # Implementation Status
 
+## 2026-07-20 — C ABI host-secret response projection
+
+Assumption: native clients need the same one-time host-secret contract through ABI 1 that the Rust
+application layer already enforces, while secret values remain runtime-only and absent from events.
+
+- The versioned protocol now carries an optional non-secret `secret_ref` on `TranslateTextCommand`,
+  `SecretRequiredEvent`, and `HostSecretResponse`. The C ABI emits `secret_required` before a
+  credential-bearing operation, validates operation/correlation/request identity and bounded
+  resolutions, delivers one `SecretValue` through the Core broker, and rejects replay, late,
+  oversized, malformed, or mismatched responses.
+- FFI event sequencing reserves sequence zero for the host request and starts the translated
+  operation at sequence one. A cancellation during secret resolution produces exactly one typed
+  cancelled terminal event; provider sessions clear the pending request map on completion.
+- Local protocol/engine/FFI tests passed (`4`, `5`, and `11` tests). The FFI authenticated loopback
+  regression proves `secret_required`, one-shot response handling, replay rejection, streamed
+  `你好，LinguaMesh！`, and one completed terminal event without persisting the secret canary.
+  Formatting and the FFI all-target check passed. This is a prerelease Core boundary; semantic
+  compatibility/catalog negotiation, file leases, sanitizer/fuzz coverage, and client projections
+  remain open.
+
 ## 2026-07-20 — Shared bounded retry policy contract
 
 Assumption: all native clients should derive retry and circuit-breaker limits from one validated
@@ -503,8 +523,8 @@ Not verified or not implemented:
 - Swift and Xcode are unavailable locally. The remote Apple job validates the wrapper,
   XCFramework, and universal archive, but client application linkage, signing, symbols,
   notarization, and distribution remain separate gates.
-- C ABI projection of typed host secret brokerage and semantic/catalog/feature negotiation, file
-  leases, generated Swift and C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol
+- C ABI projection of semantic/catalog/feature negotiation and file leases, generated Swift and
+  C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol
   bundles, SBOMs, immutable release checksums, and cross-platform conformance remain incomplete.
 - Engine-handle forgery, stale-handle use, repeated destruction, and destruction racing unjoined
   raw callers remain outside the ABI-major-1 contract and lack sanitizer-backed misuse tests.
@@ -635,8 +655,8 @@ Remaining for the Linux secure-provider checkpoint:
 
 - Keep the Linux client pinned to the reviewed no-follow Core revision, implement Secret Service
   for persistent credentials, and prove the Linux save/restart/translation path in native CI.
-- The C ABI still rejects host-response messages and does not project semantic/catalog/feature
-  negotiation. File leases and other complete Milestone 2 host services remain unimplemented.
+- The C ABI now projects the one-time host-secret response flow. Semantic/catalog/feature
+  negotiation, file leases, and other complete Milestone 2 host services remain unimplemented.
 
 ## 2026-07-18 — Linux history controls contract
 

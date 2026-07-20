@@ -45,18 +45,21 @@ Release at least one buffer through its owning engine before polling again.
 
 ## Current boundaries
 
-The command currently configures a generic OpenAI-compatible endpoint without a credential, which
-is sufficient for the loopback fake-provider conformance path. Only loopback HTTP or remote HTTPS
-should be used. A second submit while an operation is active returns `LM_RESULT_BUSY`.
+The command configures a generic OpenAI-compatible endpoint and may carry a non-secret `secret_ref`.
+When a reference is present, the engine emits one `secret_required` event, pauses the operation,
+and accepts exactly one matching `host_secret_response` envelope. The response resolution is
+`provided`, `unavailable`, or `secure_storage_unavailable`; a provided value is held only in the
+bounded in-memory provider session and is never persisted, logged, or placed in an event. Secret
+responses are checked against the active operation and correlation IDs, reject oversized values,
+and reject replay or late responses. Only loopback HTTP or remote HTTPS should be used. A second
+submit while an operation is active returns `LM_RESULT_BUSY`.
 
-The direct Rust application layer now implements bounded, cancellable typed secret brokerage and a
-five-dimension compatibility snapshot for the Linux client. Those capabilities are not yet
-projected through this C ABI. Host-response envelopes remain version checked but return
-`LM_RESULT_UNSUPPORTED_MESSAGE`, and ABI calls still do not report Core semantic version,
-provider-catalog version, enabled features, or file-lease capabilities. These gaps block a complete
-Milestone 2 artifact and must not be hidden by platform wrappers. Engine handles still depend on
-the documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
-destroyed handles are not protected by a handle registry in ABI major `1`.
+The direct Rust application layer still owns the full five-dimension compatibility snapshot and
+file-lease services; those capabilities are not yet projected through this C ABI. ABI calls still
+do not report Core semantic version, provider-catalog version, enabled features, or file-lease
+capabilities. Engine handles still depend on the documented single-destroy and close-after-workers-
+stop contract; stale, forged, or concurrently destroyed handles are not protected by a handle
+registry in ABI major `1`.
 
 ## Loopback conformance provider
 

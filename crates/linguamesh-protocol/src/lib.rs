@@ -22,6 +22,10 @@ pub mod message_type {
     pub const CANCELLED: &str = "cancelled";
     /// 携带安全的失败信息。
     pub const FAILED: &str = "failed";
+    /// 请求原生宿主解析一个秘密引用。
+    pub const SECRET_REQUIRED: &str = "secret_required";
+    /// 携带一次性宿主秘密响应。
+    pub const HOST_SECRET_RESPONSE: &str = "host_secret_response";
 }
 
 /// 包装跨原生边界传输的版本化消息。
@@ -62,6 +66,9 @@ pub struct TranslateTextCommand {
     /// 目标 BCP 47 语言标签。
     #[prost(string, tag = "4")]
     pub target_locale: String,
+    /// 可选的宿主安全存储引用；永远不是秘密值。
+    #[prost(string, tag = "5")]
+    pub secret_ref: String,
 }
 
 /// 携带一段增量翻译文本。
@@ -81,6 +88,31 @@ pub struct FailureEvent {
     /// 不包含秘密的英文诊断。
     #[prost(string, tag = "2")]
     pub message: String,
+}
+
+/// 请求原生宿主解析一个秘密引用。
+#[derive(Clone, PartialEq, Message)]
+pub struct SecretRequiredEvent {
+    /// 只可使用一次的请求标识。
+    #[prost(string, tag = "1")]
+    pub request_id: String,
+    /// 宿主安全存储中的不透明引用。
+    #[prost(string, tag = "2")]
+    pub secret_ref: String,
+}
+
+/// 返回宿主对秘密请求的一次性处理结果。
+#[derive(Clone, PartialEq, Message)]
+pub struct HostSecretResponse {
+    /// 与 `SecretRequiredEvent` 对应的请求标识。
+    #[prost(string, tag = "1")]
+    pub request_id: String,
+    /// `provided`、`unavailable` 或 `secure_storage_unavailable`。
+    #[prost(string, tag = "2")]
+    pub resolution: String,
+    /// 仅在 `provided` 时使用的内存秘密值。
+    #[prost(string, tag = "3")]
+    pub secret: String,
 }
 
 impl Envelope {
@@ -112,8 +144,8 @@ pub enum ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::{
-        Envelope, PROTOCOL_VERSION, ProtocolError, TextDeltaEvent, TranslateTextCommand,
-        message_type,
+        Envelope, HostSecretResponse, PROTOCOL_VERSION, ProtocolError, SecretRequiredEvent,
+        TextDeltaEvent, TranslateTextCommand, message_type,
     };
     use prost::Message;
 
@@ -158,6 +190,7 @@ mod tests {
             model_id: "fake-translator".into(),
             source_text: "Hello".into(),
             target_locale: "zh-CN".into(),
+            secret_ref: String::new(),
         };
         let encoded_command = command.encode_to_vec();
         assert_eq!(
@@ -180,6 +213,28 @@ mod tests {
         assert_eq!(
             TextDeltaEvent::decode(decoded.payload.as_slice()).expect("event"),
             event
+        );
+    }
+
+    #[test]
+    fn host_secret_messages_round_trip_without_changing_envelope_shape() {
+        let required = SecretRequiredEvent {
+            request_id: "request".into(),
+            secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
+        };
+        let response = HostSecretResponse {
+            request_id: "request".into(),
+            resolution: "provided".into(),
+            secret: "secret-is-test-only".into(),
+        };
+
+        assert_eq!(
+            SecretRequiredEvent::decode(required.encode_to_vec().as_slice()).expect("required"),
+            required
+        );
+        assert_eq!(
+            HostSecretResponse::decode(response.encode_to_vec().as_slice()).expect("response"),
+            response
         );
     }
 }

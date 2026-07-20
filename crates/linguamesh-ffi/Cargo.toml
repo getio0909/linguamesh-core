@@ -9,12 +9,14 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+linguamesh-application.workspace = true
 linguamesh-domain.workspace = true
 linguamesh-engine.workspace = true
 linguamesh-protocol.workspace = true
 linguamesh-provider-openai.workspace = true
 prost.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 linguamesh-testkit.workspace = true

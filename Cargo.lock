@@ -823,6 +823,7 @@ dependencies = [
 name = "linguamesh-ffi"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "linguamesh-application",
  "linguamesh-domain",
  "linguamesh-engine",
  "linguamesh-protocol",
@@ -830,6 +831,7 @@ dependencies = [
  "linguamesh-testkit",
  "prost",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

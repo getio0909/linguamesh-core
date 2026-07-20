@@ -20,6 +20,7 @@ message TranslateTextCommand {
   string model_id = 2;
   string source_text = 3;
   string target_locale = 4;
+  string secret_ref = 5;
 }
 
 message TextDeltaEvent {
@@ -29,4 +30,15 @@ message TextDeltaEvent {
 message FailureEvent {
   string error_kind = 1;
   string message = 2;
+}
+
+message SecretRequiredEvent {
+  string request_id = 1;
+  string secret_ref = 2;
+}
+
+message HostSecretResponse {
+  string request_id = 1;
+  string resolution = 2;
+  string secret = 3;
 }

@@ -1,13 +1,15 @@
 #![doc = "`LinguaMesh` 的稳定 C ABI 实现。"]
 #![allow(clippy::missing_safety_doc)]
 
+use linguamesh_application::{HostSecretBroker, SecretRequestLease, host_secret_channel};
 use linguamesh_domain::{
-    CorrelationId, ErrorKind, OperationId, TranslationEvent, TranslationRequest,
+    CorrelationId, ErrorKind, OperationId, SecretRef, SecretValue, TranslationEvent,
+    TranslationRequest,
 };
 use linguamesh_engine::{CancellationHandle, TranslationEngine, TranslationOperation};
 use linguamesh_protocol::{
-    ABI_VERSION_MAJOR, Envelope, FailureEvent, PROTOCOL_VERSION, TextDeltaEvent,
-    TranslateTextCommand, message_type,
+    ABI_VERSION_MAJOR, Envelope, FailureEvent, HostSecretResponse, PROTOCOL_VERSION,
+    SecretRequiredEvent, TextDeltaEvent, TranslateTextCommand, message_type,
 };
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use prost::Message;
@@ -19,10 +21,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 
 const EVENT_QUEUE_CAPACITY: usize = 64;
 const MAX_OUTSTANDING_BUFFERS: usize = 64;
 const MAX_PROTOCOL_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_HOST_SECRET_BYTES: usize = 64 * 1024;
 
 /// 表示 ABI 调用结果。
 #[repr(i32)]
@@ -73,6 +77,12 @@ struct BufferAllocation {
     _slot: OwnedSemaphorePermit,
 }
 
+struct PendingHostRequest {
+    lease: SecretRequestLease,
+    operation_id: String,
+    correlation_id: String,
+}
+
 /// 表示不向调用方暴露内部布局的引擎句柄。
 pub struct LmEngine {
     shutdown: AtomicBool,
@@ -80,6 +90,7 @@ pub struct LmEngine {
     event_sender: mpsc::Sender<Vec<u8>>,
     events: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     active: Arc<Mutex<Option<ActiveOperation>>>,
+    pending_host_requests: Arc<Mutex<HashMap<String, PendingHostRequest>>>,
     buffer_allocations: Mutex<HashMap<u64, BufferAllocation>>,
     buffer_slots: Arc<Semaphore>,
     next_buffer_allocation_id: AtomicU64,
@@ -109,6 +120,7 @@ pub unsafe extern "C" fn lm_engine_create(output: *mut *mut LmEngine) -> LmResul
             event_sender,
             events: tokio::sync::Mutex::new(events),
             active: Arc::new(Mutex::new(None)),
+            pending_host_requests: Arc::new(Mutex::new(HashMap::new())),
             buffer_allocations: Mutex::new(HashMap::new()),
             buffer_slots: Arc::new(Semaphore::new(MAX_OUTSTANDING_BUFFERS)),
             next_buffer_allocation_id: AtomicU64::new(1),
@@ -152,7 +164,7 @@ pub unsafe extern "C" fn lm_engine_submit(
         };
         // SAFETY：解码成功证明句柄非空且在本次调用期间有效。
         let engine = unsafe { &*engine };
-        engine.submit(envelope)
+        engine.submit(&envelope)
     })
 }
 
@@ -165,10 +177,13 @@ pub unsafe extern "C" fn lm_engine_send_host_response(
 ) -> LmResultCode {
     ffi_guard(|| {
         // SAFETY：调用方保证句柄和消息缓冲区在本次同步调用期间有效。
-        match unsafe { decode_protocol_input(engine, response_data, response_len) } {
-            Ok(_) => LmResultCode::UnsupportedMessage,
-            Err(code) => code,
-        }
+        let envelope = match unsafe { decode_protocol_input(engine, response_data, response_len) } {
+            Ok(envelope) => envelope,
+            Err(code) => return code,
+        };
+        // SAFETY：解码成功证明句柄非空且在本次调用期间有效。
+        let engine = unsafe { &*engine };
+        engine.send_host_response(&envelope)
     })
 }
 
@@ -324,7 +339,7 @@ pub unsafe extern "C" fn lm_engine_buffer_free(
 }
 
 impl LmEngine {
-    fn submit(&self, envelope: Envelope) -> LmResultCode {
+    fn submit(&self, envelope: &Envelope) -> LmResultCode {
         if self.shutdown.load(Ordering::Acquire) {
             return LmResultCode::Shutdown;
         }
@@ -344,12 +359,24 @@ impl LmEngine {
         {
             return LmResultCode::MalformedMessage;
         }
+        let secret_ref = if command.secret_ref.is_empty() {
+            None
+        } else {
+            match SecretRef::parse(command.secret_ref.clone()) {
+                Ok(secret_ref) => Some(secret_ref),
+                Err(_) => return LmResultCode::MalformedMessage,
+            }
+        };
         let mut active = lock_unpoisoned(&self.active);
         if self.shutdown.load(Ordering::Acquire) {
             return LmResultCode::Shutdown;
         }
         if active.is_some() {
             return LmResultCode::Busy;
+        }
+        if let Some(secret_ref) = secret_ref {
+            drop(active);
+            return self.submit_with_host_secret(envelope, command, secret_ref);
         }
         let Ok(provider) =
             OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(command.endpoint))
@@ -373,8 +400,8 @@ impl LmEngine {
         let sender = self.event_sender.clone();
         let active = Arc::clone(&self.active);
         self.runtime.spawn(forward_events(
-            envelope.operation_id,
-            envelope.correlation_id,
+            envelope.operation_id.clone(),
+            envelope.correlation_id.clone(),
             operation,
             sender,
             active,
@@ -434,6 +461,142 @@ impl LmEngine {
         };
         LmResultCode::Ok
     }
+
+    fn submit_with_host_secret(
+        &self,
+        envelope: &Envelope,
+        command: TranslateTextCommand,
+        secret_ref: SecretRef,
+    ) -> LmResultCode {
+        if OpenAiCompatibleProvider::validate_endpoint(&command.endpoint).is_err() {
+            return LmResultCode::InvalidArgument;
+        }
+        let Ok((broker, requests)) = host_secret_channel(1) else {
+            return LmResultCode::Internal;
+        };
+        let cancellation = CancellationToken::new();
+        let operation_id = envelope.operation_id.clone();
+        let correlation_id = envelope.correlation_id.clone();
+        let sender = self.event_sender.clone();
+        let pending = Arc::clone(&self.pending_host_requests);
+        let request_operation_id = operation_id.clone();
+        let request_correlation_id = correlation_id.clone();
+        let request_pending = Arc::clone(&pending);
+        let request_task = async move {
+            let mut requests = requests;
+            while let Some(lease) = requests.recv().await {
+                let required = lease.required().clone();
+                lock_unpoisoned(&request_pending).insert(
+                    required.request_id.as_str().to_owned(),
+                    PendingHostRequest {
+                        lease,
+                        operation_id: request_operation_id.clone(),
+                        correlation_id: request_correlation_id.clone(),
+                    },
+                );
+                let event = Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    operation_id: request_operation_id.clone(),
+                    correlation_id: request_correlation_id.clone(),
+                    sequence: 0,
+                    message_type: message_type::SECRET_REQUIRED.into(),
+                    payload: SecretRequiredEvent {
+                        request_id: required.request_id.as_str().into(),
+                        secret_ref: required.secret_ref.as_str().into(),
+                    }
+                    .encode_to_vec(),
+                }
+                .encode_to_vec();
+                if sender.send(event).await.is_err() {
+                    break;
+                }
+            }
+        };
+        self.runtime.spawn(request_task);
+        {
+            let mut active = lock_unpoisoned(&self.active);
+            if active.is_some() {
+                return LmResultCode::Busy;
+            }
+            *active = Some(ActiveOperation {
+                operation_id: operation_id.clone(),
+                cancellation: CancellationHandle::from_token(cancellation.clone()),
+            });
+        }
+        let sender = self.event_sender.clone();
+        let active = Arc::clone(&self.active);
+        self.runtime
+            .spawn(run_host_secret_translation(HostSecretTranslation {
+                operation_id,
+                correlation_id,
+                command,
+                secret_ref,
+                broker,
+                cancellation,
+                sender,
+                active,
+                pending,
+            }));
+        LmResultCode::Ok
+    }
+
+    fn send_host_response(&self, envelope: &Envelope) -> LmResultCode {
+        if envelope.message_type != message_type::HOST_SECRET_RESPONSE {
+            return LmResultCode::UnsupportedMessage;
+        }
+        if envelope.sequence != 0 {
+            return LmResultCode::MalformedMessage;
+        }
+        let active = lock_unpoisoned(&self.active);
+        if active.as_ref().is_none_or(|value| {
+            value.operation_id != envelope.operation_id || envelope.correlation_id.is_empty()
+        }) {
+            return LmResultCode::InvalidArgument;
+        }
+        drop(active);
+        let Ok(response) = HostSecretResponse::decode(envelope.payload.as_slice()) else {
+            return LmResultCode::MalformedMessage;
+        };
+        if response.request_id.is_empty() || response.request_id.len() > 128 {
+            return LmResultCode::MalformedMessage;
+        }
+        let valid_resolution = match response.resolution.as_str() {
+            "provided" => {
+                !response.secret.is_empty() && response.secret.len() <= MAX_HOST_SECRET_BYTES
+            }
+            "unavailable" | "secure_storage_unavailable" => response.secret.is_empty(),
+            _ => false,
+        };
+        if !valid_resolution {
+            return LmResultCode::MalformedMessage;
+        }
+        let mut pending_requests = lock_unpoisoned(&self.pending_host_requests);
+        let Some(pending) = pending_requests.get(&response.request_id) else {
+            return LmResultCode::InvalidArgument;
+        };
+        if pending.operation_id != envelope.operation_id
+            || pending.correlation_id != envelope.correlation_id
+        {
+            return LmResultCode::InvalidArgument;
+        }
+        let pending = pending_requests
+            .remove(&response.request_id)
+            .expect("validated pending host request");
+        drop(pending_requests);
+        let lease = pending.lease;
+        match response.resolution.as_str() {
+            "provided" if !response.secret.is_empty() => lease
+                .provide_secret(SecretValue::new(response.secret))
+                .map_or(LmResultCode::InvalidArgument, |()| LmResultCode::Ok),
+            "unavailable" if response.secret.is_empty() => lease
+                .reject_unavailable()
+                .map_or(LmResultCode::InvalidArgument, |()| LmResultCode::Ok),
+            "secure_storage_unavailable" if response.secret.is_empty() => lease
+                .reject_secure_storage_unavailable()
+                .map_or(LmResultCode::InvalidArgument, |()| LmResultCode::Ok),
+            _ => LmResultCode::MalformedMessage,
+        }
+    }
 }
 
 async fn forward_events(
@@ -451,6 +614,105 @@ async fn forward_events(
         }
     }
     let mut current = lock_unpoisoned(&active);
+    if current
+        .as_ref()
+        .is_some_and(|value| value.operation_id == operation_id)
+    {
+        *current = None;
+    }
+}
+
+struct HostSecretTranslation {
+    operation_id: String,
+    correlation_id: String,
+    command: TranslateTextCommand,
+    secret_ref: SecretRef,
+    broker: HostSecretBroker,
+    cancellation: CancellationToken,
+    sender: mpsc::Sender<Vec<u8>>,
+    active: Arc<Mutex<Option<ActiveOperation>>>,
+    pending: Arc<Mutex<HashMap<String, PendingHostRequest>>>,
+}
+
+async fn run_host_secret_translation(context: HostSecretTranslation) {
+    let HostSecretTranslation {
+        operation_id,
+        correlation_id,
+        command,
+        secret_ref,
+        broker,
+        cancellation,
+        sender,
+        active,
+        pending,
+    } = context;
+    let credential = broker.resolve(&secret_ref, &cancellation).await;
+    let secret = match credential {
+        Ok(secret) => secret,
+        Err(error) => {
+            let event = if error.kind == ErrorKind::Cancelled {
+                TranslationEvent::Cancelled { sequence: 1 }
+            } else {
+                TranslationEvent::Failed { sequence: 1, error }
+            };
+            let _ = sender
+                .send(encode_event(&operation_id, &correlation_id, event))
+                .await;
+            lock_unpoisoned(&pending).clear();
+            clear_active(&active, &operation_id);
+            return;
+        }
+    };
+    let Ok(provider) =
+        OpenAiCompatibleProvider::new(OpenAiConfig::with_credential(command.endpoint, secret))
+    else {
+        let error = linguamesh_domain::TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "The provider endpoint is invalid or unsafe.",
+        );
+        let _ = sender
+            .send(encode_event(
+                &operation_id,
+                &correlation_id,
+                TranslationEvent::Failed { sequence: 1, error },
+            ))
+            .await;
+        lock_unpoisoned(&pending).clear();
+        clear_active(&active, &operation_id);
+        return;
+    };
+    let mut request =
+        TranslationRequest::new(command.source_text, command.target_locale, command.model_id);
+    request.operation_id = OperationId::from_value(operation_id.clone());
+    request.correlation_id = CorrelationId::from_value(correlation_id.clone());
+    let translation_engine = TranslationEngine::new(Arc::new(provider));
+    let operation = translation_engine.translate_with_sequence_offset(request, 1);
+    let operation_cancellation = operation.cancellation_handle();
+    {
+        let mut current = lock_unpoisoned(&active);
+        if current
+            .as_ref()
+            .is_some_and(|value| value.operation_id == operation_id)
+        {
+            *current = Some(ActiveOperation {
+                operation_id: operation_id.clone(),
+                cancellation: operation_cancellation,
+            });
+        }
+    }
+    forward_events(
+        operation_id.clone(),
+        correlation_id,
+        operation,
+        sender,
+        Arc::clone(&active),
+    )
+    .await;
+    lock_unpoisoned(&pending).clear();
+}
+
+fn clear_active(active: &Arc<Mutex<Option<ActiveOperation>>>, operation_id: &str) {
+    let mut current = lock_unpoisoned(active);
     if current
         .as_ref()
         .is_some_and(|value| value.operation_id == operation_id)
@@ -565,8 +827,10 @@ mod tests {
         lm_engine_get_protocol_version, lm_engine_get_version, lm_engine_poll_event,
         lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
     };
+    use linguamesh_domain::SecretValue;
     use linguamesh_protocol::{
-        Envelope, PROTOCOL_VERSION, TextDeltaEvent, TranslateTextCommand, message_type,
+        Envelope, HostSecretResponse, PROTOCOL_VERSION, SecretRequiredEvent, TextDeltaEvent,
+        TranslateTextCommand, message_type,
     };
     use linguamesh_testkit::FakeProviderServer;
     use prost::Message;
@@ -963,6 +1227,7 @@ mod tests {
                 model_id: "fake-translator".into(),
                 source_text: "Hello".into(),
                 target_locale: "zh-CN".into(),
+                secret_ref: String::new(),
             }
             .encode_to_vec(),
         }
@@ -1046,6 +1311,44 @@ mod tests {
         server.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffi_host_secret_flow_emits_required_and_accepts_one_shot_response() {
+        const SECRET_CANARY: &str = concat!("s", "k", "-LM_FFI_SECRET_CANARY_123456");
+        let server =
+            FakeProviderServer::start_requiring_bearer_token(SecretValue::new(SECRET_CANARY))
+                .await
+                .expect("server");
+        let endpoint = server.base_url();
+        let events = tokio::task::spawn_blocking(move || {
+            run_ffi_authenticated_translation(&endpoint, SECRET_CANARY)
+        })
+        .await
+        .expect("native task");
+        let output = events
+            .iter()
+            .filter(|event| event.message_type == message_type::TEXT_DELTA)
+            .map(|event| {
+                TextDeltaEvent::decode(event.payload.as_slice())
+                    .expect("delta")
+                    .text
+            })
+            .collect::<String>();
+        assert_eq!(output, "你好，LinguaMesh！");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.message_type == message_type::SECRET_REQUIRED)
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.message_type == message_type::COMPLETED)
+        );
+        server.shutdown().await;
+    }
+
     fn run_ffi_translation(endpoint: &str, cancel_after_delta: bool) -> Vec<Envelope> {
         let mut engine: *mut LmEngine = ptr::null_mut();
         // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
@@ -1063,6 +1366,7 @@ mod tests {
             model_id: model_id.into(),
             source_text: "Hello".into(),
             target_locale: "zh-CN".into(),
+            secret_ref: String::new(),
         };
         let envelope = encoded_envelope(
             PROTOCOL_VERSION,
@@ -1080,6 +1384,94 @@ mod tests {
             if event.message_type == message_type::TEXT_DELTA && cancel_after_delta {
                 // SAFETY：句柄仍然有效且当前操作尚未终止。
                 assert_eq!(unsafe { lm_engine_cancel(engine) }, LmResultCode::Ok);
+            }
+            let terminal = matches!(
+                event.message_type.as_str(),
+                message_type::COMPLETED | message_type::CANCELLED | message_type::FAILED
+            );
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+        events
+    }
+
+    fn run_ffi_authenticated_translation(endpoint: &str, secret: &str) -> Vec<Envelope> {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let command = TranslateTextCommand {
+            endpoint: endpoint.into(),
+            model_id: "fake-translator".into(),
+            source_text: "Hello".into(),
+            target_locale: "zh-CN".into(),
+            secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
+        };
+        let envelope = encoded_envelope(
+            PROTOCOL_VERSION,
+            message_type::TRANSLATE_TEXT,
+            command.encode_to_vec(),
+        );
+        // SAFETY：编码消息在调用期间保持有效且句柄尚未销毁。
+        assert_eq!(
+            unsafe { lm_engine_submit(engine, envelope.as_ptr(), envelope.len()) },
+            LmResultCode::Ok
+        );
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            let event = poll_envelope(engine);
+            if event.message_type == message_type::SECRET_REQUIRED {
+                let required =
+                    SecretRequiredEvent::decode(event.payload.as_slice()).expect("secret required");
+                assert_eq!(
+                    required.secret_ref,
+                    "session:11111111-1111-4111-8111-111111111111"
+                );
+                let response = Envelope {
+                    protocol_version: PROTOCOL_VERSION,
+                    operation_id: event.operation_id.clone(),
+                    correlation_id: event.correlation_id.clone(),
+                    sequence: 0,
+                    message_type: message_type::HOST_SECRET_RESPONSE.into(),
+                    payload: HostSecretResponse {
+                        request_id: required.request_id,
+                        resolution: "provided".into(),
+                        secret: secret.into(),
+                    }
+                    .encode_to_vec(),
+                }
+                .encode_to_vec();
+                let mut mismatched =
+                    Envelope::decode(response.as_slice()).expect("response envelope");
+                mismatched.correlation_id = "wrong-correlation".into();
+                let mismatched = mismatched.encode_to_vec();
+                // SAFETY：错误关联的响应必须被拒绝且不能消耗待处理请求。
+                assert_eq!(
+                    unsafe {
+                        lm_engine_send_host_response(engine, mismatched.as_ptr(), mismatched.len())
+                    },
+                    LmResultCode::InvalidArgument
+                );
+                // SAFETY：响应缓冲区在调用期间保持有效且句柄尚未销毁。
+                assert_eq!(
+                    unsafe {
+                        lm_engine_send_host_response(engine, response.as_ptr(), response.len())
+                    },
+                    LmResultCode::Ok
+                );
+                // SAFETY：一次性响应再次提交必须被拒绝。
+                assert_eq!(
+                    unsafe {
+                        lm_engine_send_host_response(engine, response.as_ptr(), response.len())
+                    },
+                    LmResultCode::InvalidArgument
+                );
             }
             let terminal = matches!(
                 event.message_type.as_str(),

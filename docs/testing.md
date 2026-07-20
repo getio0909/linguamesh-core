@@ -83,5 +83,6 @@ provider disconnect, and adapter rejection before any secret request. Domain tes
 endpoints before a profile can reach the application layer.
 
 These tests exercise an in-process fake host. Linux Secret Service behavior, session-only fallback,
-and native restart restoration remain client-repository gates. The C ABI host-response projection
-also remains unimplemented and is not covered by the typed Rust broker tests.
+and native restart restoration remain client-repository gates. The FFI regression additionally
+emits a versioned `secret_required` event, accepts one matching `host_secret_response`, rejects a
+replay, and completes an authenticated loopback translation without exposing the canary.

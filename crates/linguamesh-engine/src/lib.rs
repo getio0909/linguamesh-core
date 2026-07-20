@@ -78,12 +78,22 @@ impl TranslationEngine {
     /// 启动操作并立即返回可取消的有界事件接收器。
     #[must_use]
     pub fn translate(&self, request: TranslationRequest) -> TranslationOperation {
+        self.translate_with_sequence_offset(request, 0)
+    }
+
+    /// 启动操作并从给定序号开始产生事件。
+    #[must_use]
+    pub fn translate_with_sequence_offset(
+        &self,
+        request: TranslationRequest,
+        sequence_offset: u64,
+    ) -> TranslationOperation {
         let provider = Arc::clone(&self.provider);
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
         tokio::spawn(async move {
-            let mut sequence = 0;
+            let mut sequence = sequence_offset;
             let validation_request = request.clone();
             let mut output = String::new();
             if sender
@@ -171,6 +181,12 @@ pub struct CancellationHandle {
 }
 
 impl CancellationHandle {
+    /// 从宿主服务连接阶段使用的令牌创建取消句柄。
+    #[must_use]
+    pub fn from_token(cancellation: CancellationToken) -> Self {
+        Self { cancellation }
+    }
+
     /// 请求底层提供商操作停止且不进行重试。
     pub fn cancel(&self) {
         self.cancellation.cancel();
