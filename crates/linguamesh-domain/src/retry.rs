@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// 默认退避初始等待时间，保持网络失败的首次回退短且可取消。
@@ -13,7 +13,7 @@ pub const DEFAULT_RETRY_CIRCUIT_FAILURE_THRESHOLD: u32 = 2;
 pub const DEFAULT_RETRY_CIRCUIT_COOLDOWN_MS: u64 = 30_000;
 
 /// 描述跨客户端共享的有界回退和熔断参数。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct RetryPolicy {
     base_delay_ms: u64,
     max_backoff_ms: u64,
@@ -21,6 +21,34 @@ pub struct RetryPolicy {
     circuit_failure_threshold: u32,
     circuit_cooldown_ms: u64,
     respect_retry_after: bool,
+}
+
+impl<'de> Deserialize<'de> for RetryPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RetryPolicyFields {
+            base_delay_ms: u64,
+            max_backoff_ms: u64,
+            jitter_percent: u8,
+            circuit_failure_threshold: u32,
+            circuit_cooldown_ms: u64,
+            respect_retry_after: bool,
+        }
+
+        let fields = RetryPolicyFields::deserialize(deserializer)?;
+        Self::new(
+            fields.base_delay_ms,
+            fields.max_backoff_ms,
+            fields.jitter_percent,
+            fields.circuit_failure_threshold,
+            fields.circuit_cooldown_ms,
+            fields.respect_retry_after,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl RetryPolicy {
@@ -208,5 +236,30 @@ mod tests {
         assert!(!policy.respect_retry_after());
         assert_eq!(policy.bounded_retry_after_ms(Some(1_000)), None);
         assert_eq!(policy.max_backoff_ms(), 2_000);
+    }
+
+    #[test]
+    fn deserialization_reuses_constructor_bounds() {
+        let encoded = serde_json::json!({
+            "base_delay_ms": 100,
+            "max_backoff_ms": 60001,
+            "jitter_percent": 50,
+            "circuit_failure_threshold": 2,
+            "circuit_cooldown_ms": 30000,
+            "respect_retry_after": true,
+        });
+
+        let result = serde_json::from_value::<RetryPolicy>(encoded);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serialization_round_trip_preserves_valid_policy() {
+        let policy = RetryPolicy::new(100, 2_000, 25, 3, 10_000, false).expect("policy");
+        let encoded = serde_json::to_value(policy).expect("serialize policy");
+        let decoded = serde_json::from_value::<RetryPolicy>(encoded).expect("deserialize policy");
+
+        assert_eq!(decoded, policy);
     }
 }
