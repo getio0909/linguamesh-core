@@ -1,5 +1,17 @@
 # Implementation Status
 
+## 2026-07-20 — Short-text chunking regression fix
+
+Assumption: the default approximate byte budget should only split text when the complete protected
+source exceeds that budget; semantic whitespace boundaries remain available for oversized text.
+
+- Core `ac1161cf7d90e5d44ec06cba9a4d667d44b0f9ac` keeps any protected source at or below the
+  configured chunk limit as one chunk, preventing duplicate provider requests for short
+  whitespace-containing input. A domain regression covers `Hello again`.
+- Local `cargo fmt --all -- --check`, strict workspace Clippy, all-target/all-feature tests, and
+  locked workspace build passed. Core Native SDK run `29764592256` passed Linux, Windows, Android,
+  and Apple jobs. No stable release or artifact promotion is claimed.
+
 ## 2026-07-20 — Persisted document translation presets
 
 Assumption: document jobs persist the same bounded, non-secret preset contract as text requests;
