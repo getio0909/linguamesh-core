@@ -9,7 +9,9 @@ use linguamesh_domain::{
     ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
     TranslationError, TranslationRequest, protect_source_text_with_glossary,
 };
-use linguamesh_provider_api::{ModelProvider, TranslationStream, translation_prompt};
+use linguamesh_provider_api::{
+    ModelProvider, TranslationStream, retry_after_ms, translation_prompt,
+};
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -532,6 +534,11 @@ fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, Tran
     if status.is_success() {
         return Ok(response);
     }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(retry_after_ms);
     let kind = match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ErrorKind::Authentication,
         StatusCode::NOT_FOUND => ErrorKind::ModelUnavailable,
@@ -540,7 +547,8 @@ fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, Tran
     Err(TranslationError::new(
         kind,
         format!("Provider request failed with HTTP status {status}."),
-    ))
+    )
+    .with_retry_after_ms(retry_after))
 }
 
 fn map_reqwest_error(error: &reqwest::Error) -> TranslationError {

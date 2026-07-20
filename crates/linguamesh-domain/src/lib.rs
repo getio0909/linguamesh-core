@@ -1950,6 +1950,9 @@ pub struct TranslationError {
     pub kind: ErrorKind,
     /// 面向调用方的安全英文消息。
     pub message: String,
+    /// 提供商声明的建议重试等待时间，缺失或异常值保持为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
 }
 
 impl TranslationError {
@@ -1959,7 +1962,15 @@ impl TranslationError {
         Self {
             kind,
             message: message.into(),
+            retry_after_ms: None,
         }
+    }
+
+    /// 附加经过边界检查的提供商重试提示。
+    #[must_use]
+    pub const fn with_retry_after_ms(mut self, retry_after_ms: Option<u64>) -> Self {
+        self.retry_after_ms = retry_after_ms;
+        self
     }
 
     /// 创建取消错误。
@@ -1975,6 +1986,7 @@ impl fmt::Debug for TranslationError {
             .debug_struct("TranslationError")
             .field("kind", &self.kind)
             .field("message", &self.message)
+            .field("retry_after_ms", &self.retry_after_ms)
             .finish()
     }
 }
@@ -2059,6 +2071,20 @@ mod tests {
         };
         assert!(failed.is_terminal());
         assert_eq!(failed.sequence(), 4);
+    }
+
+    #[test]
+    fn translation_error_retry_hint_is_optional_and_backward_compatible() {
+        let error = TranslationError::new(ErrorKind::Network, "Retry later.")
+            .with_retry_after_ms(Some(1_500));
+        let encoded = serde_json::to_value(&error).expect("serialize retry hint");
+        assert_eq!(encoded["retry_after_ms"], 1_500);
+        let decoded: TranslationError = serde_json::from_value(serde_json::json!({
+            "kind": "network",
+            "message": "Retry later."
+        }))
+        .expect("decode legacy error");
+        assert_eq!(decoded.retry_after_ms, None);
     }
 
     #[test]

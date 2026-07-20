@@ -7,6 +7,7 @@ use linguamesh_domain::{
     TranslationRequest,
 };
 use std::pin::Pin;
+use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 /// 包装增量翻译文本流。
@@ -15,6 +16,19 @@ pub type TranslationStream =
 
 /// 当前受版本控制的翻译提示词模板。
 pub const TRANSLATION_PROMPT_TEMPLATE_VERSION: &str = "translation-prompt-v2";
+
+/// 将 Retry-After 的秒数或 HTTP 日期限制为安全的毫秒等待提示。
+#[must_use]
+pub fn retry_after_ms(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    let duration = if let Ok(seconds) = trimmed.parse::<u64>() {
+        Duration::from_secs(seconds)
+    } else {
+        let deadline = httpdate::parse_http_date(trimmed).ok()?;
+        deadline.duration_since(SystemTime::now()).ok()?
+    };
+    Some(duration.as_millis().min(60_000) as u64)
+}
 
 /// 构建隔离不可信源文本的提供商无关提示词。
 #[must_use]
@@ -89,7 +103,7 @@ pub trait ModelProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{TRANSLATION_PROMPT_TEMPLATE_VERSION, translation_prompt};
+    use super::{TRANSLATION_PROMPT_TEMPLATE_VERSION, retry_after_ms, translation_prompt};
     use linguamesh_domain::{TranslationPreset, TranslationQualityMode};
 
     #[test]
@@ -105,5 +119,12 @@ mod tests {
         assert!(prompt.contains("internal critique and revision"));
         assert!(prompt.contains("technical documentation"));
         assert!(prompt.ends_with("marker"));
+    }
+
+    #[test]
+    fn retry_after_parser_bounds_delta_seconds() {
+        assert_eq!(retry_after_ms("2"), Some(2_000));
+        assert_eq!(retry_after_ms("999999"), Some(60_000));
+        assert_eq!(retry_after_ms("not-a-delay"), None);
     }
 }

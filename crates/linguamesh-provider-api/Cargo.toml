@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures-core.workspace = true
+httpdate.workspace = true
 linguamesh-domain.workspace = true
 tokio-util.workspace = true
 
