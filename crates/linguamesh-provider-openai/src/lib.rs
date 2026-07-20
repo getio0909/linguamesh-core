@@ -33,6 +33,71 @@ pub struct OpenAiConfig {
     pub request_timeout: Duration,
 }
 
+/// 配置 Azure `OpenAI` Chat Completions 部署端点。
+pub struct AzureOpenAiConfig {
+    /// Azure `OpenAI` 资源根地址，例如 `https://resource.openai.azure.com/`。
+    pub base_url: String,
+    /// Azure 部署名；该值也作为用户可选择的手工模型标识。
+    pub deployment: String,
+    /// Azure API 版本查询参数。
+    pub api_version: String,
+    /// 可选的一次性内存凭据。
+    pub credential: Option<SecretValue>,
+    /// 连接和普通响应超时。
+    pub request_timeout: Duration,
+}
+
+impl AzureOpenAiConfig {
+    /// 创建没有凭据的本地或测试配置。
+    #[must_use]
+    pub fn without_credential(
+        base_url: impl Into<String>,
+        deployment: impl Into<String>,
+        api_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            deployment: deployment.into(),
+            api_version: api_version.into(),
+            credential: None,
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// 创建携带一次性内存凭据的配置。
+    #[must_use]
+    pub fn with_credential(
+        base_url: impl Into<String>,
+        deployment: impl Into<String>,
+        api_version: impl Into<String>,
+        credential: SecretValue,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            deployment: deployment.into(),
+            api_version: api_version.into(),
+            credential: Some(credential),
+            request_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl fmt::Debug for AzureOpenAiConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AzureOpenAiConfig")
+            .field("base_url", &"[REDACTED]")
+            .field("deployment", &self.deployment)
+            .field("api_version", &self.api_version)
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("request_timeout", &self.request_timeout)
+            .finish()
+    }
+}
+
 impl OpenAiConfig {
     /// 创建没有凭据的本地或测试配置。
     #[must_use]
@@ -76,6 +141,16 @@ pub struct OpenAiCompatibleProvider {
     base_url: Url,
     credential: Arc<Mutex<CredentialState>>,
     session_cancellation: CancellationToken,
+    protocol: OpenAiProtocol,
+}
+
+#[derive(Clone, Debug)]
+enum OpenAiProtocol {
+    ChatCompletions,
+    AzureChatCompletions {
+        deployment: String,
+        api_version: String,
+    },
 }
 
 enum CredentialState {
@@ -99,6 +174,7 @@ impl fmt::Debug for OpenAiCompatibleProvider {
             .field("base_url", &"[REDACTED]")
             .field("credential_state", &credential_state)
             .field("session_closed", &self.session_cancellation.is_cancelled())
+            .field("protocol", &self.protocol)
             .finish_non_exhaustive()
     }
 }
@@ -111,21 +187,69 @@ impl OpenAiCompatibleProvider {
 
     /// 创建拒绝跨源重定向的适配器。
     pub fn new(config: OpenAiConfig) -> Result<Self, TranslationError> {
-        let base_url = validated_base_url(&config.base_url)?;
+        Self::new_with_protocol(
+            &config.base_url,
+            config.credential,
+            config.request_timeout,
+            OpenAiProtocol::ChatCompletions,
+        )
+    }
+
+    /// 创建 Azure `OpenAI` Chat Completions 适配器。
+    pub fn new_azure(config: AzureOpenAiConfig) -> Result<Self, TranslationError> {
+        let deployment = validate_segment(&config.deployment, "Azure deployment")?;
+        let api_version = validate_query_value(&config.api_version, "Azure API version")?;
+        let resource_url = validated_base_url(&config.base_url)?;
+        let base_url = resource_url
+            .join("openai/deployments/")
+            .and_then(|url| url.join(&format!("{deployment}/")))
+            .map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::InvalidEndpoint,
+                    "Azure OpenAI deployment endpoint is invalid.",
+                )
+            })?;
+        Self::new_with_protocol(
+            base_url.as_str(),
+            config.credential,
+            config.request_timeout,
+            OpenAiProtocol::AzureChatCompletions {
+                deployment,
+                api_version,
+            },
+        )
+    }
+
+    /// 在请求宿主秘密之前验证 Azure 资源端点和部署配置。
+    pub fn validate_azure_endpoint(
+        base_url: &str,
+        deployment: &str,
+        api_version: &str,
+    ) -> Result<(), TranslationError> {
+        let config = AzureOpenAiConfig::without_credential(base_url, deployment, api_version);
+        Self::new_azure(config).map(|_| ())
+    }
+
+    fn new_with_protocol(
+        base_url: &str,
+        credential: Option<SecretValue>,
+        request_timeout: Duration,
+        protocol: OpenAiProtocol,
+    ) -> Result<Self, TranslationError> {
+        let base_url = validated_base_url(base_url)?;
         let client = Client::builder()
             .redirect(Policy::none())
-            .timeout(config.request_timeout)
+            .timeout(request_timeout)
             .build()
             .map_err(|error| map_reqwest_error(&error))?;
         Ok(Self {
             client,
             base_url,
             credential: Arc::new(Mutex::new(
-                config
-                    .credential
-                    .map_or(CredentialState::NotRequired, CredentialState::Available),
+                credential.map_or(CredentialState::NotRequired, CredentialState::Available),
             )),
             session_cancellation: CancellationToken::new(),
+            protocol,
         })
     }
 
@@ -163,7 +287,12 @@ impl OpenAiCompatibleProvider {
         }
         match &mut *credential {
             CredentialState::NotRequired => Ok(request),
-            CredentialState::Available(secret) => Ok(request.bearer_auth(secret.expose_secret())),
+            CredentialState::Available(secret) => match self.protocol {
+                OpenAiProtocol::ChatCompletions => Ok(request.bearer_auth(secret.expose_secret())),
+                OpenAiProtocol::AzureChatCompletions { .. } => {
+                    Ok(request.header("api-key", secret.expose_secret()))
+                }
+            },
             CredentialState::Cleared => Err(TranslationError::new(
                 ErrorKind::SecretUnavailable,
                 "The provider credential session was cleared.",
@@ -172,9 +301,18 @@ impl OpenAiCompatibleProvider {
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, TranslationError> {
-        self.base_url.join(path).map_err(|_| {
+        let mut endpoint = self.base_url.join(path).map_err(|_| {
             TranslationError::new(ErrorKind::InvalidEndpoint, "Provider endpoint is invalid.")
-        })
+        })?;
+        if let OpenAiProtocol::AzureChatCompletions {
+            ref api_version, ..
+        } = self.protocol
+        {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("api-version", api_version);
+        }
+        Ok(endpoint)
     }
 
     async fn translate_protected_stream(
@@ -295,9 +433,44 @@ fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
     })
 }
 
+// 验证 Azure 路径段，避免把路径控制字符或额外层级带入请求地址。
+fn validate_segment(value: &str, label: &str) -> Result<String, TranslationError> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return Err(TranslationError::new(
+            ErrorKind::InvalidConfiguration,
+            format!("{label} is invalid."),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+// 验证 Azure 查询值，拒绝凭据和 URL 控制字符进入配置。
+fn validate_query_value(value: &str, label: &str) -> Result<String, TranslationError> {
+    if value.is_empty() || value.chars().any(char::is_control) || value.contains('&') {
+        return Err(TranslationError::new(
+            ErrorKind::InvalidConfiguration,
+            format!("{label} is invalid."),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, TranslationError> {
+        if let OpenAiProtocol::AzureChatCompletions { ref deployment, .. } = self.protocol {
+            return Ok(vec![ModelDescriptor {
+                id: deployment.clone(),
+                display_name: deployment.clone(),
+                source: ModelSource::Manual,
+            }]);
+        }
         let request = self
             .request(self.client.get(self.endpoint("models")?))?
             .send();

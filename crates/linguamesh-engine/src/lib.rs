@@ -20,6 +20,7 @@ pub const CORE_SEMANTIC_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// 当前核心可供客户端协商的稳定功能集合。
 pub const CORE_FEATURES: &[&str] = &[
     "cancellation_v1",
+    "azure_openai_chat_v1",
     "compatibility_negotiation_v1",
     "typed_rust_host_secret_broker_v1",
     "model_discovery_v1",

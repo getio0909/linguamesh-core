@@ -37,6 +37,13 @@
       "adapter": "gemini_generate_content",
       "model_listing": "gemini_models",
       "documentation_url": "https://ai.google.dev/api"
+    },
+    {
+      "id": "azure-openai",
+      "display_name": "Azure OpenAI",
+      "adapter": "azure_openai_chat",
+      "model_listing": "manual",
+      "documentation_url": "https://learn.microsoft.com/azure/ai-services/openai/reference"
     }
   ]
 }

@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn bundled_catalog_and_schema_are_valid_json() {
         let catalog = ProviderCatalog::bundled().expect("catalog");
-        assert_eq!(catalog.providers.len(), 5);
+        assert_eq!(catalog.providers.len(), 6);
         let schema: serde_json::Value =
             serde_json::from_str(ProviderCatalog::bundled_schema()).expect("schema");
         assert_eq!(schema["properties"]["schema_version"]["const"], 1);

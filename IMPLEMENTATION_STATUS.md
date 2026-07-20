@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-20 — Azure OpenAI Chat Completions adapter
+
+Assumption: Azure deployments are user-entered model identifiers and Azure model discovery is
+manual for this prerelease; the deterministic fixture verifies the wire contract without live
+credentials, quota, or account behavior.
+
+- Added the `azure_openai_chat` adapter and `azure-openai` catalog preset. The shared OpenAI
+  adapter now validates a resource root and deployment segment, sends `api-key` rather than
+  Bearer authentication, appends `api-version=2024-10-21`, returns a manual deployment descriptor,
+  preserves cancellation/protected-span behavior, and never puts credentials in URLs.
+- Added deterministic testkit and application coverage for unauthorized/authorized requests,
+  deployment paths, streamed `你好，Azure！` output, manual model selection, and secret-broker
+  correlation. Core targeted tests and strict checks pass; Linux integration is pending its pinned
+  Core/l10n revisions.
+
 ## 2026-07-20 — C ABI concurrent control-call checkpoint
 
 Assumption: native clients may issue cancellation, shutdown, and bounded event-poll calls from

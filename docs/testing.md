@@ -18,6 +18,9 @@ NDJSON, completion markers, and cancellation through the deterministic fixture.
 The Gemini fixture covers `/v1beta/models` filtering, fragmented Generate Content SSE candidates,
 and the terminal `finishReason` event; the Linux worker regression exercises the same fixture
 through `ProviderManager` without a credential.
+The Azure fixture covers a deployment-scoped Chat Completions path, `api-key` authentication,
+the pinned API-version query, manual deployment listing, streamed fragments, and redacted
+credential handling without a commercial credential.
 
 Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
 round-trip the optional document-job routing-profile ID without introducing endpoint or credential

@@ -9,7 +9,7 @@ use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use linguamesh_provider_api::ModelProvider;
 use linguamesh_provider_gemini::{GeminiConfig, GeminiProvider};
 use linguamesh_provider_ollama::{OllamaConfig, OllamaProvider};
-use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
+use linguamesh_provider_openai::{AzureOpenAiConfig, OpenAiCompatibleProvider, OpenAiConfig};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -228,9 +228,11 @@ impl ProviderManager {
         let is_ollama = profile.adapter_type() == "ollama_chat";
         let is_anthropic = profile.adapter_type() == "anthropic_messages";
         let is_gemini = profile.adapter_type() == "gemini_generate_content";
+        let is_azure = profile.adapter_type() == "azure_openai_chat";
         if !is_ollama
             && !is_anthropic
             && !is_gemini
+            && !is_azure
             && profile.adapter_type() != "openai_chat_completions"
         {
             return Err(TranslationError::new(
@@ -244,17 +246,33 @@ impl ProviderManager {
             AnthropicProvider::validate_endpoint(profile.base_endpoint())?;
         } else if is_gemini {
             GeminiProvider::validate_endpoint(profile.base_endpoint())?;
+        } else if is_azure {
+            let deployment = profile.selected_model().ok_or_else(|| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Select an Azure OpenAI deployment before connecting.",
+                )
+            })?;
+            OpenAiCompatibleProvider::validate_azure_endpoint(
+                profile.base_endpoint(),
+                deployment,
+                "2024-10-21",
+            )?;
         } else {
             OpenAiCompatibleProvider::validate_endpoint(profile.base_endpoint())?;
         }
-        let anthropic_model_id = if is_anthropic {
+        let manual_model_id = if is_anthropic || is_azure {
             Some(
                 profile
                     .selected_model()
                     .ok_or_else(|| {
                         TranslationError::new(
                             ErrorKind::InvalidConfiguration,
-                            "Select a manual Anthropic model before connecting.",
+                            if is_azure {
+                                "Select an Azure OpenAI deployment before connecting."
+                            } else {
+                                "Select a manual Anthropic model before connecting."
+                            },
                         )
                     })?
                     .to_owned(),
@@ -276,7 +294,7 @@ impl ProviderManager {
             };
             Arc::new(OllamaProvider::new(config)?)
         } else if is_anthropic {
-            let model_id = anthropic_model_id.ok_or_else(|| {
+            let model_id = manual_model_id.ok_or_else(|| {
                 TranslationError::new(
                     ErrorKind::InvalidConfiguration,
                     "Select a manual Anthropic model before connecting.",
@@ -295,6 +313,27 @@ impl ProviderManager {
                 None => GeminiConfig::without_credential(profile.base_endpoint()),
             };
             Arc::new(GeminiProvider::new(config)?)
+        } else if is_azure {
+            let deployment = manual_model_id.ok_or_else(|| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Select an Azure OpenAI deployment before connecting.",
+                )
+            })?;
+            let config = match credential {
+                Some(secret) => AzureOpenAiConfig::with_credential(
+                    profile.base_endpoint(),
+                    deployment,
+                    "2024-10-21",
+                    secret,
+                ),
+                None => AzureOpenAiConfig::without_credential(
+                    profile.base_endpoint(),
+                    deployment,
+                    "2024-10-21",
+                ),
+            };
+            Arc::new(OpenAiCompatibleProvider::new_azure(config)?)
         } else {
             let config = match credential {
                 Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
@@ -541,6 +580,56 @@ mod tests {
             }
         }
         assert_eq!(output, "你好，Ollama！");
+        manager.disconnect();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn azure_profile_uses_api_key_and_manual_deployment() {
+        let server = FakeProviderServer::start_azure().await.expect("server");
+        let provider = ProviderProfile::new(
+            ProviderProfileId::parse("azure-profile").expect("profile ID"),
+            "Azure provider",
+            "azure-openai",
+            "azure_openai_chat",
+            server.azure_base_url(),
+            Some(SecretRef::parse(PROVIDER_SECRET_REF).expect("secret ref")),
+        )
+        .expect("profile")
+        .with_selected_model(Some("fake-deployment".to_owned()))
+        .expect("deployment");
+        let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
+        let host = tokio::spawn(async move {
+            requests
+                .recv()
+                .await
+                .expect("secret request")
+                .provide_secret(SecretValue::new("azure-test-key"))
+                .expect("provide secret");
+        });
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("Azure connection");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "fake-deployment");
+        assert_eq!(models[0].source, linguamesh_domain::ModelSource::Manual);
+        let mut operation = manager
+            .active_engine()
+            .expect("active engine")
+            .translate(TranslationRequest::new("Hello", "zh-CN", "fake-deployment"));
+        let mut output = String::new();
+        while let Some(event) = operation.next_event().await {
+            match event {
+                TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed { .. } => break,
+                TranslationEvent::Failed { error, .. } => panic!("Azure failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(output, "你好，Azure！");
+        host.await.expect("host task");
         manager.disconnect();
         server.shutdown().await;
     }

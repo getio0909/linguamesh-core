@@ -67,6 +67,11 @@ identifiers are entered manually because the adapter has no general model-list r
 selected model is required before the host secret broker is queried. Local fixtures cover the
 required version and API-key headers, streaming SSE, cancellation, and protected-span restoration.
 
+The `azure-openai` catalog entry uses Azure OpenAI Chat Completions with an HTTPS resource root,
+manual deployment name, `api-key` authentication, and the pinned `api-version=2024-10-21` query.
+The deterministic fixture verifies the deployment path, authentication header, and streamed output
+without a commercial credential.
+
 ## Secure provider foundation
 
 The `linguamesh-application` crate exposes a bounded, cancellable host-secret request channel and

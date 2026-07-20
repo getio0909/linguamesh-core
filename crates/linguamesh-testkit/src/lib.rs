@@ -75,6 +75,17 @@ impl FakeProviderServer {
         Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Gemini).await
     }
 
+    /// 启动要求 `api-key` 请求头的 Azure `OpenAI` 回环服务。
+    pub async fn start_azure() -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            Some(SecretValue::new("azure-test-key")),
+            Duration::ZERO,
+            FakeProviderFlavor::Azure,
+        )
+        .await
+    }
+
     async fn start_with_configuration(
         port: u16,
         expected_token: Option<SecretValue>,
@@ -90,6 +101,10 @@ impl FakeProviderServer {
         let app = Router::new()
             .route("/v1/models", get(models))
             .route("/v1/chat/completions", post(chat_completions))
+            .route(
+                "/openai/deployments/fake-deployment/chat/completions",
+                post(azure_chat_completions),
+            )
             .route("/api/tags", get(ollama_tags))
             .route("/api/chat", post(ollama_chat))
             .route("/v1beta/models", get(gemini_models))
@@ -139,6 +154,12 @@ impl FakeProviderServer {
         format!("http://{}/v1beta/", self.address)
     }
 
+    /// 返回 Azure `OpenAI` 资源根回环基础地址。
+    #[must_use]
+    pub fn azure_base_url(&self) -> String {
+        format!("http://{}/", self.address)
+    }
+
     /// 返回模型端点已进入处理的请求计数器。
     #[must_use]
     pub fn model_request_counter(&self) -> Arc<AtomicUsize> {
@@ -173,6 +194,7 @@ enum FakeProviderFlavor {
     Ollama,
     OllamaNative,
     Gemini,
+    Azure,
 }
 
 // 返回最小的 Gemini 模型发现响应，确保测试只依赖本地回环服务。
@@ -242,7 +264,7 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
         FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => json!([
             { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
         ]),
-        FakeProviderFlavor::Gemini => json!([]),
+        FakeProviderFlavor::Gemini | FakeProviderFlavor::Azure => json!([]),
     };
     Json(json!({ "object": "list", "data": models })).into_response()
 }
@@ -339,6 +361,7 @@ async fn chat_completions(
                 ["你好", "，", "Ollama", "！"]
             }
             FakeProviderFlavor::Gemini => ["你好", "，", "Gemini", "！"],
+            FakeProviderFlavor::Azure => ["你好", "，", "Azure", "！"],
         };
         for fragment in fragments {
             tokio::time::sleep(delay).await;
@@ -364,13 +387,29 @@ async fn chat_completions(
         .into_response()
 }
 
+// 复用 OpenAI 兼容响应体，仅让路由和认证头体现 Azure 协议差异。
+async fn azure_chat_completions(
+    state: State<FakeProviderState>,
+    headers: HeaderMap,
+    request: Json<FakeChatRequest>,
+) -> Response {
+    chat_completions(state, headers, request).await
+}
+
 fn authorized(state: &FakeProviderState, headers: &HeaderMap) -> bool {
     state.expected_token.as_ref().is_none_or(|expected| {
-        headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|value| value == expected.expose_secret())
+        if matches!(state.flavor, FakeProviderFlavor::Azure) {
+            headers
+                .get("api-key")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == expected.expose_secret())
+        } else {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .is_some_and(|value| value == expected.expose_secret())
+        }
     })
 }
 
@@ -538,6 +577,45 @@ mod tests {
             .expect("stream response");
         assert!(body.contains("Gemini"));
         assert!(body.contains("finishReason"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn azure_server_requires_api_key_and_uses_deployment_path() {
+        let server = FakeProviderServer::start_azure().await.expect("server");
+        let client = reqwest::Client::new();
+        let endpoint = format!(
+            "{}openai/deployments/fake-deployment/chat/completions?api-version=2024-10-21",
+            server.azure_base_url()
+        );
+        let unauthorized = client
+            .post(&endpoint)
+            .json(&serde_json::json!({
+                "model": "fake-deployment",
+                "messages": [{"role": "user", "content": "Hello"}]
+            }))
+            .send()
+            .await
+            .expect("unauthorized request");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let response = client
+            .post(endpoint)
+            .header("api-key", "azure-test-key")
+            .json(&serde_json::json!({
+                "model": "fake-deployment",
+                "messages": [{"role": "user", "content": "Hello"}]
+            }))
+            .send()
+            .await
+            .expect("authorized request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            response
+                .text()
+                .await
+                .expect("stream response")
+                .contains("Azure")
+        );
         server.shutdown().await;
     }
 }
