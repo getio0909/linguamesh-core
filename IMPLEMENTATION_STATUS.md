@@ -1,5 +1,25 @@
 # Implementation Status
 
+## 2026-07-20 — Translation quality modes and prompt contract
+
+Assumption: `Fast`, `Balanced`, and `Best` remain single provider requests in this prerelease;
+`Best` asks the model for an internal critique and revision, while Core performs deterministic
+output validation and never adds hidden paid calls.
+
+- Added `TranslationQualityMode` to `TranslationRequest`, defaulting to `Balanced`, with stable
+  `fast`/`balanced`/`best` persistence names. Translation-memory identity now includes the actual
+  mode instead of a placeholder value.
+- Added the versioned `translation-prompt-v2` helper shared by OpenAI-compatible, Responses,
+  Azure, native Ollama, Anthropic Messages, and Gemini adapters. Prompts delimit source content as
+  untrusted data and include mode-specific trade-offs without exposing credentials.
+- The engine validates non-empty UTF-8 output before emitting `Completed`; empty output and Unicode
+  replacement characters become typed malformed-response failures after any received deltas.
+- Added Core feature `translation_quality_modes_v1` and domain/provider/engine regression tests.
+
+Local validation for this checkpoint: `cargo fmt --all`, workspace offline check, strict Clippy, and
+workspace all-target/all-feature tests passed. Linux and localization integration remain on the
+next pinned revisions; live provider account behavior and human prompt/copy review remain open.
+
 ## 2026-07-20 — OpenAI Responses streaming adapter
 
 Assumption: Responses API model discovery remains compatible with `/v1/models`, while translation
@@ -12,7 +32,7 @@ availability remain external gates.
   events and mapping provider failures to typed errors.
 - Added a deterministic Responses fixture, fragmented-event decoder tests, application secret
   broker coverage, and the `openai_responses_v1` compatibility feature. Targeted Core tests pass;
-  Linux integration and remote CI evidence are pending the next pinned revision.
+  Linux integration and remote CI evidence are recorded in the dependent Linux checkpoint.
 
 ## 2026-07-20 — Azure OpenAI Chat Completions adapter
 

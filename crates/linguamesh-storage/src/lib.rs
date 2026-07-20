@@ -50,9 +50,7 @@ pub const MAX_TRANSLATION_MEMORY_TEXT_BYTES: usize = 4 * 1024 * 1024;
 /// 翻译记忆身份中的保护策略版本。
 pub const TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY: &str = "protected-spans-v1";
 /// 翻译记忆身份中的提示模板版本。
-pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "prompt-template-v1";
-/// 翻译记忆身份中的质量模式。
-pub const TRANSLATION_MEMORY_QUALITY_MODE: &str = "standard";
+pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "translation-prompt-v2";
 /// 限制本地可恢复文档任务的数量，避免任务队列无限增长。
 pub const MAX_DOCUMENT_JOBS: usize = 100;
 /// 限制单个文档任务的段数量，避免恶意输入制造过大元数据。
@@ -1747,7 +1745,7 @@ fn translation_memory_identity_json(
         "glossary": &request.glossary,
         "protected_span_policy": TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY,
         "prompt_template_version": TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION,
-        "quality_mode": TRANSLATION_MEMORY_QUALITY_MODE,
+        "quality_mode": request.quality_mode.as_str(),
         "provider_model": {
             "provider": &request.provider_identity,
             "model": &request.model_id,

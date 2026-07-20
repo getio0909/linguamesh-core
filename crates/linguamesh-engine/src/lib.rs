@@ -30,6 +30,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "provider_profile_persistence_v1",
     "bounded_text_document_v1",
     "routing_planner_v1",
+    "translation_quality_modes_v1",
     "streaming_text_v1",
     "text_translation_v1",
 ];
@@ -82,6 +83,8 @@ impl TranslationEngine {
         let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
         tokio::spawn(async move {
             let mut sequence = 0;
+            let validation_request = request.clone();
+            let mut output = String::new();
             if sender
                 .send(TranslationEvent::Started { sequence })
                 .await
@@ -104,6 +107,7 @@ impl TranslationEngine {
             while let Some(delta) = stream.next().await {
                 match delta {
                     Ok(text) => {
+                        output.push_str(&text);
                         if sender
                             .send(TranslationEvent::TextDelta { sequence, text })
                             .await
@@ -120,6 +124,10 @@ impl TranslationEngine {
                     }
                 }
             }
+            if let Err(error) = validate_translation_output(&validation_request, &output) {
+                send_error_terminal(&sender, sequence, error).await;
+                return;
+            }
             let _ = sender.send(TranslationEvent::Completed { sequence }).await;
         });
         TranslationOperation {
@@ -127,6 +135,28 @@ impl TranslationEngine {
             cancellation,
         }
     }
+}
+
+fn validate_translation_output(
+    request: &TranslationRequest,
+    output: &str,
+) -> Result<(), TranslationError> {
+    if request.source_text.trim().is_empty() {
+        return Ok(());
+    }
+    if output.trim().is_empty() {
+        return Err(TranslationError::new(
+            ErrorKind::MalformedResponse,
+            "Provider returned an empty translation.",
+        ));
+    }
+    if output.contains('\u{FFFD}') {
+        return Err(TranslationError::new(
+            ErrorKind::MalformedResponse,
+            "Provider returned invalid UTF-8 replacement characters.",
+        ));
+    }
+    Ok(())
 }
 
 /// 提供可跨宿主控制线程复制的取消能力。
@@ -183,8 +213,11 @@ async fn send_error_terminal(
 
 #[cfg(test)]
 mod tests {
-    use super::{CORE_FEATURES, CORE_SEMANTIC_VERSION, TranslationEngine, core_compatibility};
-    use linguamesh_domain::{TranslationEvent, TranslationRequest};
+    use super::{
+        CORE_FEATURES, CORE_SEMANTIC_VERSION, TranslationEngine, core_compatibility,
+        validate_translation_output,
+    };
+    use linguamesh_domain::{ErrorKind, TranslationEvent, TranslationRequest};
     use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
     use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
     use linguamesh_testkit::FakeProviderServer;
@@ -205,6 +238,17 @@ mod tests {
                 .map(|feature| (*feature).to_owned())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn deterministic_output_validation_rejects_empty_and_replacement_text() {
+        let request = TranslationRequest::new("Hello", "zh-CN", "model");
+        let empty = validate_translation_output(&request, " ").expect_err("empty output");
+        assert_eq!(empty.kind, ErrorKind::MalformedResponse);
+        let replacement =
+            validate_translation_output(&request, "\u{FFFD}").expect_err("replacement output");
+        assert_eq!(replacement.kind, ErrorKind::MalformedResponse);
+        assert!(validate_translation_output(&request, "你好").is_ok());
     }
 
     #[tokio::test]

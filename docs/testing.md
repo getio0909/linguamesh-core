@@ -25,6 +25,12 @@ The OpenAI Responses fixture covers `/v1/responses`, Bearer authentication, mode
 fragmented typed SSE events, terminal `response.completed`, and redacted credential handling
 without a commercial credential.
 
+Quality-mode tests cover the versioned `translation-prompt-v2` wording, stable request names, and
+mode-specific Fast/Balanced/Best directives across the shared provider helper. Engine tests verify
+that non-empty source text cannot reach `Completed` with empty output or Unicode replacement
+characters; received deltas remain available before the typed failure. This validation is
+deterministic and does not create hidden additional provider calls.
+
 Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
 round-trip the optional document-job routing-profile ID without introducing endpoint or credential
 columns.

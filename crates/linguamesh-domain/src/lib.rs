@@ -1636,6 +1636,31 @@ pub enum TranslationPrivacyMode {
     Incognito,
 }
 
+/// 描述一次翻译请求的质量与调用策略。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationQualityMode {
+    /// 使用一次最小化翻译调用。
+    Fast,
+    /// 使用一次翻译调用并执行确定性结构校验。
+    #[default]
+    Balanced,
+    /// 请求模型在输出前执行内部批评和修订。
+    Best,
+}
+
+impl TranslationQualityMode {
+    /// 返回用于持久化和缓存身份的稳定标识。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Balanced => "balanced",
+            Self::Best => "best",
+        }
+    }
+}
+
 /// 包含一次提供商无关的翻译请求。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TranslationRequest {
@@ -1663,6 +1688,9 @@ pub struct TranslationRequest {
     /// 本次请求的本地隐私策略。
     #[serde(default)]
     pub privacy_mode: TranslationPrivacyMode,
+    /// 本次请求的质量与调用策略。
+    #[serde(default)]
+    pub quality_mode: TranslationQualityMode,
 }
 
 impl TranslationRequest {
@@ -1684,6 +1712,7 @@ impl TranslationRequest {
             glossary: None,
             max_chunk_bytes: None,
             privacy_mode: TranslationPrivacyMode::Standard,
+            quality_mode: TranslationQualityMode::Balanced,
         }
     }
 
@@ -1712,6 +1741,13 @@ impl TranslationRequest {
     #[must_use]
     pub const fn with_privacy_mode(mut self, privacy_mode: TranslationPrivacyMode) -> Self {
         self.privacy_mode = privacy_mode;
+        self
+    }
+
+    /// 设置本次请求的质量与调用策略。
+    #[must_use]
+    pub const fn with_quality_mode(mut self, quality_mode: TranslationQualityMode) -> Self {
+        self.quality_mode = quality_mode;
         self
     }
 
@@ -1858,7 +1894,8 @@ mod tests {
         Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, ProfileValidationError,
         ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
         SecretValue, TranslationError, TranslationEvent, TranslationPrivacyMode,
-        TranslationRequest, protect_source_text, protect_source_text_with_glossary,
+        TranslationQualityMode, TranslationRequest, protect_source_text,
+        protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -1878,7 +1915,18 @@ mod tests {
     fn translation_request_defaults_to_standard_privacy() {
         let request = TranslationRequest::new("hello", "zh-CN", "model");
         assert_eq!(request.privacy_mode, TranslationPrivacyMode::Standard);
+        assert_eq!(request.quality_mode, TranslationQualityMode::Balanced);
         assert!(!request.is_incognito());
+    }
+
+    #[test]
+    fn quality_mode_has_stable_names_and_builder_support() {
+        assert_eq!(TranslationQualityMode::Fast.as_str(), "fast");
+        assert_eq!(TranslationQualityMode::Balanced.as_str(), "balanced");
+        assert_eq!(TranslationQualityMode::Best.as_str(), "best");
+        let request = TranslationRequest::new("hello", "zh-CN", "model")
+            .with_quality_mode(TranslationQualityMode::Best);
+        assert_eq!(request.quality_mode, TranslationQualityMode::Best);
     }
 
     #[test]

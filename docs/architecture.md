@@ -88,6 +88,14 @@ emits the original spans across split SSE deltas. Missing, duplicated, or unknow
 operation as a typed malformed-response error. This is a safety boundary, not a user glossary or
 custom protected-term system; those require explicit translation options and additional validation.
 
+`TranslationQualityMode` is part of the provider-neutral request contract. `Fast` asks for one direct
+pass, `Balanced` keeps one pass and applies deterministic output validation, and `Best` asks the
+model for an internal critique and revision before returning only the final translation. The shared
+`translation-prompt-v2` helper versions this wording across all built-in adapters, delimits source
+content as untrusted data, and keeps protected-marker instructions explicit. Core rejects empty
+output or Unicode replacement characters before marking an operation completed; it never silently
+turns one request into multiple paid calls.
+
 The ABI owns a Tokio runtime, a bounded event channel, and at most one active operation per opaque
 engine handle. A submitted `translate_text` envelope is decoded into the same `TranslationEngine`
 used by Rust callers. A forwarding task encodes ordered domain events back into Protobuf envelopes;
