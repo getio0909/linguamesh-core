@@ -70,6 +70,11 @@ impl FakeProviderServer {
             .await
     }
 
+    /// 启动 Gemini Generate Content 模型和 SSE 接口的回环服务。
+    pub async fn start_gemini() -> std::io::Result<Self> {
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Gemini).await
+    }
+
     async fn start_with_configuration(
         port: u16,
         expected_token: Option<SecretValue>,
@@ -87,6 +92,11 @@ impl FakeProviderServer {
             .route("/v1/chat/completions", post(chat_completions))
             .route("/api/tags", get(ollama_tags))
             .route("/api/chat", post(ollama_chat))
+            .route("/v1beta/models", get(gemini_models))
+            .route(
+                "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+                post(gemini_stream),
+            )
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
                 model_delay,
@@ -123,6 +133,12 @@ impl FakeProviderServer {
         format!("http://{}/api/", self.address)
     }
 
+    /// 返回包含 `/v1beta/` 的 Gemini 回环基础地址。
+    #[must_use]
+    pub fn gemini_base_url(&self) -> String {
+        format!("http://{}/v1beta/", self.address)
+    }
+
     /// 返回模型端点已进入处理的请求计数器。
     #[must_use]
     pub fn model_request_counter(&self) -> Arc<AtomicUsize> {
@@ -156,6 +172,58 @@ enum FakeProviderFlavor {
     Standard,
     Ollama,
     OllamaNative,
+    Gemini,
+}
+
+// 返回最小的 Gemini 模型发现响应，确保测试只依赖本地回环服务。
+async fn gemini_models(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
+    state.model_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    Json(json!({
+        "models": [
+            {
+                "name": "models/gemini-2.0-flash",
+                "displayName": "Gemini 2.0 Flash",
+                "supportedGenerationMethods": ["generateContent"]
+            },
+            {
+                "name": "models/text-embedding-004",
+                "displayName": "Text Embedding",
+                "supportedGenerationMethods": ["embedContent"]
+            }
+        ]
+    }))
+    .into_response()
+}
+
+// 返回碎片化的 Gemini SSE 候选和单独的完成原因事件。
+async fn gemini_stream(
+    State(state): State<FakeProviderState>,
+    headers: HeaderMap,
+    Json(_request): Json<serde_json::Value>,
+) -> Response {
+    state.chat_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    let output = stream! {
+        for fragment in ["你好", "，", "Gemini", "！"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let data = json!({
+                "candidates": [{
+                    "content": {"parts": [{"text": fragment}]}
+                }]
+            });
+            yield Ok::<Event, Infallible>(Event::default().data(data.to_string()));
+        }
+        let done = json!({"candidates": [{"finishReason": "STOP"}]});
+        yield Ok::<Event, Infallible>(Event::default().data(done.to_string()));
+    };
+    Sse::new(output)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(5)))
+        .into_response()
 }
 
 async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
@@ -174,6 +242,7 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
         FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => json!([
             { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
         ]),
+        FakeProviderFlavor::Gemini => json!([]),
     };
     Json(json!({ "object": "list", "data": models })).into_response()
 }
@@ -269,6 +338,7 @@ async fn chat_completions(
             FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => {
                 ["你好", "，", "Ollama", "！"]
             }
+            FakeProviderFlavor::Gemini => ["你好", "，", "Gemini", "！"],
         };
         for fragment in fragments {
             tokio::time::sleep(delay).await;
@@ -434,6 +504,40 @@ mod tests {
         let body = response.text().await.expect("chat response");
         assert!(body.contains("你好"));
         assert!(body.contains("\"done\":true"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn gemini_server_exposes_models_and_sse_stream() {
+        let server = FakeProviderServer::start_gemini().await.expect("server");
+        let client = reqwest::Client::new();
+        let models: serde_json::Value = client
+            .get(format!("{}models", server.gemini_base_url()))
+            .send()
+            .await
+            .expect("models request")
+            .json()
+            .await
+            .expect("models response");
+        assert_eq!(models["models"][0]["name"], "models/gemini-2.0-flash");
+        assert_eq!(
+            models["models"][1]["supportedGenerationMethods"][0],
+            "embedContent"
+        );
+        let body = client
+            .post(format!(
+                "{}models/gemini-2.0-flash:streamGenerateContent?alt=sse",
+                server.gemini_base_url()
+            ))
+            .json(&serde_json::json!({"contents": [{"parts": [{"text": "Hello"}]}]}))
+            .send()
+            .await
+            .expect("stream request")
+            .text()
+            .await
+            .expect("stream response");
+        assert!(body.contains("Gemini"));
+        assert!(body.contains("finishReason"));
         server.shutdown().await;
     }
 }

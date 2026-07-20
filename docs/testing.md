@@ -15,6 +15,9 @@ real local SSE response. Anthropic tests capture the Messages headers and JSON b
 fragmented UTF-8 SSE events, enforce the completion marker, redact diagnostics, and cancel while
 waiting for response headers. Native Ollama tests cover `/api/tags` discovery, fragmented UTF-8
 NDJSON, completion markers, and cancellation through the deterministic fixture.
+The Gemini fixture covers `/v1beta/models` filtering, fragmented Generate Content SSE candidates,
+and the terminal `finishReason` event; the Linux worker regression exercises the same fixture
+through `ProviderManager` without a credential.
 
 Schema 16 migration tests construct a schema-15 database, apply the transactional migration, and
 round-trip the optional document-job routing-profile ID without introducing endpoint or credential
