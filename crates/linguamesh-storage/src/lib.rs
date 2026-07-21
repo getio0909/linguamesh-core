@@ -1828,14 +1828,18 @@ mod tests {
         TranslationPrivacyMode, TranslationQualityMode, TranslationRequest,
     };
     use rusqlite::Connection;
+    #[cfg(unix)]
+    use std::env;
     use std::fs;
     use std::io::{Cursor, Read, Write};
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
+    use std::process::Command;
     use tempfile::tempdir;
     use zip::ZipArchive;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -3040,6 +3044,61 @@ trailer
             .expect("replayed profile");
         assert_eq!(restored.selected_model(), Some("wal-model"));
         assert_eq!(restored.secret_ref(), profile.secret_ref());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_replay_survives_process_termination_after_commit() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_WAL_CRASH_CHILD_PATH";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let profile = profile(
+                "wal-crash-profile",
+                Some(PERSISTENT_SECRET_REF),
+                Some("wal-crash-model"),
+            );
+            let mut storage = Storage::open(&path).expect("child storage");
+            let reader = Connection::open(&path).expect("child reader");
+            reader
+                .execute_batch("BEGIN")
+                .expect("child reader transaction");
+            reader
+                .query_row("SELECT COUNT(*) FROM provider_profiles", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("child reader snapshot");
+            storage
+                .save_and_activate_provider(&profile)
+                .expect("child committed profile");
+            assert!(path.with_extension("sqlite3-wal").is_file());
+            std::process::abort();
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("wal-crash.sqlite3");
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::wal_replay_survives_process_termination_after_commit",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .expect("spawn crash child");
+        assert!(!child.success(), "crash child unexpectedly completed");
+
+        let reopened = Storage::open(&path).expect("recovered storage");
+        let profile_id = ProviderProfileId::parse("wal-crash-profile").expect("profile id");
+        let restored = reopened
+            .provider_profile(&profile_id)
+            .expect("recovered profile query")
+            .expect("recovered profile");
+        assert_eq!(restored.selected_model(), Some("wal-crash-model"));
+        assert_eq!(
+            restored.secret_ref().map(SecretRef::as_str),
+            Some(PERSISTENT_SECRET_REF)
+        );
     }
 
     #[test]

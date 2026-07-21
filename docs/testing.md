@@ -117,7 +117,10 @@ then closes the writer before reopening the database. The
 `wal_replay_preserves_committed_profile_after_writer_disconnect` regression requires the `-wal`
 sidecar to exist before the reader closes and verifies that the committed model and SecretRef are
 restored by the next `Storage::open`. This is bounded WAL-replay evidence after a writer
-disconnect, not a claim that every filesystem power-loss or SQLite VFS failure is covered.
+disconnect. On Unix, `wal_replay_survives_process_termination_after_commit` repeats the same
+scenario in a child process that terminates abruptly after the commit; the parent then reopens the
+database and verifies the committed profile. These are process-crash regressions, not a claim that
+every filesystem power-loss or SQLite VFS failure is covered.
 
 The Core domain suite also covers the `FileLease` lifecycle for desktop, temporary/output, POSIX,
 Android ParcelFileDescriptor, and Windows-handle resource shapes. It rejects invalid resource

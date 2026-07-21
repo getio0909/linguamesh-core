@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-21 — SQLite WAL process-crash recovery regression
+
+Assumption: abrupt Unix process termination after a committed WAL transaction is a useful
+automatable crash-recovery boundary, but it does not emulate physical power loss or every SQLite
+VFS failure mode.
+
+- Added `wal_replay_survives_process_termination_after_commit`. A child test process keeps a reader
+  snapshot open, commits a provider profile with `synchronous=FULL`, terminates abruptly, and the
+  parent reopens the database to verify the model and persistent `SecretRef` are recovered.
+- Updated [`Core testing`](docs/testing.md) to distinguish process-crash evidence from physical
+  power-loss qualification. No credentials or source/translated text are introduced by the test.
+- Targeted storage regression, formatting, workspace check, strict Clippy, and full offline
+  workspace tests passed locally.
+
+This is unreleased Unix crash-recovery evidence. Physical power-loss simulation, alternate SQLite
+VFS coverage, cross-client conformance, signing, rollback, and stable release remain open.
+
 ## 2026-07-21 — provider-reported usage normalization
 
 Assumption: provider usage fields are advisory wire metadata; malformed, absent, or partial values
