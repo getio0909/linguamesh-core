@@ -77,10 +77,14 @@ bundled provider-catalog version, and stable enabled-feature identifiers. Client
 version dimension and require their feature subset before provider work; exact prerelease version
 matching is intentional until a compatible range policy is defined.
 
-The Rust translation event stream optionally carries a bounded `UsageRecord` on completion. Its
-`UsageSource` distinguishes provider-reported counts, conservative local estimates, and unknown
-values. The stable C ABI and protobuf projection deliberately exclude this optional field until a
-separate compatibility contract is reviewed.
+The Rust provider stream carries typed text and optional usage events. The engine merges partial
+provider records (for example Anthropic's input and output events) and attaches one bounded
+`UsageRecord` to completion. `UsageSource` distinguishes provider-reported counts, conservative
+local estimates, and unknown values. OpenAI Chat Completions opts into its final usage chunk;
+Responses, Anthropic, Gemini, and Ollama terminal metadata are normalized when present. Missing or
+malformed metadata falls back to a local estimate without making a pricing claim. The stable C ABI
+and protobuf projection deliberately exclude this optional field until a separate compatibility
+contract is reviewed.
 
 The `routing_planner_v1` feature exposes the domain-level `RoutingProfile` contract. Manual and
 Ordered modes preserve user intent; Automatic mode produces a stable, explainable ranking. All

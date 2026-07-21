@@ -4,15 +4,24 @@ use async_trait::async_trait;
 use futures_core::Stream;
 use linguamesh_domain::{
     ModelDescriptor, TranslationError, TranslationPreset, TranslationQualityMode,
-    TranslationRequest,
+    TranslationRequest, UsageRecord,
 };
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 use tokio_util::sync::CancellationToken;
 
-/// 包装增量翻译文本流。
+/// 表示提供商流中的文本或归一化 usage 元数据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranslationStreamEvent {
+    /// 一段按提供商顺序到达的译文文本。
+    Text(String),
+    /// 提供商在响应中报告的 token 用量。
+    Usage(UsageRecord),
+}
+
+/// 包装增量翻译文本和 usage 流。
 pub type TranslationStream =
-    Pin<Box<dyn Stream<Item = Result<String, TranslationError>> + Send + 'static>>;
+    Pin<Box<dyn Stream<Item = Result<TranslationStreamEvent, TranslationError>> + Send + 'static>>;
 
 /// 当前受版本控制的翻译提示词模板。
 pub const TRANSLATION_PROMPT_TEMPLATE_VERSION: &str = "translation-prompt-v2";

@@ -1,5 +1,27 @@
 # Implementation Status
 
+## 2026-07-21 — provider-reported usage normalization
+
+Assumption: provider usage fields are advisory wire metadata; malformed, absent, or partial values
+must never block a translation or become a pricing claim.
+
+- Provider streams now carry typed text or usage events through `TranslationStreamEvent`; the
+  engine merges partial records and preserves `UsageSource::ProviderReported` when wire counts
+  are available, otherwise retaining the existing bounded local estimate.
+- OpenAI Chat Completions requests opt into `stream_options.include_usage`; OpenAI Responses,
+  Anthropic Messages, Gemini Generate Content, and native Ollama terminal metadata are parsed into
+  the same `UsageRecord` shape. Azure uses the OpenAI-compatible path without changing its API-key
+  contract.
+- Added decoder regressions for fragmented SSE/NDJSON usage, partial Anthropic counts, final
+  Gemini text plus usage, and Responses completion metadata. The stable C ABI/protobuf projection
+  remains unchanged and no pricing table or source text is persisted.
+
+- Targeted provider/engine tests passed after formatting; full workspace validation follows before
+  the revision is pinned by Linux.
+
+This is prerelease wire-parsing evidence. Provider accounting semantics, pricing estimates, native
+non-Rust ABI projection, and stable-release qualification remain open.
+
 ## 2026-07-21 — normalized translation usage records
 
 Assumption: usage metadata is non-sensitive and must distinguish provider-reported counts from a

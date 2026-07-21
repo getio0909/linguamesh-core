@@ -7,10 +7,10 @@ use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
     ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, protect_source_text_with_glossary,
+    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
-    ModelProvider, TranslationStream, retry_after_ms, translation_prompt,
+    ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
 };
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -177,6 +177,7 @@ impl GeminiProvider {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn translate_protected_stream(
         &self,
         request: TranslationRequest,
@@ -241,14 +242,39 @@ impl GeminiProvider {
                     match message {
                         SseMessage::Delta(text) if !text.is_empty() => {
                             let safe_delta = span_restorer.push(&text).map_err(|error| map_protected_error(&error))?;
-                            if !safe_delta.is_empty() { yield safe_delta; }
+                            if !safe_delta.is_empty() {
+                                yield TranslationStreamEvent::Text(safe_delta);
+                            }
                         }
                         SseMessage::Delta(_) => {}
                         SseMessage::DeltaAndDone(text) => {
                             if !text.is_empty() {
                                 let safe_delta = span_restorer.push(&text).map_err(|error| map_protected_error(&error))?;
-                                if !safe_delta.is_empty() { yield safe_delta; }
+                                if !safe_delta.is_empty() {
+                                    yield TranslationStreamEvent::Text(safe_delta);
+                                }
                             }
+                            completed = true;
+                            break;
+                        }
+                        SseMessage::DeltaAndUsageAndDone(text, usage) => {
+                            if !text.is_empty() {
+                                let safe_delta = span_restorer
+                                    .push(&text)
+                                    .map_err(|error| map_protected_error(&error))?;
+                                if !safe_delta.is_empty() {
+                                    yield TranslationStreamEvent::Text(safe_delta);
+                                }
+                            }
+                            yield TranslationStreamEvent::Usage(usage);
+                            completed = true;
+                            break;
+                        }
+                        SseMessage::Usage(usage) => {
+                            yield TranslationStreamEvent::Usage(usage);
+                        }
+                        SseMessage::UsageAndDone(usage) => {
+                            yield TranslationStreamEvent::Usage(usage);
                             completed = true;
                             break;
                         }
@@ -261,7 +287,9 @@ impl GeminiProvider {
                 Err(TranslationError::new(ErrorKind::MalformedResponse, "Provider stream ended before the completion marker."))?;
             }
             let safe_tail = span_restorer.finish().map_err(|error| map_protected_error(&error))?;
-            if !safe_tail.is_empty() { yield safe_tail; }
+            if !safe_tail.is_empty() {
+                yield TranslationStreamEvent::Text(safe_tail);
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -422,6 +450,25 @@ struct ModelResponse {
 struct StreamResponse {
     #[serde(default)]
     candidates: Vec<Candidate>,
+    #[serde(default, rename = "usageMetadata")]
+    usage_metadata: Option<UsageMetadata>,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct UsageMetadata {
+    #[serde(default, rename = "promptTokenCount")]
+    input_tokens: Option<u64>,
+    #[serde(default, rename = "candidatesTokenCount")]
+    output_tokens: Option<u64>,
+    #[serde(default, rename = "totalTokenCount")]
+    total_tokens: Option<u64>,
+}
+
+impl UsageMetadata {
+    fn into_record(self) -> UsageRecord {
+        UsageRecord::provider_reported(self.input_tokens, self.output_tokens, self.total_tokens)
+    }
 }
 
 #[derive(Deserialize)]
@@ -447,6 +494,9 @@ struct ResponsePart {
 enum SseMessage {
     Delta(String),
     DeltaAndDone(String),
+    DeltaAndUsageAndDone(String, UsageRecord),
+    Usage(UsageRecord),
+    UsageAndDone(UsageRecord),
     Done,
 }
 
@@ -516,11 +566,25 @@ fn parse_event(event: &[u8]) -> Result<Option<SseMessage>, TranslationError> {
             output.push_str(text);
         }
     }
-    if response
+    let finished = response
         .candidates
         .iter()
-        .any(|candidate| candidate.finish_reason.is_some())
-    {
+        .any(|candidate| candidate.finish_reason.is_some());
+    if let Some(usage) = response.usage_metadata {
+        if finished {
+            if output.is_empty() {
+                return Ok(Some(SseMessage::UsageAndDone(usage.into_record())));
+            }
+            return Ok(Some(SseMessage::DeltaAndUsageAndDone(
+                output,
+                usage.into_record(),
+            )));
+        }
+        if output.is_empty() {
+            return Ok(Some(SseMessage::Usage(usage.into_record())));
+        }
+    }
+    if finished {
         if output.is_empty() {
             return Ok(Some(SseMessage::Done));
         }
@@ -597,6 +661,26 @@ mod tests {
             .expect("second");
         assert!(matches!(&messages[0], SseMessage::Delta(text) if text == "你好"));
         assert!(matches!(&messages[1], SseMessage::DeltaAndDone(text) if text == "！"));
+    }
+
+    #[test]
+    fn decoder_extracts_usage_with_final_text() {
+        let payload = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"你好\"}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"！\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7}}\n\n",
+        );
+        let mut decoder = SseDecoder::default();
+        let messages = decoder
+            .push(&Bytes::from_static(payload.as_bytes()))
+            .expect("usage event");
+        assert!(matches!(
+            &messages[1],
+            SseMessage::DeltaAndUsageAndDone(text, record)
+                if text == "！"
+                    && record.input_tokens == Some(5)
+                    && record.output_tokens == Some(2)
+                    && record.total_tokens == Some(7)
+        ));
     }
 
     #[test]
@@ -682,7 +766,11 @@ mod tests {
             .expect("stream");
         let mut output = String::new();
         while let Some(delta) = stream.next().await {
-            output.push_str(&delta.expect("delta"));
+            if let linguamesh_provider_api::TranslationStreamEvent::Text(text) =
+                delta.expect("delta")
+            {
+                output.push_str(&text);
+            }
         }
         assert_eq!(output, "你好，Gemini");
         server.await.expect("server task");

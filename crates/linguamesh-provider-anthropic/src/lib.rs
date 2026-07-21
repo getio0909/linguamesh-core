@@ -7,10 +7,10 @@ use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
     ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, protect_source_text_with_glossary,
+    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
-    ModelProvider, TranslationStream, retry_after_ms, translation_prompt,
+    ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
 };
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -264,9 +264,14 @@ impl AnthropicProvider {
                             let safe_delta = span_restorer
                                 .push(&text)
                                 .map_err(|error| map_protected_error(&error))?;
-                            if !safe_delta.is_empty() { yield safe_delta; }
+                            if !safe_delta.is_empty() {
+                                yield TranslationStreamEvent::Text(safe_delta);
+                            }
                         }
                         SseMessage::Delta(_) => {}
+                        SseMessage::Usage(usage) => {
+                            yield TranslationStreamEvent::Usage(usage);
+                        }
                         SseMessage::Done => { completed = true; break; }
                     }
                 }
@@ -281,7 +286,9 @@ impl AnthropicProvider {
             let safe_tail = span_restorer
                 .finish()
                 .map_err(|error| map_protected_error(&error))?;
-            if !safe_tail.is_empty() { yield safe_tail; }
+            if !safe_tail.is_empty() {
+                yield TranslationStreamEvent::Text(safe_tail);
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -394,6 +401,16 @@ struct StreamResponse {
     #[serde(rename = "type")]
     event_type: String,
     delta: Option<StreamDelta>,
+    #[serde(default)]
+    message: Option<MessageStart>,
+    #[serde(default)]
+    usage: Option<UsageResponse>,
+}
+
+#[derive(Deserialize)]
+struct MessageStart {
+    #[serde(default)]
+    usage: Option<UsageResponse>,
 }
 
 #[derive(Deserialize)]
@@ -405,7 +422,25 @@ struct StreamDelta {
 
 enum SseMessage {
     Delta(String),
+    Usage(UsageRecord),
     Done,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct UsageResponse {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+}
+
+impl UsageResponse {
+    fn into_record(self) -> UsageRecord {
+        UsageRecord::provider_reported(self.input_tokens, self.output_tokens, self.total_tokens)
+    }
 }
 
 #[derive(Default)]
@@ -463,6 +498,13 @@ fn parse_event(event: &[u8]) -> Result<Option<SseMessage>, TranslationError> {
             "Provider stream contained malformed JSON.",
         )
     })?;
+    if let Some(usage) = response
+        .message
+        .and_then(|message| message.usage)
+        .or(response.usage)
+    {
+        return Ok(Some(SseMessage::Usage(usage.into_record())));
+    }
     if response.event_type == "message_stop" {
         return Ok(Some(SseMessage::Done));
     }
@@ -547,6 +589,31 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[0], SseMessage::Delta(text) if text == "你好"));
         assert!(matches!(messages[1], SseMessage::Done));
+    }
+
+    #[test]
+    fn decoder_extracts_message_start_and_delta_usage() {
+        let payload = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let mut decoder = SseDecoder::default();
+        let messages = decoder
+            .push(&Bytes::from_static(payload.as_bytes()))
+            .expect("usage events");
+        assert!(matches!(
+            &messages[0],
+            SseMessage::Usage(record) if record.input_tokens == Some(8)
+        ));
+        assert!(matches!(
+            &messages[1],
+            SseMessage::Usage(record) if record.output_tokens == Some(3)
+        ));
+        assert!(matches!(messages[2], SseMessage::Done));
     }
 
     #[test]
@@ -649,7 +716,11 @@ mod tests {
             .expect("stream");
         let mut output = String::new();
         while let Some(delta) = stream.next().await {
-            output.push_str(&delta.expect("delta"));
+            if let linguamesh_provider_api::TranslationStreamEvent::Text(text) =
+                delta.expect("delta")
+            {
+                output.push_str(&text);
+            }
         }
         assert_eq!(output, "你好，Anthropic！");
         server.await.expect("server task");

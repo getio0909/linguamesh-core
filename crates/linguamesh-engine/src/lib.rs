@@ -6,7 +6,7 @@ use linguamesh_domain::{
     TranslationRequest, UsageRecord,
 };
 use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
-use linguamesh_provider_api::ModelProvider;
+use linguamesh_provider_api::{ModelProvider, TranslationStreamEvent};
 use linguamesh_provider_catalog::ProviderCatalog;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -121,9 +121,10 @@ impl TranslationEngine {
                     return;
                 }
             };
+            let mut provider_usage = None;
             while let Some(delta) = stream.next().await {
                 match delta {
-                    Ok(text) => {
+                    Ok(TranslationStreamEvent::Text(text)) => {
                         output.push_str(&text);
                         if sender
                             .send(TranslationEvent::TextDelta { sequence, text })
@@ -135,6 +136,12 @@ impl TranslationEngine {
                         }
                         sequence += 1;
                     }
+                    Ok(TranslationStreamEvent::Usage(usage)) => {
+                        provider_usage = Some(match provider_usage.as_ref() {
+                            Some(previous) => merge_usage_records(previous, &usage),
+                            None => usage,
+                        });
+                    }
                     Err(error) => {
                         send_error_terminal(&sender, sequence, error).await;
                         return;
@@ -145,15 +152,14 @@ impl TranslationEngine {
                 send_error_terminal(&sender, sequence, error).await;
                 return;
             }
-            let usage = UsageRecord::locally_estimated(
-                validation_request.source_text.as_str(),
-                output.as_str(),
-            );
+            let usage = provider_usage.or_else(|| {
+                Some(UsageRecord::locally_estimated(
+                    validation_request.source_text.as_str(),
+                    output.as_str(),
+                ))
+            });
             let _ = sender
-                .send(TranslationEvent::Completed {
-                    sequence,
-                    usage: Some(usage),
-                })
+                .send(TranslationEvent::Completed { sequence, usage })
                 .await;
         });
         TranslationOperation {
@@ -161,6 +167,14 @@ impl TranslationEngine {
             cancellation,
         }
     }
+}
+
+fn merge_usage_records(previous: &UsageRecord, next: &UsageRecord) -> UsageRecord {
+    UsageRecord::provider_reported(
+        next.input_tokens.or(previous.input_tokens),
+        next.output_tokens.or(previous.output_tokens),
+        next.total_tokens.or(previous.total_tokens),
+    )
 }
 
 fn validate_translation_output(
@@ -247,7 +261,7 @@ async fn send_error_terminal(
 mod tests {
     use super::{
         CORE_FEATURES, CORE_SEMANTIC_VERSION, TranslationEngine, core_compatibility,
-        validate_translation_output,
+        merge_usage_records, validate_translation_output,
     };
     use linguamesh_domain::{ErrorKind, TranslationEvent, TranslationRequest, UsageSource};
     use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
@@ -281,6 +295,17 @@ mod tests {
             validate_translation_output(&request, "\u{FFFD}").expect_err("replacement output");
         assert_eq!(replacement.kind, ErrorKind::MalformedResponse);
         assert!(validate_translation_output(&request, "你好").is_ok());
+    }
+
+    #[test]
+    fn partial_provider_usage_records_are_merged_without_estimation() {
+        let input = linguamesh_domain::UsageRecord::provider_reported(Some(8), None, None);
+        let output = linguamesh_domain::UsageRecord::provider_reported(None, Some(3), Some(11));
+        let merged = merge_usage_records(&input, &output);
+        assert_eq!(merged.source, UsageSource::ProviderReported);
+        assert_eq!(merged.input_tokens, Some(8));
+        assert_eq!(merged.output_tokens, Some(3));
+        assert_eq!(merged.total_tokens, Some(11));
     }
 
     #[tokio::test]

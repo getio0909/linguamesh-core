@@ -7,10 +7,10 @@ use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
     ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, protect_source_text_with_glossary,
+    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
-    ModelProvider, TranslationStream, retry_after_ms, translation_prompt,
+    ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
 };
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -415,6 +415,11 @@ impl OpenAiCompatibleProvider {
             ProviderRequestBody::Chat(ChatRequest {
                 model: request.model_id,
                 stream: true,
+                stream_options: matches!(self.protocol, OpenAiProtocol::ChatCompletions).then_some(
+                    StreamOptions {
+                        include_usage: true,
+                    },
+                ),
                 messages: vec![
                     ChatMessage {
                         role: "system",
@@ -485,10 +490,18 @@ impl OpenAiCompatibleProvider {
                                 .push(&text)
                                 .map_err(|error| map_protected_error(&error))?;
                             if !safe_delta.is_empty() {
-                                yield safe_delta;
+                                yield TranslationStreamEvent::Text(safe_delta);
                             }
                         }
                         SseMessage::Delta(_) => {}
+                        SseMessage::Usage(usage) => {
+                            yield TranslationStreamEvent::Usage(usage);
+                        }
+                        SseMessage::UsageAndDone(usage) => {
+                            yield TranslationStreamEvent::Usage(usage);
+                            completed = true;
+                            break;
+                        }
                         SseMessage::Done => {
                             completed = true;
                             break;
@@ -509,7 +522,7 @@ impl OpenAiCompatibleProvider {
                 .finish()
                 .map_err(|error| map_protected_error(&error))?;
             if !safe_tail.is_empty() {
-                yield safe_tail;
+                yield TranslationStreamEvent::Text(safe_tail);
             }
         };
         Ok(Box::pin(stream))
@@ -666,7 +679,14 @@ enum ProviderRequestBody {
 struct ChatRequest {
     model: String,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     messages: Vec<ChatMessage>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -701,6 +721,8 @@ struct ModelResponse {
 #[derive(Deserialize)]
 struct StreamResponse {
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<UsageResponse>,
 }
 
 #[derive(Deserialize)]
@@ -715,7 +737,26 @@ struct StreamDelta {
 
 enum SseMessage {
     Delta(String),
+    Usage(UsageRecord),
+    UsageAndDone(UsageRecord),
     Done,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct UsageResponse {
+    #[serde(default, alias = "prompt_tokens")]
+    input_tokens: Option<u64>,
+    #[serde(default, alias = "completion_tokens")]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+}
+
+impl UsageResponse {
+    fn into_record(self) -> UsageRecord {
+        UsageRecord::provider_reported(self.input_tokens, self.output_tokens, self.total_tokens)
+    }
 }
 
 #[derive(Default)]
@@ -776,6 +817,9 @@ fn parse_event(event: &[u8]) -> Result<Option<SseMessage>, TranslationError> {
             "Provider stream contained malformed JSON.",
         )
     })?;
+    if let Some(usage) = response.usage {
+        return Ok(Some(SseMessage::Usage(usage.into_record())));
+    }
     let text = response
         .choices
         .first()
@@ -830,7 +874,12 @@ fn parse_responses_event(event: &[u8]) -> Result<Option<SseMessage>, Translation
         "response.output_text.delta" => {
             Ok(Some(SseMessage::Delta(response.delta.unwrap_or_default())))
         }
-        "response.completed" => Ok(Some(SseMessage::Done)),
+        "response.completed" => {
+            if let Some(usage) = response.response.and_then(|response| response.usage) {
+                return Ok(Some(SseMessage::UsageAndDone(usage.into_record())));
+            }
+            Ok(Some(SseMessage::Done))
+        }
         "error" | "response.failed" => Err(TranslationError::new(
             ErrorKind::Network,
             "Provider Responses stream reported an error.",
@@ -844,6 +893,14 @@ struct ResponsesStreamEvent {
     #[serde(rename = "type")]
     event_type: String,
     delta: Option<String>,
+    #[serde(default)]
+    response: Option<ResponsesCompleted>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesCompleted {
+    #[serde(default)]
+    usage: Option<UsageResponse>,
 }
 
 fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, TranslationError> {
@@ -936,6 +993,28 @@ mod tests {
     }
 
     #[test]
+    fn decoder_extracts_chat_usage_before_done() {
+        let payload = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut decoder = SseDecoder::default();
+        let messages = decoder
+            .push(&Bytes::from_static(payload.as_bytes()))
+            .expect("usage events");
+        assert!(matches!(&messages[0], SseMessage::Delta(text) if text == "你好"));
+        assert!(matches!(
+            &messages[1],
+            SseMessage::Usage(record)
+                if record.input_tokens == Some(4)
+                    && record.output_tokens == Some(2)
+                    && record.total_tokens == Some(6)
+        ));
+        assert!(matches!(messages[2], SseMessage::Done));
+    }
+
+    #[test]
     fn responses_decoder_handles_typed_events_and_fragmented_utf8() {
         let payload = concat!(
             "event: response.created\n",
@@ -960,6 +1039,25 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[0], SseMessage::Delta(text) if text == "你好"));
         assert!(matches!(messages[1], SseMessage::Done));
+    }
+
+    #[test]
+    fn responses_decoder_extracts_completion_usage() {
+        let event = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n",
+        );
+        let mut decoder = ResponsesSseDecoder::default();
+        let messages = decoder
+            .push(&Bytes::from_static(event.as_bytes()))
+            .expect("usage event");
+        assert!(matches!(
+            &messages[0],
+            SseMessage::UsageAndDone(record)
+                if record.input_tokens == Some(7)
+                    && record.output_tokens == Some(3)
+                    && record.total_tokens == Some(10)
+        ));
     }
 
     #[test]
@@ -1145,7 +1243,11 @@ mod tests {
             .expect("stream");
         let mut output = String::new();
         while let Some(delta) = stream.next().await {
-            output.push_str(&delta.expect("protected output"));
+            if let linguamesh_provider_api::TranslationStreamEvent::Text(text) =
+                delta.expect("protected output")
+            {
+                output.push_str(&text);
+            }
         }
         assert_eq!(
             output,
@@ -1175,7 +1277,11 @@ mod tests {
             .expect("stream");
         let mut output = String::new();
         while let Some(delta) = stream.next().await {
-            output.push_str(&delta.expect("chunk output"));
+            if let linguamesh_provider_api::TranslationStreamEvent::Text(text) =
+                delta.expect("chunk output")
+            {
+                output.push_str(&text);
+            }
         }
         let request_count = requests.load(Ordering::SeqCst);
         assert!(request_count > 1);

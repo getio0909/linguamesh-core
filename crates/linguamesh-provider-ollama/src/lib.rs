@@ -7,10 +7,10 @@ use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
     ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, protect_source_text_with_glossary,
+    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
-    ModelProvider, TranslationStream, retry_after_ms, translation_prompt,
+    ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
 };
 use reqwest::{Client, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -172,6 +172,7 @@ impl OllamaProvider {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn translate_protected_stream(
         &self,
         request: TranslationRequest,
@@ -238,9 +239,14 @@ impl OllamaProvider {
                     ))?;
                 }
                 for message in decoder.push(&chunk)? {
+                    if let Some(usage) = message.usage {
+                        yield TranslationStreamEvent::Usage(usage);
+                    }
                     if let Some(text) = message.content {
                         let safe_delta = span_restorer.push(&text).map_err(|error| map_protected_error(&error))?;
-                        if !safe_delta.is_empty() { yield safe_delta; }
+                        if !safe_delta.is_empty() {
+                            yield TranslationStreamEvent::Text(safe_delta);
+                        }
                     }
                     if message.done { completed = true; break; }
                 }
@@ -248,9 +254,14 @@ impl OllamaProvider {
             }
             if !completed {
                 for message in decoder.finish()? {
+                    if let Some(usage) = message.usage {
+                        yield TranslationStreamEvent::Usage(usage);
+                    }
                     if let Some(text) = message.content {
                         let safe_delta = span_restorer.push(&text).map_err(|error| map_protected_error(&error))?;
-                        if !safe_delta.is_empty() { yield safe_delta; }
+                        if !safe_delta.is_empty() {
+                            yield TranslationStreamEvent::Text(safe_delta);
+                        }
                     }
                     if message.done { completed = true; break; }
                 }
@@ -262,7 +273,9 @@ impl OllamaProvider {
                 ))?;
             }
             let safe_tail = span_restorer.finish().map_err(|error| map_protected_error(&error))?;
-            if !safe_tail.is_empty() { yield safe_tail; }
+            if !safe_tail.is_empty() {
+                yield TranslationStreamEvent::Text(safe_tail);
+            }
         };
         Ok(Box::pin(stream))
     }
@@ -398,6 +411,10 @@ struct OllamaStreamResponse {
     message: Option<OllamaMessageResponse>,
     #[serde(default)]
     done: bool,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -407,6 +424,7 @@ struct OllamaMessageResponse {
 
 struct OllamaStreamMessage {
     content: Option<String>,
+    usage: Option<UsageRecord>,
     done: bool,
 }
 
@@ -466,6 +484,17 @@ fn parse_line(line: &[u8]) -> Result<OllamaStreamMessage, TranslationError> {
     })?;
     Ok(OllamaStreamMessage {
         content: response.message.and_then(|message| message.content),
+        usage: response.done.then(|| {
+            UsageRecord::provider_reported(
+                response.prompt_eval_count,
+                response.eval_count,
+                response.prompt_eval_count.and_then(|input| {
+                    response
+                        .eval_count
+                        .map(|output| input.saturating_add(output))
+                }),
+            )
+        }),
         done: response.done,
     })
 }
@@ -537,6 +566,19 @@ mod tests {
     }
 
     #[test]
+    fn decoder_extracts_native_usage_on_completion() {
+        let payload = "{\"done\":true,\"prompt_eval_count\":9,\"eval_count\":4}\n";
+        let mut decoder = NdjsonDecoder::default();
+        let messages = decoder
+            .push(&Bytes::from_static(payload.as_bytes()))
+            .expect("usage event");
+        let usage = messages[0].usage.as_ref().expect("usage");
+        assert_eq!(usage.input_tokens, Some(9));
+        assert_eq!(usage.output_tokens, Some(4));
+        assert_eq!(usage.total_tokens, Some(13));
+    }
+
+    #[test]
     fn diagnostics_redact_endpoint_and_credential() {
         const SECRET: &str = "ollama-secret-canary";
         const ENDPOINT: &str = "http://127.0.0.1:11434/api/";
@@ -566,7 +608,11 @@ mod tests {
             .expect("stream");
         let mut output = String::new();
         while let Some(delta) = stream.next().await {
-            output.push_str(&delta.expect("delta"));
+            if let linguamesh_provider_api::TranslationStreamEvent::Text(text) =
+                delta.expect("delta")
+            {
+                output.push_str(&text);
+            }
         }
         assert_eq!(output, "你好，Ollama！");
         server.shutdown().await;
