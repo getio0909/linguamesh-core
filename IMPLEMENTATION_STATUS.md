@@ -8,9 +8,14 @@ Core open must replay that sidecar without losing the provider model or SecretRe
 - Added `wal_replay_preserves_committed_profile_after_writer_disconnect`. A private reader holds a
   snapshot while the writer commits, the writer closes before checkpointing, the `-wal` sidecar is
   required to exist, and the next `Storage::open` restores the committed profile.
-- Local `cargo fmt --all -- --check` and the targeted locked offline storage test passed (`1 passed;
-  0 failed`). This is bounded WAL-replay evidence, not a claim for physical power-loss or every
-  SQLite VFS failure.
+- Local `cargo fmt --all -- --check`, the targeted locked offline storage test, the full locked
+  offline workspace tests, and strict Clippy passed. The reproducible Linux SDK package smoke also
+  passed with SHA-256 `9857c972ce16ae3d0243fecfe76755f301abe94ca3a3c10f880f62a2836914f`.
+- Remote Core CI/Fuzz and sanitizers/Native SDK runs `29812421226`/`29812421184`/`29812421320`
+  passed for this exact commit.
+
+This is bounded WAL-replay evidence, not a claim for physical power-loss or every SQLite VFS
+failure.
 
 ## 2026-07-21 — Reproducible Linux SDK package verification
 
@@ -18,8 +23,8 @@ Assumption: the Linux SDK archive is prerelease evidence only; reproducibility a
 linkage must be verified before any artifact can be considered for a signed release.
 
 - `bash tools/verify-linux-sdk-package.sh` rebuilt the `0.1.0-alpha.2` archive twice from the
-  current Core revision `19229184a21a6725326a3d30dea9bc72e5ac999f` and reproduced SHA-256
-  `487c83c17f80634826437e94ca7d817e83f0addf60999d6789fcb58beb774afc`.
+  current Core revision `4badabe735499a50265a1260a838df3254622c15` and reproduced SHA-256
+  `9857c972ce16ae3d0243fecfe76755f301abe94ca3a3c10f880f62a2836914f`.
 - The verifier accepted the outer archive and every packaged file, validated `linguamesh-core.pc`,
   and compiled and ran the packaged static-library C consumer smoke test.
 - The generated archive remains local, unsigned prerelease evidence. No release-manifest artifact
