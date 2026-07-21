@@ -12,7 +12,8 @@ CI evidence, while production and release artifacts remain on stable Rust 1.93.0
   AddressSanitizer instrumentation runs 2,000 iterations or 30 seconds on every Core push and pull
   request. The stable production workspace is not changed to nightly.
 - Local smoke passed with 2,000 runs, increasing coverage features, a minimized corpus, and no
-  crash. The remote workflow remains required before this checkpoint is considered verified.
+  crash. Remote Fuzz and sanitizers run `29789910142` passed on the fixed nightly toolchain;
+  Core CI `29789910147` and Native SDK `29789910099` also passed all jobs for this revision.
 
 This closes the executable protocol-decoder fuzz-smoke sub-boundary only. Broader FFI misuse
 sanitizers, document-parser fuzzing, cross-client conformance, signed artifacts, and stable release
