@@ -1,4 +1,6 @@
 /target/
+/fuzz/target/
+/fuzz/artifacts/
 /dist/
 /bindings/android/.gradle/
 /bindings/android/.kotlin/

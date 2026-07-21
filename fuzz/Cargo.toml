@@ -1,0 +1,22 @@
+[package]
+name = "linguamesh-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+linguamesh-protocol = { path = "../crates/linguamesh-protocol" }
+prost = "0.14.1"
+
+[[bin]]
+name = "protocol_decoders"
+path = "fuzz_targets/protocol_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

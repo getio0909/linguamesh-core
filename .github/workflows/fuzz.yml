@@ -1,0 +1,35 @@
+name: Fuzz and sanitizers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FUZZ_TOOLCHAIN: nightly-2026-07-20
+
+jobs:
+  fuzz-smoke:
+    name: Protocol decoder fuzz and ASAN smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      # 固定 actions/checkout v7.0.0。
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      # 固定 nightly 工具链以隔离 fuzz 专用不稳定特性。
+      - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run bounded protocol decoder fuzz smoke with AddressSanitizer
+        working-directory: fuzz
+        env:
+          CARGOFLAGS: --locked
+        run: cargo fuzz run protocol_decoders -- -runs=2000 -max_total_time=30

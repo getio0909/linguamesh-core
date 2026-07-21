@@ -65,6 +65,22 @@ input to return a controlled result without a panic or provider request. This is
 corpus, not coverage-guided fuzzing; sanitizer and fuzz-run coverage remain required before a stable
 release.
 
+The separate `fuzz/` workspace runs the `protocol_decoders` libFuzzer target over the versioned
+Envelope plus command and event payload decoders. It rejects inputs above the 1 MiB protocol bound
+before decoding and runs with cargo-fuzz's AddressSanitizer instrumentation. Reproduce the local
+smoke with the pinned fuzz-only nightly toolchain:
+
+```sh
+rustup toolchain install nightly-2026-07-20 --profile minimal
+cargo install cargo-fuzz --locked
+cd fuzz
+cargo +nightly-2026-07-20 fuzz run protocol_decoders -- -runs=2000 -max_total_time=30
+```
+
+The `Fuzz and sanitizers` workflow runs the same bounded smoke on every Core push and pull request.
+The production workspace remains pinned to stable Rust 1.93.0; nightly is isolated to this fuzz
+harness and is not used for release artifacts.
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 

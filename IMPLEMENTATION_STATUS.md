@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-21 — Protocol decoder fuzz and AddressSanitizer smoke
+
+Assumption: Milestone 8 requires an executable coverage-guided decoder harness and sanitizer-backed
+CI evidence, while production and release artifacts remain on stable Rust 1.93.0.
+
+- Added a separate `fuzz/` Cargo workspace with a libFuzzer `protocol_decoders` target. It decodes
+  the versioned Envelope and every command/event payload family, rejects inputs above the 1 MiB
+  protocol bound, and performs no provider or credential work.
+- Added `.github/workflows/fuzz.yml`, pinning fuzz-only nightly `2026-07-20`; cargo-fuzz's default
+  AddressSanitizer instrumentation runs 2,000 iterations or 30 seconds on every Core push and pull
+  request. The stable production workspace is not changed to nightly.
+- Local smoke passed with 2,000 runs, increasing coverage features, a minimized corpus, and no
+  crash. The remote workflow remains required before this checkpoint is considered verified.
+
+This closes the executable protocol-decoder fuzz-smoke sub-boundary only. Broader FFI misuse
+sanitizers, document-parser fuzzing, cross-client conformance, signed artifacts, and stable release
+remain open.
+
 ## 2026-07-20 — C ABI malformed-input stress corpus
 
 Assumption: the ABI submit boundary must remain panic-safe and bounded for arbitrary untrusted
