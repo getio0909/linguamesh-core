@@ -15,7 +15,7 @@ process.
 `Storage::open` detects the recorded version and applies each missing migration in one transaction.
 It rejects a database newer than the current Core instead of guessing compatibility. Foreign-key
 enforcement is enabled for every connection, so deleting a profile also removes its active and
-last-model references. On-disk databases use WAL with `synchronous=NORMAL` and secure deletion. A
+last-model references. On-disk databases use WAL with `synchronous=FULL` and secure deletion. A
 successful migration performs a truncating checkpoint before the database is returned. If the
 checkpoint is busy, `Storage::open` fails closed. Every later supported on-disk open retries the
 checkpoint even when schema version 2 is already committed, so a transient reader cannot

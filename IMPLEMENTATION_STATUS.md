@@ -780,7 +780,7 @@ Implemented:
 - SQLite schema version 2 with a transactional migration from schema 1, provider CRUD, active
   provider selection, per-profile last-model state, enabled-state enforcement, and foreign-key
   cascades. Untrusted alpha-1 references are cleared; `session:` references are rejected by
-  persistence. On-disk connections use WAL, `synchronous=NORMAL`, secure deletion, and a truncating
+  persistence. On-disk connections use WAL, `synchronous=FULL`, secure deletion, and a truncating
   post-migration checkpoint. The actual migrated schema contains only a secret reference and no
   credential value, and passes `PRAGMA foreign_key_check`. A busy truncating checkpoint fails the
   open operation closed, and every later supported on-disk open retries cleanup even after the

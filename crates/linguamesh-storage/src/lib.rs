@@ -1714,7 +1714,7 @@ fn configure_connection(connection: &Connection) -> Result<(), TranslationError>
     }
     connection
         .execute_batch(
-            "PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA secure_delete = ON;",
+            "PRAGMA foreign_keys = ON; PRAGMA synchronous = FULL; PRAGMA secure_delete = ON;",
         )
         .map_err(|error| map_error(&error))
 }
@@ -2874,7 +2874,7 @@ trailer
             .connection
             .query_row("PRAGMA synchronous", [], |row| row.get::<_, u32>(0))
             .expect("synchronous mode");
-        assert_eq!(synchronous, 1);
+        assert_eq!(synchronous, 2);
         let mut foreign_key_check = storage
             .connection
             .prepare("PRAGMA foreign_key_check")

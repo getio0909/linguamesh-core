@@ -36,7 +36,7 @@ state, active-provider selection, and per-profile last-model selection; later mi
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
 preserve schema-1 profile metadata while clearing untrusted legacy secret references, enable WAL,
-secure deletion, and
+`synchronous=FULL` durable commits, secure deletion, and
 foreign-key enforcement for every connection, and never defines a credential-value column. Every
 supported on-disk open retries the truncating checkpoint so a busy post-migration attempt fails
 closed without abandoning cleanup. On Linux's default Unix VFS, SQLite's no-follow open flag
