@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-21 — Reproducible Linux SDK package verification
+
+Assumption: the Linux SDK archive is prerelease evidence only; reproducibility and consumer
+linkage must be verified before any artifact can be considered for a signed release.
+
+- `bash tools/verify-linux-sdk-package.sh` rebuilt the `0.1.0-alpha.2` archive twice from the
+  current Core revision `19229184a21a6725326a3d30dea9bc72e5ac999f` and reproduced SHA-256
+  `487c83c17f80634826437e94ca7d817e83f0addf60999d6789fcb58beb774afc`.
+- The verifier accepted the outer archive and every packaged file, validated `linguamesh-core.pc`,
+  and compiled and ran the packaged static-library C consumer smoke test.
+- The generated archive remains local, unsigned prerelease evidence. No release-manifest artifact
+  or stable-release claim is made.
+
 ## 2026-07-21 — Document decoder fuzz and AddressSanitizer smoke
 
 Assumption: Milestone 8's parser-boundary requirement includes every supported document
