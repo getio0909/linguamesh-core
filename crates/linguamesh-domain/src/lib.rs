@@ -1999,6 +1999,100 @@ impl fmt::Debug for TranslationError {
     }
 }
 
+/// 标识 usage 数据的可信来源。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSource {
+    /// 由提供商响应直接报告并通过边界校验。
+    ProviderReported,
+    /// 由本地输入和输出文本按保守规则估算。
+    LocallyEstimated,
+    /// 当前提供商或传输没有可用 usage 数据。
+    Unknown,
+}
+
+/// 表示不含文本、凭据或定价假设的归一化 usage 记录。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    /// usage 数据的可信来源。
+    pub source: UsageSource,
+    /// 输入 token 数；未知时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// 输出 token 数；未知时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// 总 token 数；未知时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+}
+
+const MAX_USAGE_TOKENS: u64 = 16_777_216;
+
+impl UsageRecord {
+    /// 创建明确未知的 usage 记录。
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            source: UsageSource::Unknown,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+        }
+    }
+
+    /// 创建经过上限约束的提供商 usage 记录。
+    #[must_use]
+    pub const fn provider_reported(
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+    ) -> Self {
+        Self {
+            source: UsageSource::ProviderReported,
+            input_tokens: cap_usage_tokens(input_tokens),
+            output_tokens: cap_usage_tokens(output_tokens),
+            total_tokens: cap_usage_tokens(total_tokens),
+        }
+    }
+
+    /// 从输入和输出文本创建保守的本地 usage 估算。
+    #[must_use]
+    pub fn locally_estimated(input: &str, output: &str) -> Self {
+        let input_tokens = approximate_token_count(input);
+        let output_tokens = approximate_token_count(output);
+        Self {
+            source: UsageSource::LocallyEstimated,
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(output_tokens),
+            total_tokens: Some(
+                input_tokens
+                    .saturating_add(output_tokens)
+                    .min(MAX_USAGE_TOKENS),
+            ),
+        }
+    }
+}
+
+const fn cap_usage_tokens(value: Option<u64>) -> Option<u64> {
+    match value {
+        Some(value) => Some(if value > MAX_USAGE_TOKENS {
+            MAX_USAGE_TOKENS
+        } else {
+            value
+        }),
+        None => None,
+    }
+}
+
+fn approximate_token_count(text: &str) -> u64 {
+    let bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    bytes
+        .saturating_add(3)
+        .saturating_div(4)
+        .min(MAX_USAGE_TOKENS)
+}
+
 /// 表示按顺序产生的翻译生命周期事件。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -2019,6 +2113,9 @@ pub enum TranslationEvent {
     Completed {
         /// 从零开始且单调递增的序号。
         sequence: u64,
+        /// 可选的归一化 usage；缺失表示旧调用方或未知来源。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<UsageRecord>,
     },
     /// 操作在保留已接收文本后取消。
     Cancelled {
@@ -2041,7 +2138,7 @@ impl TranslationEvent {
         match self {
             Self::Started { sequence }
             | Self::TextDelta { sequence, .. }
-            | Self::Completed { sequence }
+            | Self::Completed { sequence, .. }
             | Self::Cancelled { sequence }
             | Self::Failed { sequence, .. } => *sequence,
         }
@@ -2061,11 +2158,11 @@ impl TranslationEvent {
 mod tests {
     use super::{
         ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
-        Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, ProfileValidationError,
-        ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef, SecretRefNamespace,
-        SecretValue, TranslationError, TranslationEvent, TranslationPreset, TranslationPrivacyMode,
-        TranslationQualityMode, TranslationRequest, protect_source_text,
-        protect_source_text_with_glossary,
+        Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, MAX_USAGE_TOKENS,
+        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef,
+        SecretRefNamespace, SecretValue, TranslationError, TranslationEvent, TranslationPreset,
+        TranslationPrivacyMode, TranslationQualityMode, TranslationRequest, UsageRecord,
+        UsageSource, protect_source_text, protect_source_text_with_glossary,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -2079,6 +2176,47 @@ mod tests {
         };
         assert!(failed.is_terminal());
         assert_eq!(failed.sequence(), 4);
+    }
+
+    #[test]
+    fn usage_records_preserve_source_and_bound_counts() {
+        let estimated = UsageRecord::locally_estimated("abcd", "你好");
+        assert_eq!(estimated.source, UsageSource::LocallyEstimated);
+        assert_eq!(estimated.input_tokens, Some(1));
+        assert_eq!(estimated.output_tokens, Some(2));
+        assert_eq!(estimated.total_tokens, Some(3));
+
+        let reported = UsageRecord::provider_reported(Some(u64::MAX), Some(8), None);
+        assert_eq!(reported.source, UsageSource::ProviderReported);
+        assert_eq!(reported.input_tokens, Some(MAX_USAGE_TOKENS));
+        assert_eq!(reported.output_tokens, Some(8));
+        assert_eq!(reported.total_tokens, None);
+        assert_eq!(UsageRecord::unknown().source, UsageSource::Unknown);
+    }
+
+    #[test]
+    fn completed_usage_is_backward_compatible_and_round_trips() {
+        let legacy: TranslationEvent = serde_json::from_value(serde_json::json!({
+            "type": "completed",
+            "sequence": 2
+        }))
+        .expect("decode legacy completed event");
+        assert_eq!(
+            legacy,
+            TranslationEvent::Completed {
+                sequence: 2,
+                usage: None,
+            }
+        );
+
+        let event = TranslationEvent::Completed {
+            sequence: 3,
+            usage: Some(UsageRecord::provider_reported(Some(4), Some(2), Some(6))),
+        };
+        let decoded: TranslationEvent =
+            serde_json::from_value(serde_json::to_value(&event).expect("encode usage event"))
+                .expect("decode usage event");
+        assert_eq!(decoded, event);
     }
 
     #[test]

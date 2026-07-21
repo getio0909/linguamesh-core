@@ -3,7 +3,7 @@
 use futures_util::StreamExt;
 use linguamesh_domain::{
     CoreCompatibility, ErrorKind, ModelDescriptor, TranslationError, TranslationEvent,
-    TranslationRequest,
+    TranslationRequest, UsageRecord,
 };
 use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
 use linguamesh_provider_api::ModelProvider;
@@ -33,6 +33,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "routing_planner_v1",
     "translation_quality_modes_v1",
     "translation_presets_v1",
+    "usage_records_v1",
     "streaming_text_v1",
     "text_translation_v1",
 ];
@@ -144,7 +145,16 @@ impl TranslationEngine {
                 send_error_terminal(&sender, sequence, error).await;
                 return;
             }
-            let _ = sender.send(TranslationEvent::Completed { sequence }).await;
+            let usage = UsageRecord::locally_estimated(
+                validation_request.source_text.as_str(),
+                output.as_str(),
+            );
+            let _ = sender
+                .send(TranslationEvent::Completed {
+                    sequence,
+                    usage: Some(usage),
+                })
+                .await;
         });
         TranslationOperation {
             events: receiver,
@@ -239,7 +249,7 @@ mod tests {
         CORE_FEATURES, CORE_SEMANTIC_VERSION, TranslationEngine, core_compatibility,
         validate_translation_output,
     };
-    use linguamesh_domain::{ErrorKind, TranslationEvent, TranslationRequest};
+    use linguamesh_domain::{ErrorKind, TranslationEvent, TranslationRequest, UsageSource};
     use linguamesh_protocol::{ABI_VERSION_MAJOR, PROTOCOL_VERSION};
     use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
     use linguamesh_testkit::FakeProviderServer;
@@ -286,18 +296,34 @@ mod tests {
             engine.translate(TranslationRequest::new("Hello", "zh-CN", "fake-translator"));
         let mut output = String::new();
         let mut terminals = 0;
+        let mut usage = None;
         while let Some(event) = operation.next_event().await {
             match event {
                 TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed {
+                    usage: completed_usage,
+                    ..
+                } => {
+                    terminals += 1;
+                    usage = completed_usage;
+                }
                 event if event.is_terminal() => {
                     terminals += 1;
-                    assert!(matches!(event, TranslationEvent::Completed { .. }));
+                    assert!(!matches!(event, TranslationEvent::Completed { .. }));
                 }
                 _ => {}
             }
         }
         assert_eq!(output, "你好，LinguaMesh！");
         assert_eq!(terminals, 1);
+        assert_eq!(
+            usage.as_ref().map(|record| record.source),
+            Some(UsageSource::LocallyEstimated)
+        );
+        assert_eq!(
+            usage.as_ref().and_then(|record| record.total_tokens),
+            Some(8)
+        );
         server.shutdown().await;
     }
 
