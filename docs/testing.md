@@ -31,6 +31,10 @@ that non-empty source text cannot reach `Completed` with empty output or Unicode
 characters; received deltas remain available before the typed failure. This validation is
 deterministic and does not create hidden additional provider calls.
 
+Usage-record tests cover source preservation, token-count bounds, local estimation, and JSON
+backward compatibility for completed events without a usage field. They do not claim provider
+wire-level usage parsing or pricing accuracy.
+
 Translation-preset tests cover General/Technical/Marketing stable IDs, legacy-request defaults,
 bounded optional fields, control and credential-shaped input rejection, escaped prompt rendering,
 and translation-memory identity separation. The engine validates the preset before any provider

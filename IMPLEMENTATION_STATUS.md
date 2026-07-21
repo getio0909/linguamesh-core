@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-21 — normalized translation usage records
+
+Assumption: usage metadata is non-sensitive and must distinguish provider-reported counts from a
+bounded local estimate; no provider pricing or source/translated content is persisted.
+
+- Added `UsageSource` and bounded `UsageRecord` domain types and an optional `usage` field on
+  completed Rust translation events. Missing usage remains backward-compatible with older JSON.
+- Added the `usage_records_v1` compatibility feature. The engine currently emits a conservative
+  local estimate; provider adapters can populate the provider-reported constructor in a later
+  checkpoint. The stable C ABI/protobuf projection intentionally remains unchanged.
+- `cargo fmt --all`, `cargo check --workspace --all-targets --all-features --offline`, strict
+  workspace Clippy, and `cargo test --workspace --all-targets --all-features --offline` passed.
+
+This is a prerelease Rust-host contract. Provider-reported parsing, pricing estimates, native
+non-Rust ABI projection, and stable-release qualification remain open.
+
 ## 2026-07-21 — SQLite WAL replay after writer disconnect
 
 Assumption: process interruption can leave a committed transaction in the SQLite WAL; the next
