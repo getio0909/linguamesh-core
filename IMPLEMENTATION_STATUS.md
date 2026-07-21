@@ -1,5 +1,25 @@
 # Implementation Status
 
+## 2026-07-21 — Document decoder fuzz and AddressSanitizer smoke
+
+Assumption: Milestone 8's parser-boundary requirement includes every supported document
+extension and must enforce the existing 4 MiB document limit before parser work begins; this
+checkpoint records fuzz-smoke evidence only and does not claim parser-completeness or a stable
+release.
+
+- Added a `document_decoders` libFuzzer target covering text, subtitle, CSV, HTML, JSON, DOCX,
+  PPTX, XLSX, EPUB, and PDF dispatch through `DocumentJob::from_utf8`. Inputs are clamped to
+  `MAX_DOCUMENT_BYTES`, and the target performs no provider, credential, or filesystem work.
+- Added a locked fuzz-workspace dependency graph and a 106-file minimized corpus generated from
+  the bounded local smoke. The fuzz workflow runs protocol and document targets under the pinned
+  nightly `2026-07-20` AddressSanitizer toolchain for 2,000 iterations or 30 seconds each.
+- Local document smoke passed with 2,000 runs (`cov: 869`, `ft: 1310`) and no crash. Core CI
+  `29791113656`, Fuzz and sanitizers `29791113663`, and Native SDK `29791113659` passed for
+  commit `e7ca21df183b15e10e157f175526a1b7ac0b3ad0`.
+
+This closes the executable document-decoder fuzz-smoke sub-boundary. Broader FFI misuse
+sanitizers, cross-client conformance, signed artifacts, and stable release remain open.
+
 ## 2026-07-21 — Protocol decoder fuzz and AddressSanitizer smoke
 
 Assumption: Milestone 8 requires an executable coverage-guided decoder harness and sanitizer-backed
