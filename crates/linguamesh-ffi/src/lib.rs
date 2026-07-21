@@ -2,6 +2,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use linguamesh_application::{HostSecretBroker, SecretRequestLease, host_secret_channel};
+use linguamesh_document::{DocumentJob, MAX_DOCUMENT_BYTES};
 use linguamesh_domain::{
     CorrelationId, ErrorKind, FileLease, FileLeaseError, OperationId, SecretRef, SecretValue,
     TranslationEvent, TranslationRequest,
@@ -348,6 +349,66 @@ pub unsafe extern "C" fn lm_engine_file_lease_destroy(
         };
         lease.revoke();
         LmResultCode::Ok
+    })
+}
+
+/// 使用一次性 lease 校验有界文档快照，并在成功后消费该 lease。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_consume_document(
+    engine: *mut LmEngine,
+    lease_id: u64,
+    source_name_data: *const u8,
+    source_name_len: usize,
+    document_data: *const u8,
+    document_len: usize,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if lease_id == 0
+            || source_name_len == 0
+            || source_name_len > MAX_FILE_LEASE_LOCATION_BYTES
+            || document_len > MAX_DOCUMENT_BYTES
+            || source_name_data.is_null()
+            || document_data.is_null()
+        {
+            return LmResultCode::InvalidArgument;
+        }
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        if engine.shutdown.load(Ordering::Acquire) {
+            return LmResultCode::Shutdown;
+        }
+        // SAFETY：调用方保证输入切片在本次同步调用期间保持只读且有效；长度已经受上限约束。
+        let source_name = unsafe { std::slice::from_raw_parts(source_name_data, source_name_len) };
+        // SAFETY：调用方保证输入切片在本次同步调用期间保持只读且有效；长度已经受上限约束。
+        let document = unsafe { std::slice::from_raw_parts(document_data, document_len) };
+        let Ok(source_name) = std::str::from_utf8(source_name) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let lease = {
+            let leases = lock_unpoisoned(&engine.file_leases);
+            leases.get(&lease_id).cloned()
+        };
+        let Some(lease) = lease else {
+            return LmResultCode::InvalidArgument;
+        };
+        if lease.acquire().is_err() {
+            return LmResultCode::InvalidArgument;
+        }
+        if DocumentJob::from_utf8(source_name, document).is_err() {
+            return LmResultCode::MalformedMessage;
+        }
+        if !lease.is_active() {
+            return LmResultCode::InvalidArgument;
+        }
+        lease.revoke();
+        let mut leases = lock_unpoisoned(&engine.file_leases);
+        if leases.contains_key(&lease_id) {
+            leases.remove(&lease_id);
+            LmResultCode::Ok
+        } else {
+            LmResultCode::InvalidArgument
+        }
     })
 }
 
@@ -1108,12 +1169,13 @@ mod tests {
     use super::{
         LmBuffer, LmEngine, LmResultCode, MAX_FILE_LEASES, MAX_OUTSTANDING_BUFFERS,
         MAX_PROTOCOL_MESSAGE_BYTES, lm_engine_buffer_free, lm_engine_cancel, lm_engine_create,
-        lm_engine_destroy, lm_engine_file_lease_create_desktop_path,
-        lm_engine_file_lease_create_posix_descriptor, lm_engine_file_lease_create_temporary_path,
-        lm_engine_file_lease_destroy, lm_engine_file_lease_expire, lm_engine_file_lease_is_active,
-        lm_engine_file_lease_revoke, lm_engine_get_abi_version, lm_engine_get_compatibility,
-        lm_engine_get_protocol_version, lm_engine_get_version, lm_engine_poll_event,
-        lm_engine_send_host_response, lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
+        lm_engine_destroy, lm_engine_file_lease_consume_document,
+        lm_engine_file_lease_create_desktop_path, lm_engine_file_lease_create_posix_descriptor,
+        lm_engine_file_lease_create_temporary_path, lm_engine_file_lease_destroy,
+        lm_engine_file_lease_expire, lm_engine_file_lease_is_active, lm_engine_file_lease_revoke,
+        lm_engine_get_abi_version, lm_engine_get_compatibility, lm_engine_get_protocol_version,
+        lm_engine_get_version, lm_engine_poll_event, lm_engine_send_host_response,
+        lm_engine_shutdown, lm_engine_submit, lock_unpoisoned,
     };
     use linguamesh_domain::{FileLease, FileLeaseError, SecretValue};
     use linguamesh_protocol::{
@@ -1538,6 +1600,89 @@ mod tests {
             lease.acquire().expect_err("expired borrow"),
             FileLeaseError::Expired
         );
+    }
+
+    #[test]
+    fn ffi_file_lease_document_consumption_is_bounded_and_one_shot() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let path = b"/tmp/ffi-document-lease";
+        let mut lease_id = 0_u64;
+        // SAFETY：路径和输出槽位在调用期间有效。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_temporary_path(
+                    engine,
+                    path.as_ptr(),
+                    path.len(),
+                    &raw mut lease_id,
+                )
+            },
+            LmResultCode::Ok
+        );
+        let name = b"notes.txt";
+        let document = b"Hello\nWorld";
+        // SAFETY：输入切片在调用期间保持有效且不被修改。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_consume_document(
+                    engine,
+                    lease_id,
+                    name.as_ptr(),
+                    name.len(),
+                    document.as_ptr(),
+                    document.len(),
+                )
+            },
+            LmResultCode::Ok
+        );
+        let mut active = 0_u8;
+        // SAFETY：成功消费后令牌已经从引擎注册表移除。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(engine, lease_id, &raw mut active) },
+            LmResultCode::InvalidArgument
+        );
+
+        let mut retry_id = 0_u64;
+        // SAFETY：路径和输出槽位在调用期间有效。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_temporary_path(
+                    engine,
+                    path.as_ptr(),
+                    path.len(),
+                    &raw mut retry_id,
+                )
+            },
+            LmResultCode::Ok
+        );
+        let malformed = b"not valid utf-8: \xff";
+        // SAFETY：输入切片在调用期间保持有效且不被修改。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_consume_document(
+                    engine,
+                    retry_id,
+                    name.as_ptr(),
+                    name.len(),
+                    malformed.as_ptr(),
+                    malformed.len(),
+                )
+            },
+            LmResultCode::MalformedMessage
+        );
+        // SAFETY：解析失败不会消费 lease，仍可由宿主显式销毁。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(engine, retry_id, &raw mut active) },
+            LmResultCode::Ok
+        );
+        assert_eq!(active, 1);
+        // SAFETY：测试句柄由当前线程独占并只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
     }
 
     #[test]

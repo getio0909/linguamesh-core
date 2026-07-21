@@ -67,8 +67,11 @@ expiry or explicit revocation makes subsequent guard access fail closed. The C A
 expiry, revocation, and destroy calls. Creation accepts bounded UTF-8 paths or validated numeric
 platform descriptors/handles and returns only a numeric lease token; resource values never cross
 the ABI. Each engine permits at most 64 leases, tokens are not portable between engines, and
-cleanup remains valid after shutdown. These calls define lifecycle control only: document-command
-resource consumption and OS-handle transfer are still open. Engine handles still depend on the
+cleanup remains valid after shutdown. `lm_engine_file_lease_consume_document` accepts a bounded
+UTF-8 source name and document snapshot, parses it with the shared document contract, and consumes
+the lease exactly once on success; malformed input or an expired lease is rejected without
+consumption. This transfers validated document bytes, not the underlying OS handle: platform
+handle duplication/transfer remains open. Engine handles still depend on the
 documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
 destroyed handles are not protected by a handle registry in ABI major `1`.
 

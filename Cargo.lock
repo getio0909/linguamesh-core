@@ -824,6 +824,7 @@ name = "linguamesh-ffi"
 version = "0.1.0-alpha.2"
 dependencies = [
  "linguamesh-application",
+ "linguamesh-document",
  "linguamesh-domain",
  "linguamesh-engine",
  "linguamesh-protocol",

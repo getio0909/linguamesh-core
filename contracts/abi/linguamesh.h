@@ -116,6 +116,16 @@ LM_API LmResultCode lm_engine_file_lease_destroy(
     uint64_t lease_id
 );
 
+/* 校验有界文档快照并一次性消费 lease；解析失败不会消费 lease。 */
+LM_API LmResultCode lm_engine_file_lease_consume_document(
+    LmEngine *engine,
+    uint64_t lease_id,
+    const uint8_t *source_name_data,
+    size_t source_name_len,
+    const uint8_t *document_data,
+    size_t document_len
+);
+
 LM_API LmResultCode lm_engine_submit(
     LmEngine *engine,
     const uint8_t *command_data,

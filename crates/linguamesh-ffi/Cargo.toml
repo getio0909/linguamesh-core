@@ -11,6 +11,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 linguamesh-application.workspace = true
 linguamesh-domain.workspace = true
+linguamesh-document.workspace = true
 linguamesh-engine.workspace = true
 linguamesh-protocol.workspace = true
 linguamesh-provider-openai.workspace = true

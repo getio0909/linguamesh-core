@@ -25,6 +25,20 @@ int main(void) {
     assert(active == 0);
     assert(lm_engine_file_lease_destroy(engine, lease_id) == LM_RESULT_OK);
     lease_id = 0;
+    const uint8_t document_name[] = "notes.txt";
+    const uint8_t document_data[] = "Hello from a leased document.";
+    assert(lm_engine_file_lease_create_temporary_path(engine, path, sizeof(path) - 1, &lease_id)
+        == LM_RESULT_OK);
+    assert(lm_engine_file_lease_consume_document(
+               engine,
+               lease_id,
+               document_name,
+               sizeof(document_name) - 1,
+               document_data,
+               sizeof(document_data) - 1)
+        == LM_RESULT_OK);
+    assert(lm_engine_file_lease_is_active(engine, lease_id, &active) == LM_RESULT_INVALID_ARGUMENT);
+    lease_id = 0;
     assert(lm_engine_file_lease_create_posix_descriptor(engine, 0, &lease_id) == LM_RESULT_OK);
     assert(lm_engine_file_lease_revoke(engine, lease_id) == LM_RESULT_OK);
     assert(lm_engine_file_lease_destroy(engine, lease_id) == LM_RESULT_OK);
