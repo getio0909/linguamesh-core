@@ -19,6 +19,7 @@ use prost::Message;
 use std::collections::{HashMap, hash_map::Entry};
 #[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::BorrowedFd;
