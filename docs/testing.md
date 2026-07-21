@@ -106,6 +106,13 @@ discovery work, rejection of late secrets, in-flight cancellation and credential
 provider disconnect, and adapter rejection before any secret request. Domain tests reject unsafe
 endpoints before a profile can reach the application layer.
 
+The storage suite also keeps a reader transaction open while a writer commits a provider profile,
+then closes the writer before reopening the database. The
+`wal_replay_preserves_committed_profile_after_writer_disconnect` regression requires the `-wal`
+sidecar to exist before the reader closes and verifies that the committed model and SecretRef are
+restored by the next `Storage::open`. This is bounded WAL-replay evidence after a writer
+disconnect, not a claim that every filesystem power-loss or SQLite VFS failure is covered.
+
 The Core domain suite also covers the `FileLease` lifecycle for desktop, temporary/output, POSIX,
 Android ParcelFileDescriptor, and Windows-handle resource shapes. It rejects invalid resource
 identifiers before work and proves that an acquired guard cannot read its resource after expiry or

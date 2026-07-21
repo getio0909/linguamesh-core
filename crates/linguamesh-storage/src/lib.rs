@@ -3009,6 +3009,40 @@ trailer
     }
 
     #[test]
+    fn wal_replay_preserves_committed_profile_after_writer_disconnect() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("wal-replay.sqlite3");
+        let profile = profile(
+            "wal-replay-profile",
+            Some(PERSISTENT_SECRET_REF),
+            Some("wal-model"),
+        );
+        let mut storage = Storage::open(&path).expect("storage");
+        let reader = Connection::open(&path).expect("reader connection");
+        reader.execute_batch("BEGIN").expect("reader transaction");
+        reader
+            .query_row("SELECT COUNT(*) FROM provider_profiles", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("reader snapshot");
+
+        storage
+            .save_and_activate_provider(&profile)
+            .expect("committed profile");
+        drop(storage);
+        assert!(path.with_extension("sqlite3-wal").is_file());
+
+        drop(reader);
+        let reopened = Storage::open(&path).expect("replayed storage");
+        let restored = reopened
+            .provider_profile(profile.id())
+            .expect("profile query")
+            .expect("replayed profile");
+        assert_eq!(restored.selected_model(), Some("wal-model"));
+        assert_eq!(restored.secret_ref(), profile.secret_ref());
+    }
+
+    #[test]
     fn future_schema_is_rejected_before_journal_mutation() {
         let directory = tempdir().expect("temp directory");
         let path = directory.path().join("future.sqlite3");

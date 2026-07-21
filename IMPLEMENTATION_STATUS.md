@@ -1,5 +1,17 @@
 # Implementation Status
 
+## 2026-07-21 — SQLite WAL replay after writer disconnect
+
+Assumption: process interruption can leave a committed transaction in the SQLite WAL; the next
+Core open must replay that sidecar without losing the provider model or SecretRef.
+
+- Added `wal_replay_preserves_committed_profile_after_writer_disconnect`. A private reader holds a
+  snapshot while the writer commits, the writer closes before checkpointing, the `-wal` sidecar is
+  required to exist, and the next `Storage::open` restores the committed profile.
+- Local `cargo fmt --all -- --check` and the targeted locked offline storage test passed (`1 passed;
+  0 failed`). This is bounded WAL-replay evidence, not a claim for physical power-loss or every
+  SQLite VFS failure.
+
 ## 2026-07-21 — Reproducible Linux SDK package verification
 
 Assumption: the Linux SDK archive is prerelease evidence only; reproducibility and consumer
