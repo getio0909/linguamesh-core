@@ -1,7 +1,15 @@
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "linguamesh.h"
 
 #include <assert.h>
 #include <stdio.h>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 int main(void) {
     assert(lm_engine_get_abi_version() == LM_ABI_VERSION_MAJOR);
@@ -38,6 +46,23 @@ int main(void) {
                sizeof(document_data) - 1)
         == LM_RESULT_OK);
     assert(lm_engine_file_lease_is_active(engine, lease_id, &active) == LM_RESULT_INVALID_ARGUMENT);
+#if !defined(_WIN32)
+    FILE *document_file = tmpfile();
+    assert(document_file != NULL);
+    const char *descriptor_payload = "Hello from a POSIX descriptor.";
+    assert(fputs(descriptor_payload, document_file) >= 0);
+    assert(fflush(document_file) == 0);
+    assert(fseek(document_file, 0, SEEK_SET) == 0);
+    lease_id = 0;
+    assert(lm_engine_file_lease_create_posix_descriptor(
+               engine, fileno(document_file), &lease_id)
+        == LM_RESULT_OK);
+    assert(lm_engine_file_lease_consume_posix_document(
+               engine, lease_id, document_name, sizeof(document_name) - 1)
+        == LM_RESULT_OK);
+    assert(lm_engine_file_lease_is_active(engine, lease_id, &active) == LM_RESULT_INVALID_ARGUMENT);
+    assert(fclose(document_file) == 0);
+#endif
     lease_id = 0;
     assert(lm_engine_file_lease_create_posix_descriptor(engine, 0, &lease_id) == LM_RESULT_OK);
     assert(lm_engine_file_lease_revoke(engine, lease_id) == LM_RESULT_OK);

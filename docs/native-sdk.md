@@ -70,8 +70,10 @@ the ABI. Each engine permits at most 64 leases, tokens are not portable between 
 cleanup remains valid after shutdown. `lm_engine_file_lease_consume_document` accepts a bounded
 UTF-8 source name and document snapshot, parses it with the shared document contract, and consumes
 the lease exactly once on success; malformed input or an expired lease is rejected without
-consumption. This transfers validated document bytes, not the underlying OS handle: platform
-handle duplication/transfer remains open. Engine handles still depend on the
+consumption. On Unix, `lm_engine_file_lease_consume_posix_document` duplicates the registered
+POSIX descriptor, reads at most `MAX_DOCUMENT_BYTES + 1`, and applies the same one-shot parse and
+lease cleanup rules; the caller must position the descriptor at the beginning of the document.
+The original descriptor remains owned by the host. Engine handles still depend on the
 documented single-destroy and close-after-workers-stop contract; stale, forged, or concurrently
 destroyed handles are not protected by a handle registry in ABI major `1`.
 

@@ -17,6 +17,11 @@ use linguamesh_protocol::{
 use linguamesh_provider_openai::{OpenAiCompatibleProvider, OpenAiConfig};
 use prost::Message;
 use std::collections::{HashMap, hash_map::Entry};
+#[cfg(unix)]
+use std::fs::File;
+use std::io::Read;
+#[cfg(unix)]
+use std::os::fd::BorrowedFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -385,31 +390,119 @@ pub unsafe extern "C" fn lm_engine_file_lease_consume_document(
         let Ok(source_name) = std::str::from_utf8(source_name) else {
             return LmResultCode::InvalidArgument;
         };
-        let lease = {
-            let leases = lock_unpoisoned(&engine.file_leases);
-            leases.get(&lease_id).cloned()
-        };
-        let Some(lease) = lease else {
-            return LmResultCode::InvalidArgument;
-        };
-        if lease.acquire().is_err() {
-            return LmResultCode::InvalidArgument;
-        }
-        if DocumentJob::from_utf8(source_name, document).is_err() {
-            return LmResultCode::MalformedMessage;
-        }
-        if !lease.is_active() {
-            return LmResultCode::InvalidArgument;
-        }
-        lease.revoke();
-        let mut leases = lock_unpoisoned(&engine.file_leases);
-        if leases.contains_key(&lease_id) {
-            leases.remove(&lease_id);
-            LmResultCode::Ok
-        } else {
-            LmResultCode::InvalidArgument
-        }
+        consume_document_bytes(engine, lease_id, source_name, document)
     })
+}
+
+/// 通过已注册的 POSIX 文件描述符复制有界文档快照，并在成功后消费 lease。
+#[cfg(unix)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_consume_posix_document(
+    engine: *mut LmEngine,
+    lease_id: u64,
+    source_name_data: *const u8,
+    source_name_len: usize,
+) -> LmResultCode {
+    ffi_guard(|| {
+        if lease_id == 0
+            || source_name_len == 0
+            || source_name_len > MAX_FILE_LEASE_LOCATION_BYTES
+            || source_name_data.is_null()
+        {
+            return LmResultCode::InvalidArgument;
+        }
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
+        if engine.shutdown.load(Ordering::Acquire) {
+            return LmResultCode::Shutdown;
+        }
+        // SAFETY：调用方保证输入切片在本次同步调用期间保持只读且有效；长度已经受上限约束。
+        let source_name = unsafe { std::slice::from_raw_parts(source_name_data, source_name_len) };
+        let Ok(source_name) = std::str::from_utf8(source_name) else {
+            return LmResultCode::InvalidArgument;
+        };
+        let descriptor = {
+            let leases = lock_unpoisoned(&engine.file_leases);
+            let Some(lease) = leases.get(&lease_id) else {
+                return LmResultCode::InvalidArgument;
+            };
+            let Ok(guard) = lease.acquire() else {
+                return LmResultCode::InvalidArgument;
+            };
+            let Ok(linguamesh_domain::FileLeaseResource::PosixDescriptor { fd }) = guard.resource()
+            else {
+                return LmResultCode::InvalidArgument;
+            };
+            *fd
+        };
+        let Ok(raw_fd) = std::os::fd::RawFd::try_from(descriptor) else {
+            return LmResultCode::InvalidArgument;
+        };
+        // 安全性：Core 仅在复制描述符期间借用它；宿主继续拥有原始描述符，复制的 File 负责关闭副本。
+        let borrowed = unsafe { BorrowedFd::borrow_raw(raw_fd) };
+        let Ok(owned) = borrowed.try_clone_to_owned() else {
+            return LmResultCode::InvalidArgument;
+        };
+        let file = File::from(owned);
+        let mut document = Vec::new();
+        let read_limit = u64::try_from(MAX_DOCUMENT_BYTES.saturating_add(1)).unwrap_or(u64::MAX);
+        if file.take(read_limit).read_to_end(&mut document).is_err() {
+            return LmResultCode::InvalidArgument;
+        }
+        if document.len() > MAX_DOCUMENT_BYTES {
+            return LmResultCode::InvalidArgument;
+        }
+        consume_document_bytes(engine, lease_id, source_name, &document)
+    })
+}
+
+/// 在共享文档解析成功后原子地撤销并移除一次性 lease。
+fn consume_document_bytes(
+    engine: &LmEngine,
+    lease_id: u64,
+    source_name: &str,
+    document: &[u8],
+) -> LmResultCode {
+    if source_name.contains('\0') {
+        return LmResultCode::InvalidArgument;
+    }
+    let lease = {
+        let leases = lock_unpoisoned(&engine.file_leases);
+        leases.get(&lease_id).cloned()
+    };
+    let Some(lease) = lease else {
+        return LmResultCode::InvalidArgument;
+    };
+    if lease.acquire().is_err() {
+        return LmResultCode::InvalidArgument;
+    }
+    if DocumentJob::from_utf8(source_name, document).is_err() {
+        return LmResultCode::MalformedMessage;
+    }
+    if !lease.is_active() {
+        return LmResultCode::InvalidArgument;
+    }
+    lease.revoke();
+    let mut leases = lock_unpoisoned(&engine.file_leases);
+    if leases.contains_key(&lease_id) {
+        leases.remove(&lease_id);
+        LmResultCode::Ok
+    } else {
+        LmResultCode::InvalidArgument
+    }
+}
+
+/// 非 Unix 平台不接受 POSIX 描述符资源。
+#[cfg(not(unix))]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lm_engine_file_lease_consume_posix_document(
+    _engine: *mut LmEngine,
+    _lease_id: u64,
+    _source_name_data: *const u8,
+    _source_name_len: usize,
+) -> LmResultCode {
+    LmResultCode::UnsupportedMessage
 }
 
 /// 验证并提交版本化命令消息。
@@ -1167,9 +1260,10 @@ fn ffi_guard(operation: impl FnOnce() -> LmResultCode) -> LmResultCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        LmBuffer, LmEngine, LmResultCode, MAX_FILE_LEASES, MAX_OUTSTANDING_BUFFERS,
-        MAX_PROTOCOL_MESSAGE_BYTES, lm_engine_buffer_free, lm_engine_cancel, lm_engine_create,
-        lm_engine_destroy, lm_engine_file_lease_consume_document,
+        LmBuffer, LmEngine, LmResultCode, MAX_DOCUMENT_BYTES, MAX_FILE_LEASES,
+        MAX_OUTSTANDING_BUFFERS, MAX_PROTOCOL_MESSAGE_BYTES, lm_engine_buffer_free,
+        lm_engine_cancel, lm_engine_create, lm_engine_destroy,
+        lm_engine_file_lease_consume_document, lm_engine_file_lease_consume_posix_document,
         lm_engine_file_lease_create_desktop_path, lm_engine_file_lease_create_posix_descriptor,
         lm_engine_file_lease_create_temporary_path, lm_engine_file_lease_destroy,
         lm_engine_file_lease_expire, lm_engine_file_lease_is_active, lm_engine_file_lease_revoke,
@@ -1184,6 +1278,10 @@ mod tests {
     };
     use linguamesh_testkit::FakeProviderServer;
     use prost::Message;
+    #[cfg(unix)]
+    use std::io::{Seek, SeekFrom, Write};
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
     use std::ptr;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1683,6 +1781,104 @@ mod tests {
         assert_eq!(active, 1);
         // SAFETY：测试句柄由当前线程独占并只销毁一次。
         assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffi_file_lease_posix_document_consumption_copies_and_consumes_descriptor() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "linguamesh-ffi-posix-document-{}-{nonce}.txt",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("create temporary descriptor file");
+        file.write_all(b"Hello from a POSIX descriptor.")
+            .expect("write descriptor payload");
+        file.flush().expect("flush descriptor payload");
+        file.seek(SeekFrom::Start(0)).expect("rewind descriptor");
+
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // 安全性：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let mut lease_id = 0_u64;
+        // 安全性：描述符在同步调用期间保持打开，输出槽位有效。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_posix_descriptor(
+                    engine,
+                    i64::from(file.as_raw_fd()),
+                    &raw mut lease_id,
+                )
+            },
+            LmResultCode::Ok
+        );
+        let name = b"notes.txt";
+        // 安全性：源名称在同步调用期间保持有效且不被修改。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_consume_posix_document(
+                    engine,
+                    lease_id,
+                    name.as_ptr(),
+                    name.len(),
+                )
+            },
+            LmResultCode::Ok
+        );
+        let mut active = 0_u8;
+        // 安全性：成功消费后令牌已经从引擎注册表移除。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_is_active(engine, lease_id, &raw mut active) },
+            LmResultCode::InvalidArgument
+        );
+        file.set_len((MAX_DOCUMENT_BYTES as u64) + 1)
+            .expect("extend descriptor beyond document limit");
+        file.seek(SeekFrom::Start(0))
+            .expect("rewind oversized descriptor");
+        let mut oversized_lease_id = 0_u64;
+        // 安全性：描述符仍保持打开，输出槽位有效。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_create_posix_descriptor(
+                    engine,
+                    i64::from(file.as_raw_fd()),
+                    &raw mut oversized_lease_id,
+                )
+            },
+            LmResultCode::Ok
+        );
+        // 安全性：过大输入只验证拒绝结果，不会消费描述符租约。
+        assert_eq!(
+            unsafe {
+                lm_engine_file_lease_consume_posix_document(
+                    engine,
+                    oversized_lease_id,
+                    name.as_ptr(),
+                    name.len(),
+                )
+            },
+            LmResultCode::InvalidArgument
+        );
+        // 安全性：拒绝后租约仍可显式销毁。
+        assert_eq!(
+            unsafe { lm_engine_file_lease_destroy(engine, oversized_lease_id) },
+            LmResultCode::Ok
+        );
+        // 安全性：测试句柄由当前线程创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+        drop(file);
+        std::fs::remove_file(path).expect("remove temporary descriptor file");
     }
 
     #[test]

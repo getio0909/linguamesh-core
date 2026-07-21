@@ -126,6 +126,14 @@ LM_API LmResultCode lm_engine_file_lease_consume_document(
     size_t document_len
 );
 
+/* Unix 从已注册 POSIX 描述符复制有界文档快照；其他平台返回 UNSUPPORTED_MESSAGE。 */
+LM_API LmResultCode lm_engine_file_lease_consume_posix_document(
+    LmEngine *engine,
+    uint64_t lease_id,
+    const uint8_t *source_name_data,
+    size_t source_name_len
+);
+
 LM_API LmResultCode lm_engine_submit(
     LmEngine *engine,
     const uint8_t *command_data,
