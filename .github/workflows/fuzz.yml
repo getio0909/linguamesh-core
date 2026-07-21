@@ -23,13 +23,13 @@ jobs:
         with:
           persist-credentials: false
       # 固定 nightly 工具链以隔离 fuzz 专用不稳定特性。
-      - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66
-        with:
-          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install pinned fuzz toolchain
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Run bounded protocol decoder fuzz smoke with AddressSanitizer
         working-directory: fuzz
         env:
           CARGOFLAGS: --locked
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_TOOLCHAIN }}
         run: cargo fuzz run protocol_decoders -- -runs=2000 -max_total_time=30
