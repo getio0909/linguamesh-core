@@ -142,6 +142,7 @@ impl fmt::Debug for OpenAiConfig {
                 "credential",
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("has_organization", &self.organization.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -199,6 +200,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
                 "credential",
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("has_organization", &self.organization.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
