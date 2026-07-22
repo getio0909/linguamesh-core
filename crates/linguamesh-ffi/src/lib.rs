@@ -2175,7 +2175,7 @@ mod tests {
             target_locale: "zh-CN".into(),
             secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
             organization: String::new(),
-            project: "sk-LM_PROTOCOL_PROJECT_CREDENTIAL".into(),
+            project: "Bearer protocol-project-credential-value".into(),
             custom_headers_json: String::new(),
         };
         let envelope = encoded_envelope(
@@ -2208,7 +2208,7 @@ mod tests {
             secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
             organization: String::new(),
             project: String::new(),
-            custom_headers_json: r#"{"X-Trace-Mode":"sk-LM_HEADER_CREDENTIAL"}"#.into(),
+            custom_headers_json: r#"{"X-Trace-Mode":"Bearer header-credential-value"}"#.into(),
         };
         let envelope = encoded_envelope(
             PROTOCOL_VERSION,
