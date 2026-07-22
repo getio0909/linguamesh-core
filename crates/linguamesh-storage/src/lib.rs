@@ -55,7 +55,9 @@ const PROVIDER_PROFILE_CUSTOM_HEADERS_MIGRATION: &str =
     include_str!("../../../migrations/0023_provider_profile_custom_headers.sql");
 const PROVIDER_PROFILE_SECRET_CUSTOM_HEADERS_MIGRATION: &str =
     include_str!("../../../migrations/0024_provider_profile_secret_custom_headers.sql");
-const LATEST_SCHEMA_VERSION: u32 = 24;
+const PROVIDER_PROFILE_PROXY_MIGRATION: &str =
+    include_str!("../../../migrations/0025_provider_profile_proxy.sql");
+const LATEST_SCHEMA_VERSION: u32 = 25;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -108,6 +110,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (22, PROVIDER_PROFILE_REGION_ACCOUNT_MIGRATION),
     (23, PROVIDER_PROFILE_CUSTOM_HEADERS_MIGRATION),
     (24, PROVIDER_PROFILE_SECRET_CUSTOM_HEADERS_MIGRATION),
+    (25, PROVIDER_PROFILE_PROXY_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1619,9 +1622,9 @@ fn parse_routing_profile_record(
     })
 }
 
-const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
-const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
-const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
+const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
+const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
+const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
 
 struct StoredProfile {
     id: String,
@@ -1637,6 +1640,7 @@ struct StoredProfile {
     account_identifier: Option<String>,
     custom_headers: Option<String>,
     secret_custom_headers_ref: Option<String>,
+    proxy_url: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -1669,6 +1673,7 @@ impl StoredProfile {
         .and_then(|profile| profile.with_region(self.region))
         .and_then(|profile| profile.with_account_identifier(self.account_identifier))
         .and_then(|profile| profile.with_custom_headers(self.custom_headers))
+        .and_then(|profile| profile.with_proxy_url(self.proxy_url))
         .map(|profile| profile.with_secret_custom_headers_ref(secret_custom_headers_ref))
         .map(|profile| profile.with_enabled(self.enabled))
         .and_then(|profile| profile.with_selected_model(self.selected_model))
@@ -1691,8 +1696,9 @@ fn stored_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPr
         account_identifier: row.get(10)?,
         custom_headers: row.get(11)?,
         secret_custom_headers_ref: row.get(12)?,
-        enabled: row.get(13)?,
-        selected_model: row.get(14)?,
+        proxy_url: row.get(13)?,
+        enabled: row.get(14)?,
+        selected_model: row.get(15)?,
     })
 }
 
@@ -1714,7 +1720,7 @@ fn upsert_profile(
     }
     transaction
         .execute(
-            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, region, account_identifier, custom_headers, secret_custom_headers_ref, preset_id, adapter_type, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, region = excluded.region, account_identifier = excluded.account_identifier, custom_headers = excluded.custom_headers, secret_custom_headers_ref = excluded.secret_custom_headers_ref, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
+            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, region, account_identifier, custom_headers, secret_custom_headers_ref, proxy_url, preset_id, adapter_type, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, region = excluded.region, account_identifier = excluded.account_identifier, custom_headers = excluded.custom_headers, secret_custom_headers_ref = excluded.secret_custom_headers_ref, proxy_url = excluded.proxy_url, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
             params![
                 profile.id().as_str(),
                 profile.display_name(),
@@ -1729,6 +1735,7 @@ fn upsert_profile(
                 profile
                     .secret_custom_headers_ref()
                     .map(SecretRef::as_str),
+                profile.proxy_url(),
                 profile.preset_id(),
                 profile.adapter_type(),
                 profile.enabled(),
@@ -1921,7 +1928,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 24);
+        assert_eq!(storage.schema_version().expect("version"), 25);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1950,7 +1957,7 @@ mod tests {
         drop(connection);
 
         let mut storage = Storage::open(&path).expect("schema 20 migration");
-        assert_eq!(storage.schema_version().expect("version"), 24);
+        assert_eq!(storage.schema_version().expect("version"), 25);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
@@ -2011,7 +2018,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 24);
+        assert_eq!(storage.schema_version().expect("version"), 25);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2874,7 +2881,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 24);
+        assert_eq!(storage.schema_version().expect("schema version"), 25);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -2971,7 +2978,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 24);
+        assert_eq!(storage.schema_version().expect("version"), 25);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -3053,7 +3060,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 24);
+        assert_eq!(storage.schema_version().expect("version"), 25);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
@@ -3312,6 +3319,23 @@ trailer
             .expect("profile");
         assert_eq!(restored.custom_headers(), profile.custom_headers());
         assert_eq!(restored.selected_model(), Some("headers-model"));
+    }
+
+    #[test]
+    fn provider_profile_proxy_round_trip_without_credentials() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let profile = profile("proxy-profile", None, Some("proxy-model"))
+            .with_proxy_url(Some("http://127.0.0.1:8080".to_owned()))
+            .expect("proxy");
+        storage
+            .upsert_provider_profile(&profile)
+            .expect("save profile");
+        let restored = storage
+            .provider_profile(profile.id())
+            .expect("load profile")
+            .expect("profile");
+        assert_eq!(restored.proxy_url(), Some("http://127.0.0.1:8080/"));
+        assert_eq!(restored.selected_model(), Some("proxy-model"));
     }
 
     #[test]

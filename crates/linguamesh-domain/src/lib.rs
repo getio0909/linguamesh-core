@@ -136,6 +136,7 @@ const MAX_PROFILE_TEXT_BYTES: usize = 2048;
 const MAX_CUSTOM_HEADERS: usize = 16;
 const MAX_CUSTOM_HEADER_NAME_BYTES: usize = 128;
 const MAX_CUSTOM_HEADER_VALUE_BYTES: usize = 2048;
+const MAX_PROXY_URL_BYTES: usize = 2048;
 
 /// 标识一个持久化提供商配置。
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -342,6 +343,7 @@ pub struct ProviderProfile {
     region: Option<String>,
     account_identifier: Option<String>,
     custom_headers: Option<String>,
+    proxy_url: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -365,6 +367,7 @@ impl fmt::Debug for ProviderProfile {
             .field("has_region", &self.region.is_some())
             .field("has_account_identifier", &self.account_identifier.is_some())
             .field("has_custom_headers", &self.custom_headers.is_some())
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -399,6 +402,7 @@ impl ProviderProfile {
             region: None,
             account_identifier: None,
             custom_headers: None,
+            proxy_url: None,
             enabled: true,
             selected_model: None,
         })
@@ -487,6 +491,12 @@ impl ProviderProfile {
     #[must_use]
     pub fn custom_headers(&self) -> Option<&str> {
         self.custom_headers.as_deref()
+    }
+
+    /// 返回不含凭据的可选代理地址。
+    #[must_use]
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.proxy_url.as_deref()
     }
 
     /// 返回配置是否允许被选择。
@@ -581,6 +591,18 @@ impl ProviderProfile {
         self.custom_headers = custom_headers
             .filter(|value| !value.trim().is_empty())
             .map(|value| validate_custom_headers(&value))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置受限且不含凭据的代理地址。
+    pub fn with_proxy_url(
+        mut self,
+        proxy_url: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.proxy_url = proxy_url
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| validate_proxy_url(&value))
             .transpose()?;
         Ok(self)
     }
@@ -767,6 +789,24 @@ fn validate_custom_headers(value: &str) -> Result<String, ProfileValidationError
     }
     serde_json::to_string(&headers)
         .map_err(|_| ProfileValidationError::InvalidField("custom_headers"))
+}
+
+fn validate_proxy_url(value: &str) -> Result<String, ProfileValidationError> {
+    if value.len() > MAX_PROXY_URL_BYTES || value.chars().any(char::is_control) {
+        return Err(ProfileValidationError::InvalidField("proxy_url"));
+    }
+    let url = Url::parse(value).map_err(|_| ProfileValidationError::InvalidField("proxy_url"))?;
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (!url.path().is_empty() && url.path() != "/")
+    {
+        return Err(ProfileValidationError::InvalidField("proxy_url"));
+    }
+    Ok(url.to_string())
 }
 
 fn is_http_token_byte(byte: u8) -> bool {
@@ -2729,6 +2769,43 @@ mod tests {
                 .join(",")
         );
         assert!(profile.with_custom_headers(Some(too_many)).is_err());
+    }
+
+    #[test]
+    fn provider_profile_proxy_url_is_bounded_and_credential_free() {
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-proxy").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_proxy_url(Some("http://127.0.0.1:8080".to_owned()))
+        .expect("proxy");
+        assert_eq!(profile.proxy_url(), Some("http://127.0.0.1:8080/"));
+        for invalid in [
+            "ftp://127.0.0.1:8080",
+            "http://user:password@127.0.0.1:8080",
+            "http://127.0.0.1:8080/path",
+            "http://127.0.0.1:8080?token=secret",
+            "not-a-proxy",
+        ] {
+            assert!(
+                profile
+                    .clone()
+                    .with_proxy_url(Some(invalid.to_owned()))
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            profile
+                .with_proxy_url(Some("   ".to_owned()))
+                .expect("empty proxy")
+                .proxy_url(),
+            None
+        );
     }
 
     #[test]

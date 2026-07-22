@@ -31,6 +31,8 @@ pub struct AnthropicConfig {
     pub credential: Option<SecretValue>,
     /// 用户手动输入的模型标识；Anthropic 不提供通用模型列表端点。
     pub model_id: Option<String>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -43,6 +45,7 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             credential: None,
             model_id: Some(model_id.into()),
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -58,8 +61,16 @@ impl AnthropicConfig {
             base_url: base_url.into(),
             credential: Some(credential),
             model_id: Some(model_id.into()),
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
+        self
     }
 }
 
@@ -126,7 +137,11 @@ impl AnthropicProvider {
         let mut client_builder = Client::builder()
             .redirect(Policy::none())
             .timeout(config.request_timeout);
-        if base_url.scheme() == "http" {
+        if let Some(proxy_url) = config.proxy_url.as_deref() {
+            let proxy =
+                reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            client_builder = client_builder.proxy(proxy);
+        } else if base_url.scheme() == "http" {
             client_builder = client_builder.no_proxy();
         }
         let client = client_builder

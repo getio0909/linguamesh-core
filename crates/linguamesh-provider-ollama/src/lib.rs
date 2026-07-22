@@ -27,6 +27,8 @@ pub struct OllamaConfig {
     pub base_url: String,
     /// 可选的内存凭据；原生 Ollama 默认不要求凭据。
     pub credential: Option<SecretValue>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -38,6 +40,7 @@ impl OllamaConfig {
         Self {
             base_url: base_url.into(),
             credential: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -48,8 +51,16 @@ impl OllamaConfig {
         Self {
             base_url: base_url.into(),
             credential: Some(credential),
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
+        self
     }
 }
 
@@ -110,9 +121,15 @@ impl OllamaProvider {
     /// 创建拒绝跨源重定向的适配器。
     pub fn new(config: OllamaConfig) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(&config.base_url)?;
-        let client = Client::builder()
+        let mut client_builder = Client::builder()
             .redirect(Policy::none())
-            .timeout(config.request_timeout)
+            .timeout(config.request_timeout);
+        if let Some(proxy_url) = config.proxy_url.as_deref() {
+            let proxy =
+                reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            client_builder = client_builder.proxy(proxy);
+        }
+        let client = client_builder
             .build()
             .map_err(|error| map_reqwest_error(&error))?;
         Ok(Self {

@@ -27,6 +27,8 @@ pub struct GeminiConfig {
     pub base_url: String,
     /// 可选的一次性内存凭据。
     pub credential: Option<SecretValue>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -38,6 +40,7 @@ impl GeminiConfig {
         Self {
             base_url: base_url.into(),
             credential: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -48,8 +51,16 @@ impl GeminiConfig {
         Self {
             base_url: base_url.into(),
             credential: Some(credential),
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
+        self
     }
 }
 
@@ -113,7 +124,11 @@ impl GeminiProvider {
         let mut builder = Client::builder()
             .redirect(Policy::none())
             .timeout(config.request_timeout);
-        if base_url.scheme() == "http" {
+        if let Some(proxy_url) = config.proxy_url.as_deref() {
+            let proxy =
+                reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            builder = builder.proxy(proxy);
+        } else if base_url.scheme() == "http" {
             builder = builder.no_proxy();
         }
         let client = builder.build().map_err(|error| map_reqwest_error(&error))?;

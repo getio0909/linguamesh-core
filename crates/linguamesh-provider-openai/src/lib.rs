@@ -46,6 +46,8 @@ pub struct OpenAiConfig {
     pub custom_headers: Option<String>,
     /// 可选的一次性内存秘密请求头 JSON。
     pub secret_custom_headers: Option<SecretValue>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -64,6 +66,8 @@ pub struct AzureOpenAiConfig {
     pub custom_headers: Option<String>,
     /// 可选的一次性内存秘密请求头 JSON。
     pub secret_custom_headers: Option<SecretValue>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -83,6 +87,7 @@ impl AzureOpenAiConfig {
             credential: None,
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -102,6 +107,7 @@ impl AzureOpenAiConfig {
             credential: Some(credential),
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -110,6 +116,13 @@ impl AzureOpenAiConfig {
     #[must_use]
     pub fn with_custom_headers(mut self, custom_headers: Option<String>) -> Self {
         self.custom_headers = custom_headers;
+        self
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
         self
     }
 
@@ -156,6 +169,7 @@ impl OpenAiConfig {
             project: None,
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -170,6 +184,7 @@ impl OpenAiConfig {
             project: None,
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -178,6 +193,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_organization(mut self, organization: Option<String>) -> Self {
         self.organization = organization;
+        self
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
         self
     }
 
@@ -241,6 +263,8 @@ pub struct OpenAiResponsesConfig {
     pub custom_headers: Option<String>,
     /// 可选的一次性内存秘密请求头 JSON。
     pub secret_custom_headers: Option<SecretValue>,
+    /// 可选的不含凭据代理地址。
+    pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -256,6 +280,7 @@ impl OpenAiResponsesConfig {
             project: None,
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -270,6 +295,7 @@ impl OpenAiResponsesConfig {
             project: None,
             custom_headers: None,
             secret_custom_headers: None,
+            proxy_url: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -278,6 +304,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_organization(mut self, organization: Option<String>) -> Self {
         self.organization = organization;
+        self
+    }
+
+    /// 设置不含凭据的代理地址。
+    #[must_use]
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
+        self.proxy_url = proxy_url;
         self
     }
 
@@ -391,6 +424,7 @@ impl OpenAiCompatibleProvider {
             config.project,
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
+            config.proxy_url.as_deref(),
             config.request_timeout,
             OpenAiProtocol::ChatCompletions,
         )
@@ -405,6 +439,7 @@ impl OpenAiCompatibleProvider {
             config.project,
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
+            config.proxy_url.as_deref(),
             config.request_timeout,
             OpenAiProtocol::Responses,
         )
@@ -431,6 +466,7 @@ impl OpenAiCompatibleProvider {
             None,
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
+            config.proxy_url.as_deref(),
             config.request_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
@@ -457,6 +493,7 @@ impl OpenAiCompatibleProvider {
         project: Option<String>,
         custom_headers: Option<&str>,
         secret_custom_headers: Option<&SecretValue>,
+        proxy_url: Option<&str>,
         request_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
@@ -472,9 +509,15 @@ impl OpenAiCompatibleProvider {
                 "Provider custom headers are invalid.",
             ));
         }
-        let client = Client::builder()
+        let mut client_builder = Client::builder()
             .redirect(Policy::none())
-            .timeout(request_timeout)
+            .timeout(request_timeout);
+        if let Some(proxy_url) = proxy_url {
+            let proxy =
+                reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            client_builder = client_builder.proxy(proxy);
+        }
+        let client = client_builder
             .build()
             .map_err(|error| map_reqwest_error(&error))?;
         Ok(Self {
@@ -1412,6 +1455,46 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_proxy_receives_provider_request() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("proxy listener");
+        let proxy_address = listener.local_addr().expect("proxy address");
+        let proxy_task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("proxy connection");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.expect("proxy request");
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("GET http://127.0.0.1:9/v1/models HTTP/1.1"));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}",
+                )
+                .await
+                .expect("proxy response");
+        });
+        let provider = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential("http://127.0.0.1:9/v1/")
+                .with_proxy_url(Some(format!("http://{proxy_address}"))),
+        )
+        .expect("provider");
+        let models = tokio::time::timeout(Duration::from_secs(1), provider.list_models())
+            .await
+            .expect("proxy request timeout")
+            .expect("proxy response");
+        assert!(models.is_empty());
+        proxy_task.await.expect("proxy task");
     }
 
     #[test]
