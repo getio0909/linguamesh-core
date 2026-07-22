@@ -332,6 +332,7 @@ pub struct ProviderProfile {
     adapter_type: String,
     base_endpoint: EndpointConfiguration,
     secret_ref: Option<SecretRef>,
+    user_notes: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -345,6 +346,7 @@ impl fmt::Debug for ProviderProfile {
             .field("adapter_type", &self.adapter_type)
             .field("base_endpoint", &"[REDACTED]")
             .field("has_secret_ref", &self.secret_ref.is_some())
+            .field("has_user_notes", &self.user_notes.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -372,6 +374,7 @@ impl ProviderProfile {
             adapter_type,
             base_endpoint,
             secret_ref,
+            user_notes: None,
             enabled: true,
             selected_model: None,
         })
@@ -413,6 +416,12 @@ impl ProviderProfile {
         self.secret_ref.as_ref()
     }
 
+    /// 返回用户填写的非秘密备注。
+    #[must_use]
+    pub fn user_notes(&self) -> Option<&str> {
+        self.user_notes.as_deref()
+    }
+
     /// 返回配置是否允许被选择。
     #[must_use]
     pub const fn enabled(&self) -> bool {
@@ -439,6 +448,18 @@ impl ProviderProfile {
     ) -> Result<Self, ProfileValidationError> {
         self.selected_model = model_id
             .map(|value| checked_profile_text(value, "selected_model"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置有界且不含凭据的用户备注。
+    pub fn with_user_notes(
+        mut self,
+        notes: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.user_notes = notes
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| checked_profile_text(value, "user_notes"))
             .transpose()?;
         Ok(self)
     }
@@ -2317,6 +2338,40 @@ mod tests {
         assert_eq!(profile.secret_ref(), Some(&secret_ref));
         assert_eq!(profile.selected_model(), Some("local-model"));
         assert!(profile.enabled());
+    }
+
+    #[test]
+    fn provider_profile_user_notes_are_bounded_and_non_secret() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_PROFILE_NOTE_CREDENTIAL_1234567890");
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-notes").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_user_notes(Some("Used for local glossary checks".to_owned()))
+        .expect("notes");
+        assert_eq!(profile.user_notes(), Some("Used for local glossary checks"));
+        assert_eq!(
+            profile.clone().with_user_notes(Some(CREDENTIAL.to_owned())),
+            Err(ProfileValidationError::CredentialLikeValue("user_notes"))
+        );
+        assert!(
+            profile
+                .clone()
+                .with_user_notes(Some("x".repeat(2049)))
+                .is_err()
+        );
+        assert_eq!(
+            profile
+                .with_user_notes(Some("   ".to_owned()))
+                .expect("empty notes")
+                .user_notes(),
+            None
+        );
     }
 
     #[test]

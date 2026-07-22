@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 18. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 19. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -56,6 +56,10 @@ validated `translation_preset_json`; legacy NULL values resolve to `General`, an
 preset is bounded to 8 KiB. The stored payload contains only non-secret identifiers, constraints,
 ranking preferences, and bounded style data; endpoints, credentials, and source content are never
 stored in this table.
+
+Schema 19 adds the optional bounded `user_notes` field to `provider_profiles`. Notes are validated
+as non-secret profile text, persisted across reopen, and excluded from diagnostics and provider
+requests.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional

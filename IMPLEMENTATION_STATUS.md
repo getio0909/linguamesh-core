@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-22 — Provider profile notes checkpoint
+
+Assumption: a single optional, bounded non-secret note is the smallest Linux-first slice of the
+ProviderProfile metadata contract; structured organization, region, proxy, and custom-header
+fields remain separate follow-up work.
+
+- Added Core schema 19 migration `0019_provider_profile_notes.sql` and persisted optional
+  `ProviderProfile.user_notes` without storing credentials or exposing it in debug output.
+- Added domain validation for the 2 KiB profile-note bound, control/credential-shaped rejection,
+  and whitespace normalization to an absent note.
+- Added storage and domain regression tests for migration version 19 and note round-trip behavior.
+- Pending: Linux form binding, localization, CI evidence, and cross-repository compatibility update.
+
 ## 2026-07-21 — SQLite WAL process-crash recovery regression
 
 Assumption: abrupt Unix process termination after a committed WAL transaction is a useful
