@@ -1,5 +1,19 @@
 # Implementation Status
 
+## 2026-07-22 — Provider project application wiring correction
+
+Assumption: the persisted non-secret `project` identifier must reach both OpenAI-compatible Chat
+Completions and Responses requests before the Linux provider-project checkpoint can be treated as
+functionally complete.
+
+- `ProviderManager::connect` now forwards `ProviderProfile.project` into both adapter configuration
+  builders; organization forwarding and adapter-neutral metadata behavior remain unchanged.
+- The fake provider can require `OpenAI-Project`; application regressions cover authenticated Chat
+  streaming and Responses typed-SSE discovery/translation without storing or logging credentials.
+- `cargo fmt --all -- --check`, the offline workspace test suite, strict all-feature Clippy, and the
+  targeted application tests (14 passed) passed locally. Remote CI and Linux repinning remain
+  pending for this correction; release remains `unreleased`.
+
 ## 2026-07-22 — Provider profile region/account checkpoint
 
 Assumption: `region` and `account_identifier` are optional, bounded, non-secret provider metadata;

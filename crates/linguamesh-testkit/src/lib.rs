@@ -32,18 +32,26 @@ pub struct FakeProviderServer {
 impl FakeProviderServer {
     /// 启动兼容 `OpenAI` 模型和流式接口的服务。
     pub async fn start() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Standard).await
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Standard, None)
+            .await
     }
 
     /// 在指定的 IPv4 回环端口启动服务，端口零表示由系统选择。
     pub async fn start_on_port(port: u16) -> std::io::Result<Self> {
-        Self::start_with_configuration(port, None, Duration::ZERO, FakeProviderFlavor::Standard)
-            .await
+        Self::start_with_configuration(
+            port,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Standard,
+            None,
+        )
+        .await
     }
 
     /// 启动在模型响应前等待指定时长的回环服务。
     pub async fn start_with_model_delay(model_delay: Duration) -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, model_delay, FakeProviderFlavor::Standard).await
+        Self::start_with_configuration(0, None, model_delay, FakeProviderFlavor::Standard, None)
+            .await
     }
 
     /// 启动要求精确 Bearer 凭据的回环服务。
@@ -55,24 +63,33 @@ impl FakeProviderServer {
             Some(expected_token),
             Duration::ZERO,
             FakeProviderFlavor::Standard,
+            None,
         )
         .await
     }
 
     /// 启动返回 Ollama 模型标识的 `OpenAI` 兼容回环服务。
     pub async fn start_ollama_compatible() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Ollama).await
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Ollama, None)
+            .await
     }
 
     /// 启动原生 Ollama `/api` 模型和 NDJSON 聊天接口的回环服务。
     pub async fn start_ollama_native() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::OllamaNative)
-            .await
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::OllamaNative,
+            None,
+        )
+        .await
     }
 
     /// 启动 Gemini Generate Content 模型和 SSE 接口的回环服务。
     pub async fn start_gemini() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Gemini).await
+        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Gemini, None)
+            .await
     }
 
     /// 启动要求 `api-key` 请求头的 Azure `OpenAI` 回环服务。
@@ -82,6 +99,7 @@ impl FakeProviderServer {
             Some(SecretValue::new("azure-test-key")),
             Duration::ZERO,
             FakeProviderFlavor::Azure,
+            None,
         )
         .await
     }
@@ -93,6 +111,35 @@ impl FakeProviderServer {
             Some(SecretValue::new("responses-test-key")),
             Duration::ZERO,
             FakeProviderFlavor::Responses,
+            None,
+        )
+        .await
+    }
+
+    /// 启动要求 `OpenAI` 项目请求头并返回兼容 Chat 流的回环服务。
+    pub async fn start_requiring_openai_project(
+        project: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Standard,
+            Some(project.into()),
+        )
+        .await
+    }
+
+    /// 启动要求 `OpenAI` 项目请求头并返回 Responses typed-SSE 的回环服务。
+    pub async fn start_responses_requiring_openai_project(
+        project: impl Into<String>,
+    ) -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            Some(SecretValue::new("responses-test-key")),
+            Duration::ZERO,
+            FakeProviderFlavor::Responses,
+            Some(project.into()),
         )
         .await
     }
@@ -102,6 +149,7 @@ impl FakeProviderServer {
         expected_token: Option<SecretValue>,
         model_delay: Duration,
         flavor: FakeProviderFlavor,
+        expected_project: Option<String>,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let address = listener.local_addr()?;
@@ -126,6 +174,7 @@ impl FakeProviderServer {
             )
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
+                expected_project,
                 model_delay,
                 flavor,
                 model_request_counter: Arc::clone(&model_request_counter),
@@ -194,6 +243,7 @@ impl FakeProviderServer {
 #[derive(Clone)]
 struct FakeProviderState {
     expected_token: Option<Arc<SecretValue>>,
+    expected_project: Option<String>,
     model_delay: Duration,
     flavor: FakeProviderFlavor,
     model_request_counter: Arc<AtomicUsize>,
@@ -443,7 +493,7 @@ async fn azure_chat_completions(
 }
 
 fn authorized(state: &FakeProviderState, headers: &HeaderMap) -> bool {
-    state.expected_token.as_ref().is_none_or(|expected| {
+    let token_authorized = state.expected_token.as_ref().is_none_or(|expected| {
         if matches!(state.flavor, FakeProviderFlavor::Azure) {
             headers
                 .get("api-key")
@@ -456,7 +506,14 @@ fn authorized(state: &FakeProviderState, headers: &HeaderMap) -> bool {
                 .and_then(|value| value.strip_prefix("Bearer "))
                 .is_some_and(|value| value == expected.expose_secret())
         }
-    })
+    });
+    token_authorized
+        && state.expected_project.as_deref().is_none_or(|expected| {
+            headers
+                .get("OpenAI-Project")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == expected)
+        })
 }
 
 #[cfg(test)]

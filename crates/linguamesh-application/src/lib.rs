@@ -345,14 +345,16 @@ impl ProviderManager {
                 }
                 None => OpenAiResponsesConfig::without_credential(profile.base_endpoint()),
             }
-            .with_organization(profile.organization().map(str::to_owned));
+            .with_organization(profile.organization().map(str::to_owned))
+            .with_project(profile.project().map(str::to_owned));
             Arc::new(OpenAiCompatibleProvider::new_responses(config)?)
         } else {
             let config = match credential {
                 Some(secret) => OpenAiConfig::with_credential(profile.base_endpoint(), secret),
                 None => OpenAiConfig::without_credential(profile.base_endpoint()),
             }
-            .with_organization(profile.organization().map(str::to_owned));
+            .with_organization(profile.organization().map(str::to_owned))
+            .with_project(profile.project().map(str::to_owned));
             Arc::new(OpenAiCompatibleProvider::new(config)?)
         };
         let engine_provider: Arc<dyn ModelProvider> = provider.clone();
@@ -567,6 +569,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_profile_forwards_project_metadata_to_provider() {
+        let server = FakeProviderServer::start_requiring_openai_project("project-manager")
+            .await
+            .expect("server");
+        let provider = profile(&server.base_url(), None)
+            .with_project(Some("project-manager".to_owned()))
+            .expect("project metadata");
+        let (broker, _requests) = host_secret_channel(1).expect("secret channel");
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("project-authenticated connection");
+        assert_eq!(models[0].id, "fake-translator");
+        let mut operation = manager
+            .active_engine()
+            .expect("active engine")
+            .translate(TranslationRequest::new("Hello", "zh-CN", "fake-translator"));
+        let mut output = String::new();
+        while let Some(event) = operation.next_event().await {
+            match event {
+                TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed { .. } => break,
+                TranslationEvent::Failed { error, .. } => {
+                    panic!("Project-authenticated request failed: {error}")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(output, "你好，LinguaMesh！");
+        manager.disconnect();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn native_ollama_profile_discovers_and_streams_without_a_secret() {
         let server = FakeProviderServer::start_ollama_native()
             .await
@@ -650,13 +687,18 @@ mod tests {
 
     #[tokio::test]
     async fn responses_profile_uses_typed_sse_stream() {
-        let server = FakeProviderServer::start_responses().await.expect("server");
+        let server =
+            FakeProviderServer::start_responses_requiring_openai_project("responses-project")
+                .await
+                .expect("server");
         let provider = profile_with_adapter(
             &server.base_url(),
             Some(PROVIDER_SECRET_REF),
             "openai-responses",
             "openai_responses",
-        );
+        )
+        .with_project(Some("responses-project".to_owned()))
+        .expect("project metadata");
         let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
         let host = tokio::spawn(async move {
             requests
