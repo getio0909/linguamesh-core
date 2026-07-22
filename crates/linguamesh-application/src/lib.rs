@@ -288,6 +288,10 @@ impl ProviderManager {
             Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
             None => None,
         };
+        let secret_custom_headers = match profile.secret_custom_headers_ref() {
+            Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
+            None => None,
+        };
         if cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
@@ -337,7 +341,13 @@ impl ProviderManager {
                     "2024-10-21",
                 ),
             };
-            let config = config.with_custom_headers(profile.custom_headers().map(str::to_owned));
+            let config = config
+                .with_custom_headers(profile.custom_headers().map(str::to_owned))
+                .with_secret_custom_headers(
+                    secret_custom_headers
+                        .as_ref()
+                        .map(|secret| SecretValue::new(secret.expose_secret())),
+                );
             Arc::new(OpenAiCompatibleProvider::new_azure(config)?)
         } else if is_responses {
             let config = match credential {
@@ -348,7 +358,12 @@ impl ProviderManager {
             }
             .with_organization(profile.organization().map(str::to_owned))
             .with_project(profile.project().map(str::to_owned))
-            .with_custom_headers(profile.custom_headers().map(str::to_owned));
+            .with_custom_headers(profile.custom_headers().map(str::to_owned))
+            .with_secret_custom_headers(
+                secret_custom_headers
+                    .as_ref()
+                    .map(|secret| SecretValue::new(secret.expose_secret())),
+            );
             Arc::new(OpenAiCompatibleProvider::new_responses(config)?)
         } else {
             let config = match credential {
@@ -357,7 +372,12 @@ impl ProviderManager {
             }
             .with_organization(profile.organization().map(str::to_owned))
             .with_project(profile.project().map(str::to_owned))
-            .with_custom_headers(profile.custom_headers().map(str::to_owned));
+            .with_custom_headers(profile.custom_headers().map(str::to_owned))
+            .with_secret_custom_headers(
+                secret_custom_headers
+                    .as_ref()
+                    .map(|secret| SecretValue::new(secret.expose_secret())),
+            );
             Arc::new(OpenAiCompatibleProvider::new(config)?)
         };
         let engine_provider: Arc<dyn ModelProvider> = provider.clone();
@@ -602,6 +622,38 @@ mod tests {
             }
         }
         assert_eq!(output, "你好，LinguaMesh！");
+        manager.disconnect();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn secret_custom_headers_resolve_through_the_host_secret_broker() {
+        let server = FakeProviderServer::start_requiring_openai_project_and_custom_header(
+            "project-manager",
+            ("X-Trace-Mode".to_owned(), "secret-header".to_owned()),
+        )
+        .await
+        .expect("server");
+        let secret_ref = SecretRef::parse(CANCELLED_SECRET_REF).expect("secret ref");
+        let provider = profile(&server.base_url(), None)
+            .with_project(Some("project-manager".to_owned()))
+            .expect("project metadata")
+            .with_secret_custom_headers_ref(Some(secret_ref.clone()));
+        let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
+        let host = tokio::spawn(async move {
+            let request = requests.recv().await.expect("secret request");
+            assert_eq!(request.required().secret_ref, secret_ref);
+            request
+                .provide_secret(SecretValue::new(r#"{"X-Trace-Mode":"secret-header"}"#))
+                .expect("provide secret headers");
+        });
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("secret-header connection");
+        assert_eq!(models[0].id, "fake-translator");
+        host.await.expect("host task");
         manager.disconnect();
         server.shutdown().await;
     }

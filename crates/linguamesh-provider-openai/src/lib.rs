@@ -44,6 +44,8 @@ pub struct OpenAiConfig {
     pub project: Option<String>,
     /// 可选的受限非秘密请求头 JSON。
     pub custom_headers: Option<String>,
+    /// 可选的一次性内存秘密请求头 JSON。
+    pub secret_custom_headers: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -60,6 +62,8 @@ pub struct AzureOpenAiConfig {
     pub credential: Option<SecretValue>,
     /// 可选的受限非秘密请求头 JSON。
     pub custom_headers: Option<String>,
+    /// 可选的一次性内存秘密请求头 JSON。
+    pub secret_custom_headers: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -78,6 +82,7 @@ impl AzureOpenAiConfig {
             api_version: api_version.into(),
             credential: None,
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -96,6 +101,7 @@ impl AzureOpenAiConfig {
             api_version: api_version.into(),
             credential: Some(credential),
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -104,6 +110,16 @@ impl AzureOpenAiConfig {
     #[must_use]
     pub fn with_custom_headers(mut self, custom_headers: Option<String>) -> Self {
         self.custom_headers = custom_headers;
+        self
+    }
+
+    /// 设置一次性内存秘密请求头 JSON。
+    #[must_use]
+    pub fn with_secret_custom_headers(
+        mut self,
+        secret_custom_headers: Option<SecretValue>,
+    ) -> Self {
+        self.secret_custom_headers = secret_custom_headers;
         self
     }
 }
@@ -120,6 +136,10 @@ impl fmt::Debug for AzureOpenAiConfig {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("has_custom_headers", &self.custom_headers.is_some())
+            .field(
+                "has_secret_custom_headers",
+                &self.secret_custom_headers.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -135,6 +155,7 @@ impl OpenAiConfig {
             organization: None,
             project: None,
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -148,6 +169,7 @@ impl OpenAiConfig {
             organization: None,
             project: None,
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -172,6 +194,16 @@ impl OpenAiConfig {
         self.custom_headers = custom_headers;
         self
     }
+
+    /// 设置一次性内存秘密请求头 JSON。
+    #[must_use]
+    pub fn with_secret_custom_headers(
+        mut self,
+        secret_custom_headers: Option<SecretValue>,
+    ) -> Self {
+        self.secret_custom_headers = secret_custom_headers;
+        self
+    }
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -186,6 +218,10 @@ impl fmt::Debug for OpenAiConfig {
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
             .field("has_custom_headers", &self.custom_headers.is_some())
+            .field(
+                "has_secret_custom_headers",
+                &self.secret_custom_headers.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -203,6 +239,8 @@ pub struct OpenAiResponsesConfig {
     pub project: Option<String>,
     /// 可选的受限非秘密请求头 JSON。
     pub custom_headers: Option<String>,
+    /// 可选的一次性内存秘密请求头 JSON。
+    pub secret_custom_headers: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -217,6 +255,7 @@ impl OpenAiResponsesConfig {
             organization: None,
             project: None,
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -230,6 +269,7 @@ impl OpenAiResponsesConfig {
             organization: None,
             project: None,
             custom_headers: None,
+            secret_custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -254,6 +294,16 @@ impl OpenAiResponsesConfig {
         self.custom_headers = custom_headers;
         self
     }
+
+    /// 设置一次性内存秘密请求头 JSON。
+    #[must_use]
+    pub fn with_secret_custom_headers(
+        mut self,
+        secret_custom_headers: Option<SecretValue>,
+    ) -> Self {
+        self.secret_custom_headers = secret_custom_headers;
+        self
+    }
 }
 
 impl fmt::Debug for OpenAiResponsesConfig {
@@ -268,6 +318,10 @@ impl fmt::Debug for OpenAiResponsesConfig {
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
             .field("has_custom_headers", &self.custom_headers.is_some())
+            .field(
+                "has_secret_custom_headers",
+                &self.secret_custom_headers.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -336,6 +390,7 @@ impl OpenAiCompatibleProvider {
             config.organization,
             config.project,
             config.custom_headers.as_deref(),
+            config.secret_custom_headers.as_ref(),
             config.request_timeout,
             OpenAiProtocol::ChatCompletions,
         )
@@ -349,6 +404,7 @@ impl OpenAiCompatibleProvider {
             config.organization,
             config.project,
             config.custom_headers.as_deref(),
+            config.secret_custom_headers.as_ref(),
             config.request_timeout,
             OpenAiProtocol::Responses,
         )
@@ -374,6 +430,7 @@ impl OpenAiCompatibleProvider {
             None,
             None,
             config.custom_headers.as_deref(),
+            config.secret_custom_headers.as_ref(),
             config.request_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
@@ -392,17 +449,29 @@ impl OpenAiCompatibleProvider {
         Self::new_azure(config).map(|_| ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_protocol(
         base_url: &str,
         credential: Option<SecretValue>,
         organization: Option<String>,
         project: Option<String>,
         custom_headers: Option<&str>,
+        secret_custom_headers: Option<&SecretValue>,
         request_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
-        let custom_headers = parse_custom_headers(custom_headers)?;
+        let mut custom_headers = parse_custom_headers(custom_headers, false)?;
+        custom_headers.extend(parse_custom_headers(
+            secret_custom_headers.map(SecretValue::expose_secret),
+            true,
+        )?);
+        if custom_headers.len() > MAX_CUSTOM_HEADERS {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider custom headers are invalid.",
+            ));
+        }
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(request_timeout)
@@ -685,6 +754,7 @@ fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
 
 fn parse_custom_headers(
     custom_headers: Option<&str>,
+    allow_secret_values: bool,
 ) -> Result<Vec<(HeaderName, HeaderValue)>, TranslationError> {
     let Some(custom_headers) = custom_headers.filter(|value| !value.trim().is_empty()) else {
         return Ok(Vec::new());
@@ -712,7 +782,7 @@ fn parse_custom_headers(
                 || value.is_empty()
                 || value.len() > MAX_CUSTOM_HEADER_VALUE_BYTES
                 || value.chars().any(char::is_control)
-                || looks_like_credential(&value)
+                || (!allow_secret_values && looks_like_credential(&value))
             {
                 return Err(TranslationError::new(
                     ErrorKind::InvalidConfiguration,
@@ -1411,6 +1481,31 @@ mod tests {
             Some("local")
         );
         assert!(request.headers().contains_key("authorization"));
+    }
+
+    #[test]
+    fn secret_custom_headers_are_added_without_debug_leakage() {
+        const SECRET_HEADER_VALUE: &str = "sensitive-header-value";
+        let provider = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential("https://provider.example/v1/")
+                .with_secret_custom_headers(Some(SecretValue::new(format!(
+                    r#"{{"X-Trace-Mode":"{SECRET_HEADER_VALUE}"}}"#
+                )))),
+        )
+        .expect("provider");
+        let request = provider
+            .request(provider.client.get("https://provider.example/v1/models"))
+            .expect("request")
+            .build()
+            .expect("built request");
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Trace-Mode")
+                .and_then(|value| value.to_str().ok()),
+            Some(SECRET_HEADER_VALUE)
+        );
+        assert!(!format!("{provider:?}").contains(SECRET_HEADER_VALUE));
     }
 
     #[test]

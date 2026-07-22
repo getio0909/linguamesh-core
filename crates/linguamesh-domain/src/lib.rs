@@ -335,6 +335,7 @@ pub struct ProviderProfile {
     adapter_type: String,
     base_endpoint: EndpointConfiguration,
     secret_ref: Option<SecretRef>,
+    secret_custom_headers_ref: Option<Box<SecretRef>>,
     user_notes: Option<String>,
     organization: Option<String>,
     project: Option<String>,
@@ -354,6 +355,10 @@ impl fmt::Debug for ProviderProfile {
             .field("adapter_type", &self.adapter_type)
             .field("base_endpoint", &"[REDACTED]")
             .field("has_secret_ref", &self.secret_ref.is_some())
+            .field(
+                "has_secret_custom_headers_ref",
+                &self.secret_custom_headers_ref.is_some(),
+            )
             .field("has_user_notes", &self.user_notes.is_some())
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
@@ -387,6 +392,7 @@ impl ProviderProfile {
             adapter_type,
             base_endpoint,
             secret_ref,
+            secret_custom_headers_ref: None,
             user_notes: None,
             organization: None,
             project: None,
@@ -432,6 +438,19 @@ impl ProviderProfile {
     #[must_use]
     pub const fn secret_ref(&self) -> Option<&SecretRef> {
         self.secret_ref.as_ref()
+    }
+
+    /// 返回可选宿主秘密自定义请求头引用。
+    #[must_use]
+    pub fn secret_custom_headers_ref(&self) -> Option<&SecretRef> {
+        self.secret_custom_headers_ref.as_deref()
+    }
+
+    /// 设置只保存引用、不保存秘密值的自定义请求头引用。
+    #[must_use]
+    pub fn with_secret_custom_headers_ref(mut self, secret_ref: Option<SecretRef>) -> Self {
+        self.secret_custom_headers_ref = secret_ref.map(Box::new);
+        self
     }
 
     /// 返回用户填写的非秘密备注。
