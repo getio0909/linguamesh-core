@@ -153,6 +153,7 @@ impl fmt::Debug for AzureOpenAiConfig {
                 "has_secret_custom_headers",
                 &self.secret_custom_headers.is_some(),
             )
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -244,6 +245,7 @@ impl fmt::Debug for OpenAiConfig {
                 "has_secret_custom_headers",
                 &self.secret_custom_headers.is_some(),
             )
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -355,6 +357,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
                 "has_secret_custom_headers",
                 &self.secret_custom_headers.is_some(),
             )
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }

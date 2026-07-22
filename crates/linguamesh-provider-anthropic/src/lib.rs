@@ -84,6 +84,7 @@ impl fmt::Debug for AnthropicConfig {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("model_id", &self.model_id)
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }

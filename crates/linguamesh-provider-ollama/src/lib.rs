@@ -73,6 +73,7 @@ impl fmt::Debug for OllamaConfig {
                 "credential",
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
