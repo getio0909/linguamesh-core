@@ -49,7 +49,9 @@ const PROVIDER_PROFILE_ORGANIZATION_MIGRATION: &str =
     include_str!("../../../migrations/0020_provider_profile_organization.sql");
 const PROVIDER_PROFILE_PROJECT_MIGRATION: &str =
     include_str!("../../../migrations/0021_provider_profile_project.sql");
-const LATEST_SCHEMA_VERSION: u32 = 21;
+const PROVIDER_PROFILE_REGION_ACCOUNT_MIGRATION: &str =
+    include_str!("../../../migrations/0022_provider_profile_region_account.sql");
+const LATEST_SCHEMA_VERSION: u32 = 22;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -99,6 +101,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (19, PROVIDER_PROFILE_NOTES_MIGRATION),
     (20, PROVIDER_PROFILE_ORGANIZATION_MIGRATION),
     (21, PROVIDER_PROFILE_PROJECT_MIGRATION),
+    (22, PROVIDER_PROFILE_REGION_ACCOUNT_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1610,9 +1613,9 @@ fn parse_routing_profile_record(
     })
 }
 
-const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
-const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
-const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
+const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
+const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
+const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
 
 struct StoredProfile {
     id: String,
@@ -1624,6 +1627,8 @@ struct StoredProfile {
     user_notes: Option<String>,
     organization: Option<String>,
     project: Option<String>,
+    region: Option<String>,
+    account_identifier: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -1648,6 +1653,8 @@ impl StoredProfile {
         .and_then(|profile| profile.with_user_notes(self.user_notes))
         .and_then(|profile| profile.with_organization(self.organization))
         .and_then(|profile| profile.with_project(self.project))
+        .and_then(|profile| profile.with_region(self.region))
+        .and_then(|profile| profile.with_account_identifier(self.account_identifier))
         .map(|profile| profile.with_enabled(self.enabled))
         .and_then(|profile| profile.with_selected_model(self.selected_model))
         .map_err(|error| map_profile_validation(&error))
@@ -1665,8 +1672,10 @@ fn stored_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPr
         user_notes: row.get(6)?,
         organization: row.get(7)?,
         project: row.get(8)?,
-        enabled: row.get(9)?,
-        selected_model: row.get(10)?,
+        region: row.get(9)?,
+        account_identifier: row.get(10)?,
+        enabled: row.get(11)?,
+        selected_model: row.get(12)?,
     })
 }
 
@@ -1685,7 +1694,7 @@ fn upsert_profile(
     }
     transaction
         .execute(
-            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, preset_id, adapter_type, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
+            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, region, account_identifier, preset_id, adapter_type, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, region = excluded.region, account_identifier = excluded.account_identifier, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
             params![
                 profile.id().as_str(),
                 profile.display_name(),
@@ -1694,6 +1703,8 @@ fn upsert_profile(
                 profile.user_notes(),
                 profile.organization(),
                 profile.project(),
+                profile.region(),
+                profile.account_identifier(),
                 profile.preset_id(),
                 profile.adapter_type(),
                 profile.enabled(),
@@ -1886,7 +1897,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 21);
+        assert_eq!(storage.schema_version().expect("version"), 22);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -1915,7 +1926,7 @@ mod tests {
         drop(connection);
 
         let mut storage = Storage::open(&path).expect("schema 20 migration");
-        assert_eq!(storage.schema_version().expect("version"), 21);
+        assert_eq!(storage.schema_version().expect("version"), 22);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
@@ -1976,7 +1987,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 21);
+        assert_eq!(storage.schema_version().expect("version"), 22);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2839,7 +2850,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 21);
+        assert_eq!(storage.schema_version().expect("schema version"), 22);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -2936,7 +2947,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 21);
+        assert_eq!(storage.schema_version().expect("version"), 22);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -3018,7 +3029,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 21);
+        assert_eq!(storage.schema_version().expect("version"), 22);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
@@ -3238,6 +3249,26 @@ trailer
             .expect("profile");
         assert_eq!(restored.project(), profile.project());
         assert_eq!(restored.selected_model(), Some("project-model"));
+    }
+
+    #[test]
+    fn provider_profile_region_and_account_round_trip_without_secret_values() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let profile = profile("region-account-profile", None, Some("region-model"))
+            .with_region(Some("eu-west-1".to_owned()))
+            .expect("region")
+            .with_account_identifier(Some("tenant-42".to_owned()))
+            .expect("account");
+        storage
+            .upsert_provider_profile(&profile)
+            .expect("save profile");
+        let restored = storage
+            .provider_profile(profile.id())
+            .expect("load profile")
+            .expect("profile");
+        assert_eq!(restored.region(), profile.region());
+        assert_eq!(restored.account_identifier(), profile.account_identifier());
+        assert_eq!(restored.selected_model(), Some("region-model"));
     }
 
     #[test]

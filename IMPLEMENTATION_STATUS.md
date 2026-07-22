@@ -1,5 +1,17 @@
 # Implementation Status
 
+## 2026-07-22 — Provider profile region/account checkpoint
+
+Assumption: `region` and `account_identifier` are optional, bounded, non-secret provider metadata;
+provider adapters do not interpret either value until a provider-specific contract is defined.
+
+- Added Core schema 22 migration `0022_provider_profile_region_account.sql`, domain validation,
+  storage round-trip coverage, and redacted debug presence reporting.
+- Session and persistent profile reconstruction retain both fields without touching credential
+  values; Linux and localization bindings are tracked in their own checkpoints.
+- Release remains `unreleased` pending cross-client compatibility, provider-specific semantics, and
+  mandatory acceptance evidence.
+
 ## 2026-07-22 — Provider profile project checkpoint
 
 Assumption: `project` is an optional, bounded non-secret OpenAI-compatible project identifier.

@@ -335,6 +335,8 @@ pub struct ProviderProfile {
     user_notes: Option<String>,
     organization: Option<String>,
     project: Option<String>,
+    region: Option<String>,
+    account_identifier: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -351,6 +353,8 @@ impl fmt::Debug for ProviderProfile {
             .field("has_user_notes", &self.user_notes.is_some())
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
+            .field("has_region", &self.region.is_some())
+            .field("has_account_identifier", &self.account_identifier.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -381,6 +385,8 @@ impl ProviderProfile {
             user_notes: None,
             organization: None,
             project: None,
+            region: None,
+            account_identifier: None,
             enabled: true,
             selected_model: None,
         })
@@ -438,6 +444,18 @@ impl ProviderProfile {
     #[must_use]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
+    }
+
+    /// 返回可选的非秘密区域标识。
+    #[must_use]
+    pub fn region(&self) -> Option<&str> {
+        self.region.as_deref()
+    }
+
+    /// 返回可选的非秘密账户标识。
+    #[must_use]
+    pub fn account_identifier(&self) -> Option<&str> {
+        self.account_identifier.as_deref()
     }
 
     /// 返回配置是否允许被选择。
@@ -499,6 +517,27 @@ impl ProviderProfile {
         self.project = project
             .filter(|value| !value.trim().is_empty())
             .map(|value| checked_profile_text(value, "project"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置有界且不含凭据的区域标识。
+    pub fn with_region(mut self, region: Option<String>) -> Result<Self, ProfileValidationError> {
+        self.region = region
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| checked_profile_text(value, "region"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置有界且不含凭据的账户标识。
+    pub fn with_account_identifier(
+        mut self,
+        account_identifier: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.account_identifier = account_identifier
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| checked_profile_text(value, "account_identifier"))
             .transpose()?;
         Ok(self)
     }
@@ -2480,6 +2519,46 @@ mod tests {
                 .expect("empty project")
                 .project(),
             None
+        );
+    }
+
+    #[test]
+    fn provider_profile_region_and_account_are_bounded_and_non_secret() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_REGION_ACCOUNT_CREDENTIAL_1234567890");
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-region-account").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_region(Some("us-east-1".to_owned()))
+        .expect("region")
+        .with_account_identifier(Some("tenant-42".to_owned()))
+        .expect("account");
+        assert_eq!(profile.region(), Some("us-east-1"));
+        assert_eq!(profile.account_identifier(), Some("tenant-42"));
+        assert_eq!(
+            profile.clone().with_region(Some(CREDENTIAL.to_owned())),
+            Err(ProfileValidationError::CredentialLikeValue("region"))
+        );
+        assert_eq!(
+            profile
+                .clone()
+                .with_account_identifier(Some(CREDENTIAL.to_owned())),
+            Err(ProfileValidationError::CredentialLikeValue(
+                "account_identifier"
+            ))
+        );
+        assert!(profile.clone().with_region(Some("x".repeat(2049))).is_err());
+        assert!(
+            profile
+                .with_account_identifier(Some("   ".to_owned()))
+                .expect("empty account")
+                .account_identifier()
+                .is_none()
         );
     }
 

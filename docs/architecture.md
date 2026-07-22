@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 21. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 22. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -58,9 +58,12 @@ ranking preferences, and bounded style data; endpoints, credentials, and source 
 stored in this table.
 
 Schema 19 adds the optional bounded `user_notes` field to `provider_profiles`. Schema 20 adds the
-optional bounded `organization` and `project` identifiers. These fields are validated as non-secret
-profile text, persisted across reopen, and excluded from diagnostics; the identifiers are forwarded
-only as `OpenAI-Organization` and `OpenAI-Project` for OpenAI Chat Completions and Responses requests.
+optional bounded `organization` and `project` identifiers, and schema 22 adds optional bounded
+`region` and `account_identifier` metadata. These fields are validated as non-secret profile text,
+persisted across reopen, and excluded from diagnostics; `organization` and `project` are forwarded
+only as `OpenAI-Organization` and `OpenAI-Project` for OpenAI Chat Completions and Responses
+requests. Region and account metadata remain adapter-neutral until a provider-specific contract is
+defined.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional
