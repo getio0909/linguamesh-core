@@ -47,7 +47,10 @@ Schema 16 migration tests construct a schema-15 database and verify the routing-
 without introducing endpoint or credential columns. Schema 18 migration tests round-trip the full
 translation preset, default legacy NULL values to `General`, enforce the 8 KiB bound, and reject
 credential-shaped custom instructions across reopen. Schema 19 migration tests round-trip bounded
-non-secret provider-profile notes and reject credential-shaped notes.
+non-secret provider-profile notes and reject credential-shaped notes. Schema 20 migration tests
+round-trip the bounded non-secret organization identifier and reject credential-shaped values; the
+OpenAI adapter fixture verifies the `OpenAI-Organization` header without exposing its value in debug
+output.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed

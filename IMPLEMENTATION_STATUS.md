@@ -1,10 +1,23 @@
 # Implementation Status
 
+## 2026-07-22 — Provider profile organization checkpoint
+
+Assumption: `organization` is an optional, bounded non-secret OpenAI-compatible routing/account
+identifier. Core forwards it only as `OpenAI-Organization` for Chat Completions and Responses; other
+adapters ignore it until their own contract is specified.
+
+- Added Core schema 20 migration `0020_provider_profile_organization.sql`, domain validation, storage
+  round-trip coverage, and redacted debug presence reporting.
+- Added OpenAI adapter configuration builders and request-header coverage; no credential or endpoint
+  value is logged or persisted through this field.
+- Linux and l10n bindings are tracked in their own implementation-status checkpoints. Release remains
+  unreleased pending cross-client compatibility and mandatory acceptance evidence.
+
 ## 2026-07-22 — Provider profile notes checkpoint
 
-Assumption: a single optional, bounded non-secret note is the smallest Linux-first slice of the
-ProviderProfile metadata contract; structured organization, region, proxy, and custom-header
-fields remain separate follow-up work.
+Assumption: a single optional, bounded non-secret note was the smallest Linux-first slice of the
+ProviderProfile metadata contract at the time of this checkpoint; later checkpoints add fields
+independently.
 
 - Added Core schema 19 migration `0019_provider_profile_notes.sql` and persisted optional
   `ProviderProfile.user_notes` without storing credentials or exposing it in debug output.

@@ -333,6 +333,7 @@ pub struct ProviderProfile {
     base_endpoint: EndpointConfiguration,
     secret_ref: Option<SecretRef>,
     user_notes: Option<String>,
+    organization: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -347,6 +348,7 @@ impl fmt::Debug for ProviderProfile {
             .field("base_endpoint", &"[REDACTED]")
             .field("has_secret_ref", &self.secret_ref.is_some())
             .field("has_user_notes", &self.user_notes.is_some())
+            .field("has_organization", &self.organization.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -375,6 +377,7 @@ impl ProviderProfile {
             base_endpoint,
             secret_ref,
             user_notes: None,
+            organization: None,
             enabled: true,
             selected_model: None,
         })
@@ -422,6 +425,12 @@ impl ProviderProfile {
         self.user_notes.as_deref()
     }
 
+    /// 返回可选的非秘密组织标识。
+    #[must_use]
+    pub fn organization(&self) -> Option<&str> {
+        self.organization.as_deref()
+    }
+
     /// 返回配置是否允许被选择。
     #[must_use]
     pub const fn enabled(&self) -> bool {
@@ -460,6 +469,18 @@ impl ProviderProfile {
         self.user_notes = notes
             .filter(|value| !value.trim().is_empty())
             .map(|value| checked_profile_text(value, "user_notes"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置有界且不含凭据的组织标识。
+    pub fn with_organization(
+        mut self,
+        organization: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.organization = organization
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| checked_profile_text(value, "organization"))
             .transpose()?;
         Ok(self)
     }
@@ -2370,6 +2391,42 @@ mod tests {
                 .with_user_notes(Some("   ".to_owned()))
                 .expect("empty notes")
                 .user_notes(),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_profile_organization_is_bounded_and_non_secret() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_ORGANIZATION_CREDENTIAL_1234567890");
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-organization").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_organization(Some("org-local".to_owned()))
+        .expect("organization");
+        assert_eq!(profile.organization(), Some("org-local"));
+        assert_eq!(
+            profile
+                .clone()
+                .with_organization(Some(CREDENTIAL.to_owned())),
+            Err(ProfileValidationError::CredentialLikeValue("organization"))
+        );
+        assert!(
+            profile
+                .clone()
+                .with_organization(Some("x".repeat(2049)))
+                .is_err()
+        );
+        assert_eq!(
+            profile
+                .with_organization(Some("   ".to_owned()))
+                .expect("empty organization")
+                .organization(),
             None
         );
     }
