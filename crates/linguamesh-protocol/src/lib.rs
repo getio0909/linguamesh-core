@@ -71,6 +71,15 @@ pub struct TranslateTextCommand {
     /// 可选的宿主安全存储引用；永远不是秘密值。
     #[prost(string, tag = "5")]
     pub secret_ref: String,
+    /// 可选的非秘密 `OpenAI` 组织标识。
+    #[prost(string, tag = "6")]
+    pub organization: String,
+    /// 可选的非秘密 `OpenAI` 项目标识。
+    #[prost(string, tag = "7")]
+    pub project: String,
+    /// 可选的受限非秘密自定义请求头 JSON。
+    #[prost(string, tag = "8")]
+    pub custom_headers_json: String,
 }
 
 /// 携带一段增量翻译文本。
@@ -213,6 +222,9 @@ mod tests {
             source_text: "Hello".into(),
             target_locale: "zh-CN".into(),
             secret_ref: String::new(),
+            organization: "org-local".into(),
+            project: "project-local".into(),
+            custom_headers_json: r#"{"X-Trace-Mode":"protocol"}"#.into(),
         };
         let encoded_command = command.encode_to_vec();
         assert_eq!(

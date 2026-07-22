@@ -164,6 +164,22 @@ impl FakeProviderServer {
         .await
     }
 
+    /// 启动同时要求 `OpenAI` 项目请求头和一个安全自定义请求头的回环服务。
+    pub async fn start_requiring_openai_project_and_custom_header(
+        project: impl Into<String>,
+        custom_header: (String, String),
+    ) -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Standard,
+            Some(project.into()),
+            Some(custom_header),
+        )
+        .await
+    }
+
     /// 启动要求 `OpenAI` 项目请求头并返回 Responses typed-SSE 的回环服务。
     pub async fn start_responses_requiring_openai_project(
         project: impl Into<String>,

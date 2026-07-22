@@ -92,12 +92,20 @@ class LinguaMeshEngine private constructor(
         modelId: String,
         sourceText: String,
         targetLocale: String,
+        organization: String? = null,
+        project: String? = null,
+        customHeadersJson: String? = null,
     ) {
         val payload = TranslateTextCommand.newBuilder()
             .setEndpoint(endpoint)
             .setModelId(modelId)
             .setSourceText(sourceText)
             .setTargetLocale(targetLocale)
+            .apply {
+                organization?.let(::setOrganization)
+                project?.let(::setProject)
+                customHeadersJson?.let(::setCustomHeadersJson)
+            }
             .build()
         val envelope = Envelope.newBuilder()
             .setProtocolVersion(compatibility.protocolVersion.toInt())

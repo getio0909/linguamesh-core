@@ -5,7 +5,7 @@ use linguamesh_application::{HostSecretBroker, SecretRequestLease, host_secret_c
 use linguamesh_document::{DocumentJob, MAX_DOCUMENT_BYTES};
 use linguamesh_domain::{
     CorrelationId, ErrorKind, FileLease, FileLeaseError, OperationId, SecretRef, SecretValue,
-    TranslationEvent, TranslationRequest,
+    TranslationEvent, TranslationRequest, validate_non_secret_profile_field,
 };
 use linguamesh_engine::{
     CancellationHandle, TranslationEngine, TranslationOperation, core_compatibility,
@@ -754,6 +754,9 @@ impl LmEngine {
         {
             return LmResultCode::MalformedMessage;
         }
+        let Ok(config) = openai_config_for_command(&command, None) else {
+            return LmResultCode::InvalidArgument;
+        };
         let secret_ref = if command.secret_ref.is_empty() {
             None
         } else {
@@ -773,9 +776,7 @@ impl LmEngine {
             drop(active);
             return self.submit_with_host_secret(envelope, command, secret_ref);
         }
-        let Ok(provider) =
-            OpenAiCompatibleProvider::new(OpenAiConfig::without_credential(command.endpoint))
-        else {
+        let Ok(provider) = OpenAiCompatibleProvider::new(config) else {
             return LmResultCode::InvalidArgument;
         };
         let mut request =
@@ -863,7 +864,14 @@ impl LmEngine {
         command: TranslateTextCommand,
         secret_ref: SecretRef,
     ) -> LmResultCode {
-        if OpenAiCompatibleProvider::validate_endpoint(&command.endpoint).is_err() {
+        let metadata_valid = openai_config_for_command(&command, None).and_then(|config| {
+            OpenAiCompatibleProvider::new(config)
+                .map(|_| ())
+                .map_err(|_| LmResultCode::InvalidArgument)
+        });
+        if OpenAiCompatibleProvider::validate_endpoint(&command.endpoint).is_err()
+            || metadata_valid.is_err()
+        {
             return LmResultCode::InvalidArgument;
         }
         let Ok((broker, requests)) = host_secret_channel(1) else {
@@ -994,6 +1002,36 @@ impl LmEngine {
     }
 }
 
+fn openai_config_for_command(
+    command: &TranslateTextCommand,
+    credential: Option<SecretValue>,
+) -> Result<OpenAiConfig, LmResultCode> {
+    let organization = optional_non_secret_metadata(&command.organization, "organization")?;
+    let project = optional_non_secret_metadata(&command.project, "project")?;
+    let custom_headers = (!command.custom_headers_json.trim().is_empty())
+        .then(|| command.custom_headers_json.clone());
+    let config = credential.map_or_else(
+        || OpenAiConfig::without_credential(command.endpoint.clone()),
+        |secret| OpenAiConfig::with_credential(command.endpoint.clone(), secret),
+    );
+    Ok(config
+        .with_organization(organization)
+        .with_project(project)
+        .with_custom_headers(custom_headers))
+}
+
+fn optional_non_secret_metadata(
+    value: &str,
+    field: &'static str,
+) -> Result<Option<String>, LmResultCode> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    validate_non_secret_profile_field(value, field)
+        .map(Some)
+        .map_err(|_| LmResultCode::InvalidArgument)
+}
+
 fn create_path_file_lease(
     engine: *mut LmEngine,
     data: *const u8,
@@ -1102,9 +1140,23 @@ async fn run_host_secret_translation(context: HostSecretTranslation) {
             return;
         }
     };
-    let Ok(provider) =
-        OpenAiCompatibleProvider::new(OpenAiConfig::with_credential(command.endpoint, secret))
-    else {
+    let Ok(config) = openai_config_for_command(&command, Some(secret)) else {
+        let error = linguamesh_domain::TranslationError::new(
+            ErrorKind::InvalidEndpoint,
+            "The provider endpoint is invalid or unsafe.",
+        );
+        let _ = sender
+            .send(encode_event(
+                &operation_id,
+                &correlation_id,
+                TranslationEvent::Failed { sequence: 1, error },
+            ))
+            .await;
+        lock_unpoisoned(&pending).clear();
+        clear_active(&active, &operation_id);
+        return;
+    };
+    let Ok(provider) = OpenAiCompatibleProvider::new(config) else {
         let error = linguamesh_domain::TranslationError::new(
             ErrorKind::InvalidEndpoint,
             "The provider endpoint is invalid or unsafe.",
@@ -2086,6 +2138,9 @@ mod tests {
                 source_text: "Hello".into(),
                 target_locale: "zh-CN".into(),
                 secret_ref: String::new(),
+                organization: String::new(),
+                project: String::new(),
+                custom_headers_json: String::new(),
             }
             .encode_to_vec(),
         }
@@ -2100,6 +2155,70 @@ mod tests {
         assert_eq!(
             unsafe { lm_engine_submit(engine, malformed.as_ptr(), malformed.len()) },
             LmResultCode::MalformedMessage
+        );
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
+    fn ffi_rejects_credential_shaped_protocol_metadata_before_secret_request() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let command = TranslateTextCommand {
+            endpoint: "http://127.0.0.1:8080/v1/".into(),
+            model_id: "fake-translator".into(),
+            source_text: "Hello".into(),
+            target_locale: "zh-CN".into(),
+            secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
+            organization: String::new(),
+            project: "sk-LM_PROTOCOL_PROJECT_CREDENTIAL".into(),
+            custom_headers_json: String::new(),
+        };
+        let envelope = encoded_envelope(
+            PROTOCOL_VERSION,
+            message_type::TRANSLATE_TEXT,
+            command.encode_to_vec(),
+        );
+        // SAFETY：编码消息在调用期间保持有效且句柄尚未销毁。
+        assert_eq!(
+            unsafe { lm_engine_submit(engine, envelope.as_ptr(), envelope.len()) },
+            LmResultCode::InvalidArgument
+        );
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
+    fn ffi_rejects_credential_shaped_custom_header_before_secret_request() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let command = TranslateTextCommand {
+            endpoint: "http://127.0.0.1:8080/v1/".into(),
+            model_id: "fake-translator".into(),
+            source_text: "Hello".into(),
+            target_locale: "zh-CN".into(),
+            secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
+            organization: String::new(),
+            project: String::new(),
+            custom_headers_json: r#"{"X-Trace-Mode":"sk-LM_HEADER_CREDENTIAL"}"#.into(),
+        };
+        let envelope = encoded_envelope(
+            PROTOCOL_VERSION,
+            message_type::TRANSLATE_TEXT,
+            command.encode_to_vec(),
+        );
+        // SAFETY：编码消息在调用期间保持有效且句柄尚未销毁。
+        assert_eq!(
+            unsafe { lm_engine_submit(engine, envelope.as_ptr(), envelope.len()) },
+            LmResultCode::InvalidArgument
         );
         // SAFETY：句柄由本测试创建且只销毁一次。
         assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
@@ -2175,6 +2294,36 @@ mod tests {
                 })
                 .count(),
             1
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ffi_forwards_non_secret_provider_metadata() {
+        let server = FakeProviderServer::start_requiring_openai_project_and_custom_header(
+            "project-local",
+            ("X-Trace-Mode".to_owned(), "ffi".to_owned()),
+        )
+        .await
+        .expect("server");
+        let endpoint = server.base_url();
+        let events = tokio::task::spawn_blocking(move || run_ffi_metadata_translation(&endpoint))
+            .await
+            .expect("native task");
+        let output = events
+            .iter()
+            .filter(|event| event.message_type == message_type::TEXT_DELTA)
+            .map(|event| {
+                TextDeltaEvent::decode(event.payload.as_slice())
+                    .expect("delta")
+                    .text
+            })
+            .collect::<String>();
+        assert_eq!(output, "你好，LinguaMesh！");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.message_type == message_type::COMPLETED)
         );
         server.shutdown().await;
     }
@@ -2262,6 +2411,9 @@ mod tests {
             source_text: "Hello".into(),
             target_locale: "zh-CN".into(),
             secret_ref: String::new(),
+            organization: String::new(),
+            project: String::new(),
+            custom_headers_json: String::new(),
         };
         let envelope = encoded_envelope(
             PROTOCOL_VERSION,
@@ -2294,6 +2446,50 @@ mod tests {
         events
     }
 
+    fn run_ffi_metadata_translation(endpoint: &str) -> Vec<Envelope> {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let command = TranslateTextCommand {
+            endpoint: endpoint.into(),
+            model_id: "fake-translator".into(),
+            source_text: "Hello".into(),
+            target_locale: "zh-CN".into(),
+            secret_ref: String::new(),
+            organization: "org-local".into(),
+            project: "project-local".into(),
+            custom_headers_json: r#"{"X-Trace-Mode":"ffi"}"#.into(),
+        };
+        let envelope = encoded_envelope(
+            PROTOCOL_VERSION,
+            message_type::TRANSLATE_TEXT,
+            command.encode_to_vec(),
+        );
+        // SAFETY：编码消息在调用期间保持有效且句柄尚未销毁。
+        assert_eq!(
+            unsafe { lm_engine_submit(engine, envelope.as_ptr(), envelope.len()) },
+            LmResultCode::Ok
+        );
+        let mut events = Vec::new();
+        for _ in 0..16 {
+            let event = poll_envelope(engine);
+            let terminal = matches!(
+                event.message_type.as_str(),
+                message_type::COMPLETED | message_type::CANCELLED | message_type::FAILED
+            );
+            events.push(event);
+            if terminal {
+                break;
+            }
+        }
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+        events
+    }
+
     fn run_ffi_authenticated_translation(endpoint: &str, secret: &str) -> Vec<Envelope> {
         let mut engine: *mut LmEngine = ptr::null_mut();
         // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
@@ -2307,6 +2503,9 @@ mod tests {
             source_text: "Hello".into(),
             target_locale: "zh-CN".into(),
             secret_ref: "session:11111111-1111-4111-8111-111111111111".into(),
+            organization: String::new(),
+            project: String::new(),
+            custom_headers_json: String::new(),
         };
         let envelope = encoded_envelope(
             PROTOCOL_VERSION,

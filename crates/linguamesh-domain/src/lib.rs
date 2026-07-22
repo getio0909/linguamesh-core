@@ -572,6 +572,14 @@ pub fn validate_model_identifier(value: &str) -> Result<(), ProfileValidationErr
     checked_profile_text(value.to_owned(), "model_id").map(drop)
 }
 
+/// 验证跨原生协议传输的非秘密提供商字段，并返回其原始值。
+pub fn validate_non_secret_profile_field(
+    value: &str,
+    field: &'static str,
+) -> Result<String, ProfileValidationError> {
+    checked_profile_text(value.to_owned(), field)
+}
+
 /// 描述规范提供商配置验证失败。
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ProfileValidationError {
@@ -2339,6 +2347,7 @@ mod tests {
         SecretRefNamespace, SecretValue, TranslationError, TranslationEvent, TranslationPreset,
         TranslationPrivacyMode, TranslationQualityMode, TranslationRequest, UsageRecord,
         UsageSource, protect_source_text, protect_source_text_with_glossary,
+        validate_non_secret_profile_field,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -2563,6 +2572,20 @@ mod tests {
                 .organization(),
             None
         );
+    }
+
+    #[test]
+    fn protocol_non_secret_metadata_reuses_profile_validation() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_PROTOCOL_METADATA_CREDENTIAL");
+        assert_eq!(
+            validate_non_secret_profile_field("project-local", "project"),
+            Ok("project-local".to_owned())
+        );
+        assert_eq!(
+            validate_non_secret_profile_field(CREDENTIAL, "project"),
+            Err(ProfileValidationError::CredentialLikeValue("project"))
+        );
+        assert!(validate_non_secret_profile_field("x".repeat(2049).as_str(), "project").is_err());
     }
 
     #[test]

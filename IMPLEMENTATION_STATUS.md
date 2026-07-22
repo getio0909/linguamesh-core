@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-22 — ABI 1 provider metadata projection
+
+Assumption: ABI 1 can add optional Protobuf fields without changing the envelope or protocol
+version; older clients omit the fields and Core treats them as absent.
+
+- `TranslateTextCommand` now carries optional non-secret `organization`, `project`, and
+  `custom_headers_json` fields. The C ABI validates organization/project values against the shared
+  credential-shape and size rules, validates custom headers before requesting a host secret, and
+  forwards the accepted metadata into the OpenAI-compatible adapter.
+- The Android wrapper exposes source-compatible optional parameters, while raw envelope clients
+  can populate the same fields directly. Credentials remain only in `secret_ref`/one-shot host
+  responses and are never serialized into these metadata fields.
+- Domain/protocol/FFI tests pass, including metadata forwarding against a header-enforced fake
+  provider and fail-closed credential-shaped metadata before any secret request.
+
+This is a prerelease ABI capability projection; other native clients still require integration
+and platform-specific validation before cross-client acceptance or stable release.
+
 ## 2026-07-22 — Provider profile custom-header checkpoint
 
 Assumption: Linux needs a bounded non-secret JSON map for provider-specific routing headers; header

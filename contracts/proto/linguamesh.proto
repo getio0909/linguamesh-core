@@ -21,6 +21,12 @@ message TranslateTextCommand {
   string source_text = 3;
   string target_locale = 4;
   string secret_ref = 5;
+  // 可选的非秘密 OpenAI 组织标识。
+  string organization = 6;
+  // 可选的非秘密 OpenAI 项目标识。
+  string project = 7;
+  // 可选的受限非秘密自定义请求头 JSON。
+  string custom_headers_json = 8;
 }
 
 message TextDeltaEvent {

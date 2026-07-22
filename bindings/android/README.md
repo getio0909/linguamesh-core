@@ -16,8 +16,9 @@ ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358" \
 
 The script cross-compiles `linguamesh-ffi` for `arm64-v8a`, `armeabi-v7a`, and `x86_64`, runs the
 Kotlin unit tests and release lint, then builds the release AAR. Applications can call
-`translateText(...)` and consume
-`pollDecodedEvent(...)` as typed `CoreEvent` values without importing generated Protobuf classes.
+`translateText(...)`, optionally supplying non-secret organization/project identifiers and
+validated custom-header JSON, and consume `pollDecodedEvent(...)` as typed `CoreEvent` values
+without importing generated Protobuf classes.
 Raw envelope methods remain available for protocol-level integration and diagnostics. The package
 does not contain credentials. Apps keep platform secrets in the Android Keystore-backed broker and
 send only versioned host responses to the wrapper.

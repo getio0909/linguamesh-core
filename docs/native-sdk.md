@@ -17,7 +17,9 @@ engine. Unknown versions, catalog values, or feature requirements must fail clos
 An engine accepts one active operation. Submit an `Envelope` with non-empty operation and
 correlation IDs, sequence `0`, message type `translate_text`, and an encoded
 `TranslateTextCommand` payload. The command contains an endpoint, model ID, untrusted source text,
-and target locale. Credentials are deliberately absent.
+target locale, and optional bounded non-secret `organization`, `project`, and `custom_headers_json`
+metadata. Credential-shaped organization/project values and unsafe custom headers are rejected
+before any host-secret request; credentials themselves are deliberately absent.
 
 Poll from a dedicated non-UI execution context. A successful poll returns an owned buffer; an empty
 buffer means the bounded timeout elapsed. Every non-empty buffer contains an `Envelope` with the
