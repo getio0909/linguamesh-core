@@ -32,8 +32,15 @@ pub struct FakeProviderServer {
 impl FakeProviderServer {
     /// 启动兼容 `OpenAI` 模型和流式接口的服务。
     pub async fn start() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Standard, None)
-            .await
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Standard,
+            None,
+            None,
+        )
+        .await
     }
 
     /// 在指定的 IPv4 回环端口启动服务，端口零表示由系统选择。
@@ -44,14 +51,22 @@ impl FakeProviderServer {
             Duration::ZERO,
             FakeProviderFlavor::Standard,
             None,
+            None,
         )
         .await
     }
 
     /// 启动在模型响应前等待指定时长的回环服务。
     pub async fn start_with_model_delay(model_delay: Duration) -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, model_delay, FakeProviderFlavor::Standard, None)
-            .await
+        Self::start_with_configuration(
+            0,
+            None,
+            model_delay,
+            FakeProviderFlavor::Standard,
+            None,
+            None,
+        )
+        .await
     }
 
     /// 启动要求精确 Bearer 凭据的回环服务。
@@ -64,14 +79,22 @@ impl FakeProviderServer {
             Duration::ZERO,
             FakeProviderFlavor::Standard,
             None,
+            None,
         )
         .await
     }
 
     /// 启动返回 Ollama 模型标识的 `OpenAI` 兼容回环服务。
     pub async fn start_ollama_compatible() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Ollama, None)
-            .await
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Ollama,
+            None,
+            None,
+        )
+        .await
     }
 
     /// 启动原生 Ollama `/api` 模型和 NDJSON 聊天接口的回环服务。
@@ -82,14 +105,22 @@ impl FakeProviderServer {
             Duration::ZERO,
             FakeProviderFlavor::OllamaNative,
             None,
+            None,
         )
         .await
     }
 
     /// 启动 Gemini Generate Content 模型和 SSE 接口的回环服务。
     pub async fn start_gemini() -> std::io::Result<Self> {
-        Self::start_with_configuration(0, None, Duration::ZERO, FakeProviderFlavor::Gemini, None)
-            .await
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::Gemini,
+            None,
+            None,
+        )
+        .await
     }
 
     /// 启动要求 `api-key` 请求头的 Azure `OpenAI` 回环服务。
@@ -99,6 +130,7 @@ impl FakeProviderServer {
             Some(SecretValue::new("azure-test-key")),
             Duration::ZERO,
             FakeProviderFlavor::Azure,
+            None,
             None,
         )
         .await
@@ -111,6 +143,7 @@ impl FakeProviderServer {
             Some(SecretValue::new("responses-test-key")),
             Duration::ZERO,
             FakeProviderFlavor::Responses,
+            None,
             None,
         )
         .await
@@ -126,6 +159,7 @@ impl FakeProviderServer {
             Duration::ZERO,
             FakeProviderFlavor::Standard,
             Some(project.into()),
+            None,
         )
         .await
     }
@@ -140,6 +174,20 @@ impl FakeProviderServer {
             Duration::ZERO,
             FakeProviderFlavor::Responses,
             Some(project.into()),
+            None,
+        )
+        .await
+    }
+
+    /// 启动要求 Azure 自定义请求头和 `api-key` 的回环服务。
+    pub async fn start_azure_requiring_custom_header() -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            Some(SecretValue::new("azure-test-key")),
+            Duration::ZERO,
+            FakeProviderFlavor::Azure,
+            None,
+            Some(("X-Trace-Mode".to_owned(), "azure".to_owned())),
         )
         .await
     }
@@ -150,6 +198,7 @@ impl FakeProviderServer {
         model_delay: Duration,
         flavor: FakeProviderFlavor,
         expected_project: Option<String>,
+        expected_custom_header: Option<(String, String)>,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
         let address = listener.local_addr()?;
@@ -175,6 +224,7 @@ impl FakeProviderServer {
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
                 expected_project,
+                expected_custom_header,
                 model_delay,
                 flavor,
                 model_request_counter: Arc::clone(&model_request_counter),
@@ -244,6 +294,7 @@ impl FakeProviderServer {
 struct FakeProviderState {
     expected_token: Option<Arc<SecretValue>>,
     expected_project: Option<String>,
+    expected_custom_header: Option<(String, String)>,
     model_delay: Duration,
     flavor: FakeProviderFlavor,
     model_request_counter: Arc<AtomicUsize>,
@@ -514,6 +565,15 @@ fn authorized(state: &FakeProviderState, headers: &HeaderMap) -> bool {
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value == expected)
         })
+        && state
+            .expected_custom_header
+            .as_ref()
+            .is_none_or(|(name, expected)| {
+                headers
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value == expected)
+            })
 }
 
 #[cfg(test)]

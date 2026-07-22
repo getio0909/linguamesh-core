@@ -58,6 +58,8 @@ pub struct AzureOpenAiConfig {
     pub api_version: String,
     /// 可选的一次性内存凭据。
     pub credential: Option<SecretValue>,
+    /// 可选的受限非秘密请求头 JSON。
+    pub custom_headers: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -75,6 +77,7 @@ impl AzureOpenAiConfig {
             deployment: deployment.into(),
             api_version: api_version.into(),
             credential: None,
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -92,8 +95,16 @@ impl AzureOpenAiConfig {
             deployment: deployment.into(),
             api_version: api_version.into(),
             credential: Some(credential),
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// 设置受限非秘密请求头 JSON。
+    #[must_use]
+    pub fn with_custom_headers(mut self, custom_headers: Option<String>) -> Self {
+        self.custom_headers = custom_headers;
+        self
     }
 }
 
@@ -108,6 +119,7 @@ impl fmt::Debug for AzureOpenAiConfig {
                 "credential",
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("has_custom_headers", &self.custom_headers.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -361,7 +373,7 @@ impl OpenAiCompatibleProvider {
             config.credential,
             None,
             None,
-            None,
+            config.custom_headers.as_deref(),
             config.request_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
@@ -1159,8 +1171,8 @@ fn map_reqwest_error(error: &reqwest::Error) -> TranslationError {
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenAiCompatibleProvider, OpenAiConfig, OpenAiResponsesConfig, ResponsesSseDecoder,
-        SseDecoder, SseMessage,
+        AzureOpenAiConfig, OpenAiCompatibleProvider, OpenAiConfig, OpenAiResponsesConfig,
+        ResponsesSseDecoder, SseDecoder, SseMessage,
     };
     use bytes::Bytes;
     use futures_util::StreamExt;
@@ -1416,6 +1428,42 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn azure_custom_headers_are_added_without_replacing_api_key() {
+        let provider = OpenAiCompatibleProvider::new_azure(
+            AzureOpenAiConfig::with_credential(
+                "http://127.0.0.1:8080/",
+                "fake-deployment",
+                "2024-10-21",
+                SecretValue::new("azure-test-key"),
+            )
+            .with_custom_headers(Some(r#"{"X-Trace-Mode":"azure"}"#.to_owned())),
+        )
+        .expect("provider");
+        let request =
+            provider
+                .request(provider.client.get(
+                    "http://127.0.0.1:8080/openai/deployments/fake-deployment/chat/completions",
+                ))
+                .expect("request")
+                .build()
+                .expect("built request");
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Trace-Mode")
+                .and_then(|value| value.to_str().ok()),
+            Some("azure")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("azure-test-key")
+        );
     }
 
     #[tokio::test]

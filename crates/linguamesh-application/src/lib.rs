@@ -337,6 +337,7 @@ impl ProviderManager {
                     "2024-10-21",
                 ),
             };
+            let config = config.with_custom_headers(profile.custom_headers().map(str::to_owned));
             Arc::new(OpenAiCompatibleProvider::new_azure(config)?)
         } else if is_responses {
             let config = match credential {
@@ -639,7 +640,9 @@ mod tests {
 
     #[tokio::test]
     async fn azure_profile_uses_api_key_and_manual_deployment() {
-        let server = FakeProviderServer::start_azure().await.expect("server");
+        let server = FakeProviderServer::start_azure_requiring_custom_header()
+            .await
+            .expect("server");
         let provider = ProviderProfile::new(
             ProviderProfileId::parse("azure-profile").expect("profile ID"),
             "Azure provider",
@@ -650,7 +653,9 @@ mod tests {
         )
         .expect("profile")
         .with_selected_model(Some("fake-deployment".to_owned()))
-        .expect("deployment");
+        .expect("deployment")
+        .with_custom_headers(Some(r#"{"X-Trace-Mode":"azure"}"#.to_owned()))
+        .expect("custom headers");
         let (broker, mut requests) = host_secret_channel(1).expect("secret channel");
         let host = tokio::spawn(async move {
             requests
