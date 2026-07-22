@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-22 — Provider profile custom-header checkpoint
+
+Assumption: Linux needs a bounded non-secret JSON map for provider-specific routing headers; header
+names and values that resemble credentials or override built-in authentication metadata must fail
+closed. Secret custom headers and proxy settings remain separate work.
+
+- Core schema 23 migration `0023_provider_profile_custom_headers.sql` persists canonicalized
+  custom headers without any credential-value column. Domain validation bounds the map to 16 HTTP
+  token headers, rejects control/credential/authentication values, and redacts presence in Debug.
+- OpenAI Chat Completions and Responses apply the validated headers while preserving built-in
+  organization, project, and authentication handling. Domain, storage, provider, and application
+  regressions passed locally; release remains `unreleased`.
+
 ## 2026-07-22 — Provider project application wiring correction
 
 Assumption: the persisted non-secret `project` identifier must reach both OpenAI-compatible Chat

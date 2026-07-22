@@ -346,7 +346,8 @@ impl ProviderManager {
                 None => OpenAiResponsesConfig::without_credential(profile.base_endpoint()),
             }
             .with_organization(profile.organization().map(str::to_owned))
-            .with_project(profile.project().map(str::to_owned));
+            .with_project(profile.project().map(str::to_owned))
+            .with_custom_headers(profile.custom_headers().map(str::to_owned));
             Arc::new(OpenAiCompatibleProvider::new_responses(config)?)
         } else {
             let config = match credential {
@@ -354,7 +355,8 @@ impl ProviderManager {
                 None => OpenAiConfig::without_credential(profile.base_endpoint()),
             }
             .with_organization(profile.organization().map(str::to_owned))
-            .with_project(profile.project().map(str::to_owned));
+            .with_project(profile.project().map(str::to_owned))
+            .with_custom_headers(profile.custom_headers().map(str::to_owned));
             Arc::new(OpenAiCompatibleProvider::new(config)?)
         };
         let engine_provider: Arc<dyn ModelProvider> = provider.clone();

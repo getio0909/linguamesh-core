@@ -12,7 +12,11 @@ use linguamesh_domain::{
 use linguamesh_provider_api::{
     ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
 };
-use reqwest::{Client, StatusCode, Url, redirect::Policy};
+use reqwest::{
+    Client, StatusCode, Url,
+    header::{HeaderMap, HeaderName, HeaderValue},
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -20,6 +24,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_CUSTOM_HEADERS: usize = 16;
+const MAX_CUSTOM_HEADER_NAME_BYTES: usize = 128;
+const MAX_CUSTOM_HEADER_VALUE_BYTES: usize = 2048;
 
 /// 兼容旧预发布调用方的凭据类型别名。
 #[deprecated(note = "Use linguamesh_domain::SecretValue.")]
@@ -35,6 +42,8 @@ pub struct OpenAiConfig {
     pub organization: Option<String>,
     /// 可选的非秘密项目标识。
     pub project: Option<String>,
+    /// 可选的受限非秘密请求头 JSON。
+    pub custom_headers: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -113,6 +122,7 @@ impl OpenAiConfig {
             credential: None,
             organization: None,
             project: None,
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -125,6 +135,7 @@ impl OpenAiConfig {
             credential: Some(credential),
             organization: None,
             project: None,
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -140,6 +151,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_project(mut self, project: Option<String>) -> Self {
         self.project = project;
+        self
+    }
+
+    /// 设置受限非秘密请求头 JSON。
+    #[must_use]
+    pub fn with_custom_headers(mut self, custom_headers: Option<String>) -> Self {
+        self.custom_headers = custom_headers;
         self
     }
 }
@@ -155,6 +173,7 @@ impl fmt::Debug for OpenAiConfig {
             )
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
+            .field("has_custom_headers", &self.custom_headers.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -170,6 +189,8 @@ pub struct OpenAiResponsesConfig {
     pub organization: Option<String>,
     /// 可选的非秘密项目标识。
     pub project: Option<String>,
+    /// 可选的受限非秘密请求头 JSON。
+    pub custom_headers: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -183,6 +204,7 @@ impl OpenAiResponsesConfig {
             credential: None,
             organization: None,
             project: None,
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -195,6 +217,7 @@ impl OpenAiResponsesConfig {
             credential: Some(credential),
             organization: None,
             project: None,
+            custom_headers: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -212,6 +235,13 @@ impl OpenAiResponsesConfig {
         self.project = project;
         self
     }
+
+    /// 设置受限非秘密请求头 JSON。
+    #[must_use]
+    pub fn with_custom_headers(mut self, custom_headers: Option<String>) -> Self {
+        self.custom_headers = custom_headers;
+        self
+    }
 }
 
 impl fmt::Debug for OpenAiResponsesConfig {
@@ -225,6 +255,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
             )
             .field("has_organization", &self.organization.is_some())
             .field("has_project", &self.project.is_some())
+            .field("has_custom_headers", &self.custom_headers.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -238,6 +269,7 @@ pub struct OpenAiCompatibleProvider {
     credential: Arc<Mutex<CredentialState>>,
     organization: Option<String>,
     project: Option<String>,
+    custom_headers: Vec<(HeaderName, HeaderValue)>,
     session_cancellation: CancellationToken,
     protocol: OpenAiProtocol,
 }
@@ -291,6 +323,7 @@ impl OpenAiCompatibleProvider {
             config.credential,
             config.organization,
             config.project,
+            config.custom_headers.as_deref(),
             config.request_timeout,
             OpenAiProtocol::ChatCompletions,
         )
@@ -303,6 +336,7 @@ impl OpenAiCompatibleProvider {
             config.credential,
             config.organization,
             config.project,
+            config.custom_headers.as_deref(),
             config.request_timeout,
             OpenAiProtocol::Responses,
         )
@@ -325,6 +359,7 @@ impl OpenAiCompatibleProvider {
         Self::new_with_protocol(
             base_url.as_str(),
             config.credential,
+            None,
             None,
             None,
             config.request_timeout,
@@ -350,10 +385,12 @@ impl OpenAiCompatibleProvider {
         credential: Option<SecretValue>,
         organization: Option<String>,
         project: Option<String>,
+        custom_headers: Option<&str>,
         request_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
+        let custom_headers = parse_custom_headers(custom_headers)?;
         let client = Client::builder()
             .redirect(Policy::none())
             .timeout(request_timeout)
@@ -367,6 +404,7 @@ impl OpenAiCompatibleProvider {
             )),
             organization,
             project,
+            custom_headers,
             session_cancellation: CancellationToken::new(),
             protocol,
         })
@@ -404,6 +442,11 @@ impl OpenAiCompatibleProvider {
         if self.session_cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
+        let mut headers = HeaderMap::new();
+        for (name, value) in &self.custom_headers {
+            headers.append(name.clone(), value.clone());
+        }
+        let request = request.headers(headers);
         let request = if matches!(
             &self.protocol,
             OpenAiProtocol::ChatCompletions | OpenAiProtocol::Responses
@@ -626,6 +669,96 @@ fn validated_base_url(base_url: &str) -> Result<Url, TranslationError> {
             "Provider endpoint is invalid or unsafe.",
         )
     })
+}
+
+fn parse_custom_headers(
+    custom_headers: Option<&str>,
+) -> Result<Vec<(HeaderName, HeaderValue)>, TranslationError> {
+    let Some(custom_headers) = custom_headers.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let headers =
+        serde_json::from_str::<std::collections::BTreeMap<String, String>>(custom_headers)
+            .map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Provider custom headers are invalid.",
+                )
+            })?;
+    if headers.is_empty() || headers.len() > MAX_CUSTOM_HEADERS {
+        return Err(TranslationError::new(
+            ErrorKind::InvalidConfiguration,
+            "Provider custom headers are invalid.",
+        ));
+    }
+    headers
+        .into_iter()
+        .map(|(name, value)| {
+            if name.is_empty()
+                || name.len() > MAX_CUSTOM_HEADER_NAME_BYTES
+                || is_forbidden_custom_header_name(&name)
+                || value.is_empty()
+                || value.len() > MAX_CUSTOM_HEADER_VALUE_BYTES
+                || value.chars().any(char::is_control)
+                || looks_like_credential(&value)
+            {
+                return Err(TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Provider custom headers are invalid.",
+                ));
+            }
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Provider custom header name is invalid.",
+                )
+            })?;
+            let value = HeaderValue::from_str(&value).map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "Provider custom header value is invalid.",
+                )
+            })?;
+            Ok((name, value))
+        })
+        .collect()
+}
+
+// 拒绝可能覆盖内置请求元数据或承载凭据的请求头名称。
+fn is_forbidden_custom_header_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "api-key",
+        "x-api-key",
+        "openai-organization",
+        "openai-project",
+        "content-type",
+        "accept",
+        "user-agent",
+        "secret",
+        "token",
+        "credential",
+    ]
+    .iter()
+    .any(|forbidden| name == *forbidden || name.contains(forbidden))
+}
+
+// 拒绝常见 API 凭据形态，避免非秘密字段承载秘密。
+fn looks_like_credential(value: &str) -> bool {
+    let value = value.trim();
+    value.contains("PRIVATE KEY-----")
+        || value.contains("github_pat_")
+        || value.to_ascii_lowercase().starts_with("bearer ")
+        || value
+            .match_indices("sk-")
+            .any(|(start, _)| value.len().saturating_sub(start + 3) >= 20)
+        || value
+            .match_indices("ghp_")
+            .any(|(start, _)| value.len().saturating_sub(start + 4) >= 24)
 }
 
 // 验证 Azure 路径段，避免把路径控制字符或额外层级带入请求地址。
@@ -1239,6 +1372,50 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("project-local")
         );
+    }
+
+    #[test]
+    fn custom_headers_are_added_without_replacing_auth_metadata() {
+        let provider = OpenAiCompatibleProvider::new(
+            OpenAiConfig::with_credential(
+                "https://provider.example/v1/",
+                SecretValue::new("test-secret"),
+            )
+            .with_custom_headers(Some(
+                r#"{"X-Trace-Mode":"local","X-Feature":"draft"}"#.to_owned(),
+            )),
+        )
+        .expect("provider");
+        let request = provider
+            .request(provider.client.get("https://provider.example/v1/models"))
+            .expect("request")
+            .build()
+            .expect("built request");
+        assert_eq!(
+            request
+                .headers()
+                .get("X-Trace-Mode")
+                .and_then(|value| value.to_str().ok()),
+            Some("local")
+        );
+        assert!(request.headers().contains_key("authorization"));
+    }
+
+    #[test]
+    fn custom_headers_reject_credentials_and_reserved_metadata() {
+        for custom_headers in [
+            r#"{"Authorization":"not-a-secret"}"#,
+            r#"{"OpenAI-Organization":"tenant"}"#,
+            r#"{"X-Trace":"sk-live-secret-value-1234567890"}"#,
+        ] {
+            assert!(
+                OpenAiCompatibleProvider::new(
+                    OpenAiConfig::without_credential("https://provider.example/v1/")
+                        .with_custom_headers(Some(custom_headers.to_owned())),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]

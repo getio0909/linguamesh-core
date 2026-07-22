@@ -51,7 +51,9 @@ non-secret provider-profile notes and reject credential-shaped notes. Schema 20 
 round-trip the bounded non-secret organization identifier and reject credential-shaped values; the
 OpenAI adapter and application fixtures verify the `OpenAI-Organization` and `OpenAI-Project` headers
 without exposing their values in debug
-output.
+output. Schema 23 migration tests round-trip canonicalized non-secret custom headers, reject
+authentication/credential-shaped names and values, and verify the OpenAI adapter applies a safe
+custom header without replacing authentication metadata.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed

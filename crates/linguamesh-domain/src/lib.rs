@@ -133,6 +133,9 @@ pub struct ModelDescriptor {
 
 const MAX_STABLE_ID_BYTES: usize = 128;
 const MAX_PROFILE_TEXT_BYTES: usize = 2048;
+const MAX_CUSTOM_HEADERS: usize = 16;
+const MAX_CUSTOM_HEADER_NAME_BYTES: usize = 128;
+const MAX_CUSTOM_HEADER_VALUE_BYTES: usize = 2048;
 
 /// 标识一个持久化提供商配置。
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -337,6 +340,7 @@ pub struct ProviderProfile {
     project: Option<String>,
     region: Option<String>,
     account_identifier: Option<String>,
+    custom_headers: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -355,6 +359,7 @@ impl fmt::Debug for ProviderProfile {
             .field("has_project", &self.project.is_some())
             .field("has_region", &self.region.is_some())
             .field("has_account_identifier", &self.account_identifier.is_some())
+            .field("has_custom_headers", &self.custom_headers.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -387,6 +392,7 @@ impl ProviderProfile {
             project: None,
             region: None,
             account_identifier: None,
+            custom_headers: None,
             enabled: true,
             selected_model: None,
         })
@@ -456,6 +462,12 @@ impl ProviderProfile {
     #[must_use]
     pub fn account_identifier(&self) -> Option<&str> {
         self.account_identifier.as_deref()
+    }
+
+    /// 返回规范化的非秘密自定义请求头 JSON。
+    #[must_use]
+    pub fn custom_headers(&self) -> Option<&str> {
+        self.custom_headers.as_deref()
     }
 
     /// 返回配置是否允许被选择。
@@ -538,6 +550,18 @@ impl ProviderProfile {
         self.account_identifier = account_identifier
             .filter(|value| !value.trim().is_empty())
             .map(|value| checked_profile_text(value, "account_identifier"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置受限且不含凭据的自定义请求头 JSON。
+    pub fn with_custom_headers(
+        mut self,
+        custom_headers: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.custom_headers = custom_headers
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| validate_custom_headers(&value))
             .transpose()?;
         Ok(self)
     }
@@ -693,6 +717,59 @@ fn checked_profile_text(
     } else {
         Ok(value)
     }
+}
+
+fn validate_custom_headers(value: &str) -> Result<String, ProfileValidationError> {
+    let headers = serde_json::from_str::<std::collections::BTreeMap<String, String>>(value)
+        .map_err(|_| ProfileValidationError::InvalidField("custom_headers"))?;
+    if headers.is_empty() || headers.len() > MAX_CUSTOM_HEADERS {
+        return Err(ProfileValidationError::InvalidField("custom_headers"));
+    }
+    for (name, header_value) in &headers {
+        if name.is_empty()
+            || name.len() > MAX_CUSTOM_HEADER_NAME_BYTES
+            || !name.bytes().all(is_http_token_byte)
+            || is_secret_header_name(name)
+            || header_value.is_empty()
+            || header_value.len() > MAX_CUSTOM_HEADER_VALUE_BYTES
+            || header_value.chars().any(char::is_control)
+            || looks_like_credential(header_value)
+        {
+            return Err(ProfileValidationError::InvalidField("custom_headers"));
+        }
+    }
+    serde_json::to_string(&headers)
+        .map_err(|_| ProfileValidationError::InvalidField("custom_headers"))
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        )
+}
+
+fn is_secret_header_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "api-key",
+        "x-api-key",
+        "openai-organization",
+        "openai-project",
+        "content-type",
+        "accept",
+        "user-agent",
+        "secret",
+        "token",
+        "credential",
+    ]
+    .iter()
+    .any(|forbidden| name == *forbidden || name.contains(forbidden))
 }
 
 fn looks_like_credential(value: &str) -> bool {
@@ -2560,6 +2637,56 @@ mod tests {
                 .account_identifier()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn provider_profile_custom_headers_are_bounded_and_non_secret() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_CUSTOM_HEADER_CREDENTIAL_1234567890");
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-headers").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_custom_headers(Some(
+            r#"{"X-Trace-Mode":"local","X-Feature":"draft"}"#.to_owned(),
+        ))
+        .expect("headers");
+        assert_eq!(
+            profile.custom_headers(),
+            Some(r#"{"X-Feature":"draft","X-Trace-Mode":"local"}"#)
+        );
+        for invalid in [
+            format!(r#"{{"X-Trace":"{CREDENTIAL}"}}"#),
+            r#"{"Authorization":"not-a-secret"}"#.to_owned(),
+            r#"{"OpenAI-Organization":"tenant"}"#.to_owned(),
+            r#"{"Content-Type":"text/plain"}"#.to_owned(),
+            r#"{"X Bad":"value"}"#.to_owned(),
+            r#"{"X-Trace":"line\nbreak"}"#.to_owned(),
+            "not-json".to_owned(),
+        ] {
+            assert_eq!(
+                profile.clone().with_custom_headers(Some(invalid)),
+                Err(ProfileValidationError::InvalidField("custom_headers"))
+            );
+        }
+        assert!(
+            profile
+                .clone()
+                .with_custom_headers(Some("{}".to_owned()))
+                .is_err()
+        );
+        let too_many = format!(
+            "{{{}}}",
+            (0..17)
+                .map(|index| format!("\"X-{index}\":\"v\""))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(profile.with_custom_headers(Some(too_many)).is_err());
     }
 
     #[test]
