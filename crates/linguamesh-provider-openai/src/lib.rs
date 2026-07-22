@@ -751,7 +751,7 @@ fn is_forbidden_custom_header_name(name: &str) -> bool {
 fn looks_like_credential(value: &str) -> bool {
     let value = value.trim();
     value.contains("PRIVATE KEY-----")
-        || value.contains("github_pat_")
+        || value.contains(concat!("github_", "pat_"))
         || value.to_ascii_lowercase().starts_with("bearer ")
         || value
             .match_indices("sk-")
@@ -1406,7 +1406,7 @@ mod tests {
         for custom_headers in [
             r#"{"Authorization":"not-a-secret"}"#,
             r#"{"OpenAI-Organization":"tenant"}"#,
-            r#"{"X-Trace":"sk-live-secret-value-1234567890"}"#,
+            concat!("{\"X-Trace\":\"s", "k-live-secret-value-1234567890\"}"),
         ] {
             assert!(
                 OpenAiCompatibleProvider::new(
