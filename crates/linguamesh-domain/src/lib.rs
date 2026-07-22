@@ -334,6 +334,7 @@ pub struct ProviderProfile {
     secret_ref: Option<SecretRef>,
     user_notes: Option<String>,
     organization: Option<String>,
+    project: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -349,6 +350,7 @@ impl fmt::Debug for ProviderProfile {
             .field("has_secret_ref", &self.secret_ref.is_some())
             .field("has_user_notes", &self.user_notes.is_some())
             .field("has_organization", &self.organization.is_some())
+            .field("has_project", &self.project.is_some())
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -378,6 +380,7 @@ impl ProviderProfile {
             secret_ref,
             user_notes: None,
             organization: None,
+            project: None,
             enabled: true,
             selected_model: None,
         })
@@ -431,6 +434,12 @@ impl ProviderProfile {
         self.organization.as_deref()
     }
 
+    /// 返回可选的非秘密项目标识。
+    #[must_use]
+    pub fn project(&self) -> Option<&str> {
+        self.project.as_deref()
+    }
+
     /// 返回配置是否允许被选择。
     #[must_use]
     pub const fn enabled(&self) -> bool {
@@ -481,6 +490,15 @@ impl ProviderProfile {
         self.organization = organization
             .filter(|value| !value.trim().is_empty())
             .map(|value| checked_profile_text(value, "organization"))
+            .transpose()?;
+        Ok(self)
+    }
+
+    /// 设置有界且不含凭据的项目标识。
+    pub fn with_project(mut self, project: Option<String>) -> Result<Self, ProfileValidationError> {
+        self.project = project
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| checked_profile_text(value, "project"))
             .transpose()?;
         Ok(self)
     }
@@ -2427,6 +2445,40 @@ mod tests {
                 .with_organization(Some("   ".to_owned()))
                 .expect("empty organization")
                 .organization(),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_profile_project_is_bounded_and_non_secret() {
+        const CREDENTIAL: &str = concat!("s", "k", "-LM_PROJECT_CREDENTIAL_1234567890");
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-project").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_project(Some("project-local".to_owned()))
+        .expect("project");
+        assert_eq!(profile.project(), Some("project-local"));
+        assert_eq!(
+            profile.clone().with_project(Some(CREDENTIAL.to_owned())),
+            Err(ProfileValidationError::CredentialLikeValue("project"))
+        );
+        assert!(
+            profile
+                .clone()
+                .with_project(Some("x".repeat(2049)))
+                .is_err()
+        );
+        assert_eq!(
+            profile
+                .with_project(Some("   ".to_owned()))
+                .expect("empty project")
+                .project(),
             None
         );
     }

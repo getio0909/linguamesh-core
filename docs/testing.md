@@ -49,7 +49,7 @@ translation preset, default legacy NULL values to `General`, enforce the 8 KiB b
 credential-shaped custom instructions across reopen. Schema 19 migration tests round-trip bounded
 non-secret provider-profile notes and reject credential-shaped notes. Schema 20 migration tests
 round-trip the bounded non-secret organization identifier and reject credential-shaped values; the
-OpenAI adapter fixture verifies the `OpenAI-Organization` header without exposing its value in debug
+OpenAI adapter fixture verifies the `OpenAI-Organization` and `OpenAI-Project` headers without exposing their values in debug
 output.
 
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,

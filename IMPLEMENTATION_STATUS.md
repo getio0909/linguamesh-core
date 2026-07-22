@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-22 — Provider profile project checkpoint
+
+Assumption: `project` is an optional, bounded non-secret OpenAI-compatible project identifier.
+Core forwards it only as `OpenAI-Project` for Chat Completions and Responses; Azure and other
+adapters ignore it until a provider-specific contract is defined.
+
+- Added Core schema 21 migration `0021_provider_profile_project.sql`, domain validation, storage
+  round-trip coverage, and redacted debug presence reporting.
+- Added OpenAI adapter configuration builders and request-header coverage; no credential or
+  endpoint value is logged or persisted through this field.
+- Linux and l10n bindings are tracked in their own implementation-status checkpoints. Release
+  remains unreleased pending cross-client compatibility and mandatory acceptance evidence.
+
 ## 2026-07-22 — Provider profile organization checkpoint
 
 Assumption: `organization` is an optional, bounded non-secret OpenAI-compatible routing/account

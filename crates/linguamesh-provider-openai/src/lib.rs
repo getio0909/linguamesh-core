@@ -33,6 +33,8 @@ pub struct OpenAiConfig {
     pub credential: Option<SecretValue>,
     /// 可选的非秘密组织标识。
     pub organization: Option<String>,
+    /// 可选的非秘密项目标识。
+    pub project: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -110,6 +112,7 @@ impl OpenAiConfig {
             base_url: base_url.into(),
             credential: None,
             organization: None,
+            project: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -121,6 +124,7 @@ impl OpenAiConfig {
             base_url: base_url.into(),
             credential: Some(credential),
             organization: None,
+            project: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -129,6 +133,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_organization(mut self, organization: Option<String>) -> Self {
         self.organization = organization;
+        self
+    }
+
+    /// 设置可选的非秘密项目标识。
+    #[must_use]
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
         self
     }
 }
@@ -143,6 +154,7 @@ impl fmt::Debug for OpenAiConfig {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("has_organization", &self.organization.is_some())
+            .field("has_project", &self.project.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -156,6 +168,8 @@ pub struct OpenAiResponsesConfig {
     pub credential: Option<SecretValue>,
     /// 可选的非秘密组织标识。
     pub organization: Option<String>,
+    /// 可选的非秘密项目标识。
+    pub project: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
 }
@@ -168,6 +182,7 @@ impl OpenAiResponsesConfig {
             base_url: base_url.into(),
             credential: None,
             organization: None,
+            project: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -179,6 +194,7 @@ impl OpenAiResponsesConfig {
             base_url: base_url.into(),
             credential: Some(credential),
             organization: None,
+            project: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -187,6 +203,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_organization(mut self, organization: Option<String>) -> Self {
         self.organization = organization;
+        self
+    }
+
+    /// 设置可选的非秘密项目标识。
+    #[must_use]
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
         self
     }
 }
@@ -201,6 +224,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("has_organization", &self.organization.is_some())
+            .field("has_project", &self.project.is_some())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -213,6 +237,7 @@ pub struct OpenAiCompatibleProvider {
     base_url: Url,
     credential: Arc<Mutex<CredentialState>>,
     organization: Option<String>,
+    project: Option<String>,
     session_cancellation: CancellationToken,
     protocol: OpenAiProtocol,
 }
@@ -265,6 +290,7 @@ impl OpenAiCompatibleProvider {
             &config.base_url,
             config.credential,
             config.organization,
+            config.project,
             config.request_timeout,
             OpenAiProtocol::ChatCompletions,
         )
@@ -276,6 +302,7 @@ impl OpenAiCompatibleProvider {
             &config.base_url,
             config.credential,
             config.organization,
+            config.project,
             config.request_timeout,
             OpenAiProtocol::Responses,
         )
@@ -299,6 +326,7 @@ impl OpenAiCompatibleProvider {
             base_url.as_str(),
             config.credential,
             None,
+            None,
             config.request_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
@@ -321,6 +349,7 @@ impl OpenAiCompatibleProvider {
         base_url: &str,
         credential: Option<SecretValue>,
         organization: Option<String>,
+        project: Option<String>,
         request_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
@@ -337,6 +366,7 @@ impl OpenAiCompatibleProvider {
                 credential.map_or(CredentialState::NotRequired, CredentialState::Available),
             )),
             organization,
+            project,
             session_cancellation: CancellationToken::new(),
             protocol,
         })
@@ -380,6 +410,18 @@ impl OpenAiCompatibleProvider {
         ) {
             if let Some(organization) = self.organization.as_deref() {
                 request.header("OpenAI-Organization", organization)
+            } else {
+                request
+            }
+        } else {
+            request
+        };
+        let request = if matches!(
+            &self.protocol,
+            OpenAiProtocol::ChatCompletions | OpenAiProtocol::Responses
+        ) {
+            if let Some(project) = self.project.as_deref() {
+                request.header("OpenAI-Project", project)
             } else {
                 request
             }
@@ -1175,6 +1217,27 @@ mod tests {
                 .get("OpenAI-Organization")
                 .and_then(|value| value.to_str().ok()),
             Some("org-local")
+        );
+    }
+
+    #[test]
+    fn project_is_added_only_to_openai_protocol_requests() {
+        let provider = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential("https://provider.example/v1/")
+                .with_project(Some("project-local".to_owned())),
+        )
+        .expect("provider");
+        let request = provider
+            .request(provider.client.get("https://provider.example/v1/models"))
+            .expect("request")
+            .build()
+            .expect("built request");
+        assert_eq!(
+            request
+                .headers()
+                .get("OpenAI-Project")
+                .and_then(|value| value.to_str().ok()),
+            Some("project-local")
         );
     }
 
