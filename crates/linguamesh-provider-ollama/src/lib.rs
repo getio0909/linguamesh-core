@@ -31,6 +31,8 @@ pub struct OllamaConfig {
     pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
+    /// 建立网络连接的超时。
+    pub connection_timeout: Duration,
 }
 
 impl OllamaConfig {
@@ -42,6 +44,7 @@ impl OllamaConfig {
             credential: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -53,6 +56,7 @@ impl OllamaConfig {
             credential: Some(credential),
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -69,6 +73,13 @@ impl OllamaConfig {
         self.request_timeout = request_timeout;
         self
     }
+
+    /// 设置连接建立超时。
+    #[must_use]
+    pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.connection_timeout = connection_timeout;
+        self
+    }
 }
 
 impl fmt::Debug for OllamaConfig {
@@ -82,6 +93,7 @@ impl fmt::Debug for OllamaConfig {
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
+            .field("connection_timeout", &self.connection_timeout)
             .finish()
     }
 }
@@ -131,7 +143,8 @@ impl OllamaProvider {
         let base_url = validated_base_url(&config.base_url)?;
         let mut client_builder = Client::builder()
             .redirect(Policy::none())
-            .timeout(config.request_timeout);
+            .timeout(config.request_timeout)
+            .connect_timeout(config.connection_timeout);
         if let Some(proxy_url) = config.proxy_url.as_deref() {
             let proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;

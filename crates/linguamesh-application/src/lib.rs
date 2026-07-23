@@ -297,13 +297,15 @@ impl ProviderManager {
             return Err(TranslationError::cancelled());
         }
         let request_timeout = Duration::from_secs(u64::from(profile.request_timeout_secs()));
+        let connection_timeout = Duration::from_secs(u64::from(profile.connection_timeout_secs()));
         let provider: Arc<dyn ManagedProvider> = if is_ollama {
             let config = match credential {
                 Some(secret) => OllamaConfig::with_credential(profile.base_endpoint(), secret),
                 None => OllamaConfig::without_credential(profile.base_endpoint()),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
-            .with_request_timeout(request_timeout);
+            .with_request_timeout(request_timeout)
+            .with_connection_timeout(connection_timeout);
             Arc::new(OllamaProvider::new(config)?)
         } else if is_anthropic {
             let model_id = manual_model_id.ok_or_else(|| {
@@ -319,7 +321,8 @@ impl ProviderManager {
                 None => AnthropicConfig::without_credential(profile.base_endpoint(), model_id),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
-            .with_request_timeout(request_timeout);
+            .with_request_timeout(request_timeout)
+            .with_connection_timeout(connection_timeout);
             Arc::new(AnthropicProvider::new(config)?)
         } else if is_gemini {
             let config = match credential {
@@ -327,7 +330,8 @@ impl ProviderManager {
                 None => GeminiConfig::without_credential(profile.base_endpoint()),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
-            .with_request_timeout(request_timeout);
+            .with_request_timeout(request_timeout)
+            .with_connection_timeout(connection_timeout);
             Arc::new(GeminiProvider::new(config)?)
         } else if is_azure {
             let deployment = manual_model_id.ok_or_else(|| {
@@ -352,6 +356,7 @@ impl ProviderManager {
             let config = config
                 .with_proxy_url(profile.proxy_url().map(str::to_owned))
                 .with_request_timeout(request_timeout)
+                .with_connection_timeout(connection_timeout)
                 .with_custom_headers(profile.custom_headers().map(str::to_owned))
                 .with_secret_custom_headers(
                     secret_custom_headers
@@ -370,6 +375,7 @@ impl ProviderManager {
             .with_project(profile.project().map(str::to_owned))
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
             .with_request_timeout(request_timeout)
+            .with_connection_timeout(connection_timeout)
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers
@@ -386,6 +392,7 @@ impl ProviderManager {
             .with_project(profile.project().map(str::to_owned))
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
             .with_request_timeout(request_timeout)
+            .with_connection_timeout(connection_timeout)
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers

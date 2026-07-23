@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 23. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 27. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -66,7 +66,11 @@ requests. Schema 23 adds a canonicalized, bounded non-secret custom-header JSON 
 and values that resemble credentials or override built-in authentication metadata are rejected;
 OpenAI Chat Completions and Responses apply the remaining headers. Secret custom headers and proxy
 settings remain separate host/provider contracts. Region and account metadata remain adapter-neutral
-until a provider-specific contract is defined.
+until a provider-specific contract is defined. Schema 25 persists the bounded non-secret proxy URL,
+schema 26 persists the bounded total request timeout (1–600 seconds), and schema 27 persists the
+bounded connection-establishment timeout (1–120 seconds, default 10). Provider adapters apply the
+request-total and connection timeouts independently through the shared HTTP client builder;
+streaming-idle timeout and TLS policy remain separate contracts.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional

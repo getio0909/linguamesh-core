@@ -50,6 +50,8 @@ pub struct OpenAiConfig {
     pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
+    /// 建立网络连接的超时。
+    pub connection_timeout: Duration,
 }
 
 /// 配置 Azure `OpenAI` Chat Completions 部署端点。
@@ -70,6 +72,8 @@ pub struct AzureOpenAiConfig {
     pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
+    /// 建立网络连接的超时。
+    pub connection_timeout: Duration,
 }
 
 impl AzureOpenAiConfig {
@@ -89,6 +93,7 @@ impl AzureOpenAiConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -109,6 +114,7 @@ impl AzureOpenAiConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -130,6 +136,13 @@ impl AzureOpenAiConfig {
     #[must_use]
     pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = request_timeout;
+        self
+    }
+
+    /// 设置连接建立超时。
+    #[must_use]
+    pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.connection_timeout = connection_timeout;
         self
     }
 
@@ -162,6 +175,7 @@ impl fmt::Debug for AzureOpenAiConfig {
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
+            .field("connection_timeout", &self.connection_timeout)
             .finish()
     }
 }
@@ -179,6 +193,7 @@ impl OpenAiConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -194,6 +209,7 @@ impl OpenAiConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -215,6 +231,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = request_timeout;
+        self
+    }
+
+    /// 设置连接建立超时。
+    #[must_use]
+    pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.connection_timeout = connection_timeout;
         self
     }
 
@@ -261,6 +284,7 @@ impl fmt::Debug for OpenAiConfig {
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
+            .field("connection_timeout", &self.connection_timeout)
             .finish()
     }
 }
@@ -283,6 +307,8 @@ pub struct OpenAiResponsesConfig {
     pub proxy_url: Option<String>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
+    /// 建立网络连接的超时。
+    pub connection_timeout: Duration,
 }
 
 impl OpenAiResponsesConfig {
@@ -298,6 +324,7 @@ impl OpenAiResponsesConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -313,6 +340,7 @@ impl OpenAiResponsesConfig {
             secret_custom_headers: None,
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 
@@ -334,6 +362,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
         self.request_timeout = request_timeout;
+        self
+    }
+
+    /// 设置连接建立超时。
+    #[must_use]
+    pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.connection_timeout = connection_timeout;
         self
     }
 
@@ -380,6 +415,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
+            .field("connection_timeout", &self.connection_timeout)
             .finish()
     }
 }
@@ -450,6 +486,7 @@ impl OpenAiCompatibleProvider {
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
             config.request_timeout,
+            config.connection_timeout,
             OpenAiProtocol::ChatCompletions,
         )
     }
@@ -465,6 +502,7 @@ impl OpenAiCompatibleProvider {
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
             config.request_timeout,
+            config.connection_timeout,
             OpenAiProtocol::Responses,
         )
     }
@@ -492,6 +530,7 @@ impl OpenAiCompatibleProvider {
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
             config.request_timeout,
+            config.connection_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
                 api_version,
@@ -519,6 +558,7 @@ impl OpenAiCompatibleProvider {
         secret_custom_headers: Option<&SecretValue>,
         proxy_url: Option<&str>,
         request_timeout: Duration,
+        connection_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
@@ -535,7 +575,8 @@ impl OpenAiCompatibleProvider {
         }
         let mut client_builder = Client::builder()
             .redirect(Policy::none())
-            .timeout(request_timeout);
+            .timeout(request_timeout)
+            .connect_timeout(connection_timeout);
         if let Some(proxy_url) = proxy_url {
             let proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;

@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-23 — Provider connection timeout checkpoint
+
+Assumption: a bounded connection-establishment timeout of 1–120 seconds (default 10) is the
+smallest next ProviderProfile slice; streaming-idle timeout and TLS policy remain separate.
+
+- Core schema 27 migration `0027_provider_profile_connection_timeout.sql` persists the validated
+  connection timeout beside the existing bounded total request timeout. Domain and storage tests
+  cover defaults, range rejection, migration, and profile round-trip without storing credentials.
+- OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama configuration builders now carry the
+  value into `reqwest::ClientBuilder::connect_timeout`; request-total timeout remains independent.
+- Local `cargo fmt --all`, `cargo check --workspace --locked --offline`, full workspace tests
+  (domain 50, storage 44, application 15, provider and document suites), and strict all-feature
+  Clippy passed. Linux demo-provider tests (`159 passed; 3 ignored`), strict Clippy, and l10n
+  validation also passed; remote gates and compatibility pins remain pending.
+
 ## 2026-07-22 — ABI 1 provider metadata projection
 
 Assumption: ABI 1 can add optional Protobuf fields without changing the envelope or protocol
