@@ -1999,7 +1999,7 @@ impl StoredProfile {
             .as_deref()
             .map(parse_error_kind)
             .transpose()
-            .map_err(|_| {
+            .map_err(|()| {
                 TranslationError::new(
                     ErrorKind::Persistence,
                     "Stored provider health category is invalid.",

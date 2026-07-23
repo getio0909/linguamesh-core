@@ -43,6 +43,19 @@ impl FakeProviderServer {
         .await
     }
 
+    /// 启动只支持手动模型的兼容回环服务，用于测试模型发现最后回退。
+    pub async fn start_manual_model_only() -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            None,
+            Duration::ZERO,
+            FakeProviderFlavor::ManualOnly,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// 在指定的 IPv4 回环端口启动服务，端口零表示由系统选择。
     pub async fn start_on_port(port: u16) -> std::io::Result<Self> {
         Self::start_with_configuration(
@@ -334,6 +347,7 @@ struct FakeProviderState {
 #[derive(Clone, Copy)]
 enum FakeProviderFlavor {
     Standard,
+    ManualOnly,
     Ollama,
     OllamaNative,
     Gemini,
@@ -442,6 +456,9 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
     }
+    if matches!(state.flavor, FakeProviderFlavor::ManualOnly) {
+        return (StatusCode::NOT_FOUND, "Model listing is unavailable.").into_response();
+    }
     let models = match state.flavor {
         FakeProviderFlavor::Standard | FakeProviderFlavor::Responses => json!([
             { "id": "fake-translator", "object": "model" },
@@ -450,6 +467,9 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
         FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => json!([
             { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
         ]),
+        FakeProviderFlavor::ManualOnly => {
+            unreachable!("manual-only flavor bypasses model response")
+        }
         FakeProviderFlavor::Gemini | FakeProviderFlavor::Anthropic | FakeProviderFlavor::Azure => {
             json!([])
         }
@@ -544,7 +564,9 @@ async fn chat_completions(
     };
     let output = stream! {
         let fragments = match state.flavor {
-            FakeProviderFlavor::Standard => ["你好", "，", "LinguaMesh", "！"],
+            FakeProviderFlavor::Standard | FakeProviderFlavor::ManualOnly => {
+                ["你好", "，", "LinguaMesh", "！"]
+            }
             FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => {
                 ["你好", "，", "Ollama", "！"]
             }

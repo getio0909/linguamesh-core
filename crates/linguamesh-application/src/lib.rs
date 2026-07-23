@@ -1,8 +1,8 @@
 #![doc = "`LinguaMesh` 的提供商配置和宿主服务编排层。"]
 
 use linguamesh_domain::{
-    ClientCertificateIdentity, ErrorKind, HostRequestId, ModelDescriptor, ProviderProfile,
-    ProviderProfileId, SecretRef, SecretValue, TranslationError,
+    ClientCertificateIdentity, ErrorKind, HostRequestId, ModelDescriptor, ModelSource,
+    ProviderProfile, ProviderProfileId, SecretRef, SecretValue, TranslationError,
 };
 use linguamesh_engine::TranslationEngine;
 use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
@@ -440,20 +440,32 @@ impl ProviderManager {
         };
         let engine_provider: Arc<dyn ModelProvider> = provider.clone();
         let engine = TranslationEngine::new(engine_provider);
-        let models = tokio::select! {
+        let discovered_models = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(TranslationError::cancelled()),
-            models = engine.list_models() => models?,
+            models = engine.list_models() => models,
         };
         if cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
-        if models.is_empty() {
-            return Err(TranslationError::new(
-                ErrorKind::ModelUnavailable,
-                "The provider returned no models.",
-            ));
-        }
+        // 当模型发现端点明确不可用或返回空列表时，保留用户已经填写的手动模型。
+        let models = match discovered_models {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_)
+            | Err(TranslationError {
+                kind: ErrorKind::ModelUnavailable,
+                ..
+            }) => match manual_model_descriptor(profile) {
+                Some(model) => vec![model],
+                None => {
+                    return Err(TranslationError::new(
+                        ErrorKind::ModelUnavailable,
+                        "The provider returned no models.",
+                    ));
+                }
+            },
+            Err(error) => return Err(error),
+        };
         self.active = Some(ActiveProvider {
             profile_id: profile.id().clone(),
             provider,
@@ -487,6 +499,15 @@ impl ProviderManager {
     pub fn disconnect(&mut self) {
         self.active = None;
     }
+}
+
+// 将配置中已验证的模型标识转换为最后一级手动模型来源。
+fn manual_model_descriptor(profile: &ProviderProfile) -> Option<ModelDescriptor> {
+    profile.selected_model().map(|model| ModelDescriptor {
+        id: model.to_owned(),
+        display_name: model.to_owned(),
+        source: ModelSource::Manual,
+    })
 }
 
 impl fmt::Debug for ProviderManager {
@@ -744,6 +765,51 @@ mod tests {
             }
         }
         assert_eq!(output, "你好，Ollama！");
+        manager.disconnect();
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn generic_profile_keeps_manual_model_when_listing_is_unavailable() {
+        let server = FakeProviderServer::start_manual_model_only()
+            .await
+            .expect("server");
+        let provider = profile_with_adapter(
+            &server.base_url(),
+            None,
+            "manual-only",
+            "openai_chat_completions",
+        )
+        .with_selected_model(Some("manual-translator".to_owned()))
+        .expect("manual model");
+        let (broker, _requests) = host_secret_channel(1).expect("secret channel");
+        let mut manager = ProviderManager::new(broker);
+        let models = manager
+            .connect(&provider, &CancellationToken::new())
+            .await
+            .expect("manual fallback connection");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "manual-translator");
+        assert_eq!(models[0].source, linguamesh_domain::ModelSource::Manual);
+        let mut operation =
+            manager
+                .active_engine()
+                .expect("active engine")
+                .translate(TranslationRequest::new(
+                    "Hello",
+                    "zh-CN",
+                    "manual-translator",
+                ));
+        let mut output = String::new();
+        while let Some(event) = operation.next_event().await {
+            match event {
+                TranslationEvent::TextDelta { text, .. } => output.push_str(&text),
+                TranslationEvent::Completed { .. } => break,
+                TranslationEvent::Failed { error, .. } => panic!("Manual fallback failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(output, "你好，LinguaMesh！");
         manager.disconnect();
         server.shutdown().await;
     }
