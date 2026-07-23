@@ -60,6 +60,11 @@ reject session references at the storage boundary. Domain tests bound and redact
 credentials; application and provider fixtures verify one-time host-secret resolution and proxy
 Basic authentication without putting credentials in URLs, SQLite, or diagnostics.
 
+Schema 31 migration tests round-trip only the persistent client-certificate identity `SecretRef`
+and reject session references at the storage boundary. Domain and provider tests reject malformed
+or incomplete PEM identities before any network request; rustls identity construction never turns
+off certificate or hostname verification.
+
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed
 allow/deny lists, locale tags, zero request limits, and invalid

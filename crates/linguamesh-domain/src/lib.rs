@@ -333,6 +333,44 @@ pub struct ProxyAuthentication {
     password: SecretString,
 }
 
+/// 表示一次性解析且仅用于 TLS 客户端证书认证的内存身份。
+pub struct ClientCertificateIdentity(SecretString);
+
+impl ClientCertificateIdentity {
+    /// 从受宿主保护的 PEM 文本解析客户端证书和私钥身份。
+    pub fn parse(secret: &SecretValue) -> Result<Self, TranslationError> {
+        let raw = secret.expose_secret();
+        if raw.len() > MAX_PROVIDER_CLIENT_CERTIFICATE_IDENTITY_PEM_BYTES
+            || raw.contains('\0')
+            || raw
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+            || !raw.contains("-----BEGIN CERTIFICATE-----")
+            || !(raw.contains("-----BEGIN PRIVATE KEY-----")
+                || raw.contains("-----BEGIN RSA PRIVATE KEY-----")
+                || raw.contains("-----BEGIN EC PRIVATE KEY-----"))
+        {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider client certificate identity is invalid.",
+            ));
+        }
+        Ok(Self(SecretString::from(raw.to_owned())))
+    }
+
+    /// 返回仅用于构造 TLS 身份的 PEM 文本。
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl fmt::Debug for ClientCertificateIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ClientCertificateIdentity([REDACTED])")
+    }
+}
+
 impl ProxyAuthentication {
     /// 从受宿主保护的 `username:password` 文本解析代理认证。
     pub fn parse(secret: &SecretValue) -> Result<Self, TranslationError> {
@@ -409,6 +447,7 @@ pub struct ProviderProfile {
     connection_timeout_secs: u32,
     streaming_idle_timeout_secs: u32,
     trusted_certificates_pem: Option<String>,
+    client_certificate_identity_ref: Option<Box<SecretRef>>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -443,6 +482,10 @@ impl fmt::Debug for ProviderProfile {
             .field(
                 "has_trusted_certificates_pem",
                 &self.trusted_certificates_pem.is_some(),
+            )
+            .field(
+                "has_client_certificate_identity_ref",
+                &self.client_certificate_identity_ref.is_some(),
             )
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
@@ -484,6 +527,7 @@ impl ProviderProfile {
             connection_timeout_secs: DEFAULT_PROVIDER_CONNECTION_TIMEOUT_SECS,
             streaming_idle_timeout_secs: DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS,
             trusted_certificates_pem: None,
+            client_certificate_identity_ref: None,
             enabled: true,
             selected_model: None,
         })
@@ -608,6 +652,12 @@ impl ProviderProfile {
     #[must_use]
     pub fn trusted_certificates_pem(&self) -> Option<&str> {
         self.trusted_certificates_pem.as_deref()
+    }
+
+    /// 返回可选的宿主 TLS 客户端证书身份秘密引用。
+    #[must_use]
+    pub fn client_certificate_identity_ref(&self) -> Option<&SecretRef> {
+        self.client_certificate_identity_ref.as_deref()
     }
 
     /// 返回配置是否允许被选择。
@@ -782,6 +832,13 @@ impl ProviderProfile {
             .transpose()?;
         Ok(self)
     }
+
+    /// 设置只保存引用、不保存 TLS 客户端证书和私钥的宿主秘密引用。
+    #[must_use]
+    pub fn with_client_certificate_identity_ref(mut self, secret_ref: Option<SecretRef>) -> Self {
+        self.client_certificate_identity_ref = secret_ref.map(Box::new);
+        self
+    }
 }
 
 /// 新建提供商配置时使用的安全请求超时。
@@ -804,6 +861,8 @@ pub const MIN_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 1;
 pub const MAX_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 300;
 /// 自定义可信证书 PEM 文本的最大字节数。
 pub const MAX_PROVIDER_TRUSTED_CERTIFICATES_PEM_BYTES: usize = 64 * 1024;
+/// TLS 客户端证书和私钥 PEM 身份的最大字节数。
+pub const MAX_PROVIDER_CLIENT_CERTIFICATE_IDENTITY_PEM_BYTES: usize = 128 * 1024;
 /// 代理认证用户名的最大字节数。
 pub const MAX_PROXY_AUTH_USERNAME_BYTES: usize = 256;
 /// 代理认证密码的最大字节数。
@@ -2622,12 +2681,12 @@ impl TranslationEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
-        Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, MAX_USAGE_TOKENS,
-        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId,
-        ProxyAuthentication, SecretRef, SecretRefNamespace, SecretValue, TranslationError,
-        TranslationEvent, TranslationPreset, TranslationPrivacyMode, TranslationQualityMode,
-        TranslationRequest, UsageRecord, UsageSource, protect_source_text,
+        ChunkingError, ClientCertificateIdentity, CompatibilityError, CompatibilityRequirements,
+        CoreCompatibility, ErrorKind, Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError,
+        MAX_USAGE_TOKENS, ProfileValidationError, ProtectedTextError, ProviderProfile,
+        ProviderProfileId, ProxyAuthentication, SecretRef, SecretRefNamespace, SecretValue,
+        TranslationError, TranslationEvent, TranslationPreset, TranslationPrivacyMode,
+        TranslationQualityMode, TranslationRequest, UsageRecord, UsageSource, protect_source_text,
         protect_source_text_with_glossary, validate_non_secret_profile_field,
     };
 
@@ -3145,6 +3204,25 @@ mod tests {
                     "streaming_idle_timeout_secs",
                 ))
             );
+        }
+    }
+
+    #[test]
+    fn client_certificate_identity_is_bounded_and_redacted() {
+        let valid = SecretValue::new(
+            "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----",
+        );
+        let identity = ClientCertificateIdentity::parse(&valid).expect("client identity");
+        assert!(identity.expose_secret().contains("BEGIN CERTIFICATE"));
+        assert_eq!(
+            format!("{:?}", identity),
+            "ClientCertificateIdentity([REDACTED])"
+        );
+        for invalid in [
+            "certificate only",
+            "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----",
+        ] {
+            assert!(ClientCertificateIdentity::parse(&SecretValue::new(invalid)).is_err());
         }
     }
 

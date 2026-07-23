@@ -1,8 +1,8 @@
 #![doc = "`LinguaMesh` 的提供商配置和宿主服务编排层。"]
 
 use linguamesh_domain::{
-    ErrorKind, HostRequestId, ModelDescriptor, ProviderProfile, ProviderProfileId, SecretRef,
-    SecretValue, TranslationError,
+    ClientCertificateIdentity, ErrorKind, HostRequestId, ModelDescriptor, ProviderProfile,
+    ProviderProfileId, SecretRef, SecretValue, TranslationError,
 };
 use linguamesh_engine::TranslationEngine;
 use linguamesh_provider_anthropic::{AnthropicConfig, AnthropicProvider};
@@ -297,6 +297,12 @@ impl ProviderManager {
             Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
             None => None,
         };
+        let client_certificate_identity = match profile.client_certificate_identity_ref() {
+            Some(secret_ref) => Some(ClientCertificateIdentity::parse(
+                &self.secret_broker.resolve(secret_ref, cancellation).await?,
+            )?),
+            None => None,
+        };
         if cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
@@ -315,7 +321,8 @@ impl ProviderManager {
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
-            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone())
+            .with_client_certificate_identity(client_certificate_identity);
             Arc::new(OllamaProvider::new(config)?)
         } else if is_anthropic {
             let model_id = manual_model_id.ok_or_else(|| {
@@ -335,7 +342,8 @@ impl ProviderManager {
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
-            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone())
+            .with_client_certificate_identity(client_certificate_identity);
             Arc::new(AnthropicProvider::new(config)?)
         } else if is_gemini {
             let config = match credential {
@@ -347,7 +355,8 @@ impl ProviderManager {
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
-            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone())
+            .with_client_certificate_identity(client_certificate_identity);
             Arc::new(GeminiProvider::new(config)?)
         } else if is_azure {
             let deployment = manual_model_id.ok_or_else(|| {
@@ -376,6 +385,7 @@ impl ProviderManager {
                 .with_connection_timeout(connection_timeout)
                 .with_streaming_idle_timeout(streaming_idle_timeout)
                 .with_trusted_certificates_pem(trusted_certificates_pem.clone())
+                .with_client_certificate_identity(client_certificate_identity)
                 .with_custom_headers(profile.custom_headers().map(str::to_owned))
                 .with_secret_custom_headers(
                     secret_custom_headers
@@ -398,6 +408,7 @@ impl ProviderManager {
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
             .with_trusted_certificates_pem(trusted_certificates_pem.clone())
+            .with_client_certificate_identity(client_certificate_identity)
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers
@@ -418,6 +429,7 @@ impl ProviderManager {
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
             .with_trusted_certificates_pem(trusted_certificates_pem)
+            .with_client_certificate_identity(client_certificate_identity)
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers

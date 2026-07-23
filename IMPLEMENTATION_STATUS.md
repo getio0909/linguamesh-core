@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-23 — Linux client-certificate TLS identity checkpoint
+
+Assumption: enterprise provider endpoints may require mutual TLS; the smallest safe Linux-first
+boundary is one combined PEM certificate/private-key identity resolved through a persistent or
+session `SecretRef`, never stored as a profile value.
+
+- Core schema 31 migration `0031_provider_profile_client_certificate_identity.sql` persists only
+  `ProviderProfile.client_certificate_identity_ref`; storage rejects session references. The
+  bounded domain parser requires certificate and private-key PEM sections and redacts diagnostics.
+- OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama apply reqwest rustls identities while
+  retaining system roots, hostname verification, redirect blocking, and TLS verification.
+- Local `cargo fmt --all`, full workspace tests (including schema 31 migration and identity
+  rejection/round-trip tests), and provider configuration checks passed. Linux and l10n consumers
+  are being repinned at their verified commits; release remains `unreleased`.
+
 ## 2026-07-23 — Proxy authentication SecretRef checkpoint
 
 Assumption: Linux needs optional proxy Basic authentication while proxy URLs remain credential-free;

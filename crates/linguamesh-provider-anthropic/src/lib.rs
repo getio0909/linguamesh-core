@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
-    ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
-    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, ProxyAuthentication,
-    SecretValue, TranslationError, TranslationRequest, UsageRecord,
-    protect_source_text_with_glossary,
+    ChunkingError, ClientCertificateIdentity, DEFAULT_TRANSLATION_CHUNK_BYTES,
+    EndpointConfiguration, ErrorKind, ModelDescriptor, ModelSource, ProtectedSource,
+    ProtectedTextError, ProxyAuthentication, SecretValue, TranslationError, TranslationRequest,
+    UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
     ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
@@ -44,6 +44,8 @@ pub struct AnthropicConfig {
     pub streaming_idle_timeout: Duration,
     /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
     pub trusted_certificates_pem: Option<String>,
+    /// 可选的一次性内存 TLS 客户端证书身份。
+    pub client_certificate_identity: Option<ClientCertificateIdentity>,
 }
 
 impl AnthropicConfig {
@@ -60,6 +62,7 @@ impl AnthropicConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -80,6 +83,7 @@ impl AnthropicConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -127,6 +131,16 @@ impl AnthropicConfig {
         self.trusted_certificates_pem = trusted_certificates_pem;
         self
     }
+
+    /// 设置一次性内存 TLS 客户端证书身份。
+    #[must_use]
+    pub fn with_client_certificate_identity(
+        mut self,
+        client_certificate_identity: Option<ClientCertificateIdentity>,
+    ) -> Self {
+        self.client_certificate_identity = client_certificate_identity;
+        self
+    }
 }
 
 impl fmt::Debug for AnthropicConfig {
@@ -150,6 +164,10 @@ impl fmt::Debug for AnthropicConfig {
             .field(
                 "has_trusted_certificates_pem",
                 &self.trusted_certificates_pem.is_some(),
+            )
+            .field(
+                "has_client_certificate_identity",
+                &self.client_certificate_identity.is_some(),
             )
             .finish()
     }
@@ -239,6 +257,16 @@ impl AnthropicProvider {
             for certificate in certificates {
                 client_builder = client_builder.add_root_certificate(certificate);
             }
+        }
+        if let Some(identity) = config.client_certificate_identity.as_ref() {
+            let identity = reqwest::Identity::from_pem(identity.expose_secret().as_bytes())
+                .map_err(|_| {
+                    TranslationError::new(
+                        ErrorKind::InvalidConfiguration,
+                        "Provider client certificate identity is invalid.",
+                    )
+                })?;
+            client_builder = client_builder.identity(identity);
         }
         let client = client_builder
             .build()

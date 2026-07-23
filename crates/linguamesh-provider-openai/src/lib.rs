@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
-    ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
-    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, ProxyAuthentication,
-    SecretValue, TranslationError, TranslationRequest, UsageRecord,
-    protect_source_text_with_glossary,
+    ChunkingError, ClientCertificateIdentity, DEFAULT_TRANSLATION_CHUNK_BYTES,
+    EndpointConfiguration, ErrorKind, ModelDescriptor, ModelSource, ProtectedSource,
+    ProtectedTextError, ProxyAuthentication, SecretValue, TranslationError, TranslationRequest,
+    UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
     ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
@@ -59,6 +59,8 @@ pub struct OpenAiConfig {
     pub streaming_idle_timeout: Duration,
     /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
     pub trusted_certificates_pem: Option<String>,
+    /// 可选的一次性内存 TLS 客户端证书身份。
+    pub client_certificate_identity: Option<ClientCertificateIdentity>,
 }
 
 /// 配置 Azure `OpenAI` Chat Completions 部署端点。
@@ -87,6 +89,8 @@ pub struct AzureOpenAiConfig {
     pub streaming_idle_timeout: Duration,
     /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
     pub trusted_certificates_pem: Option<String>,
+    /// 可选的一次性内存 TLS 客户端证书身份。
+    pub client_certificate_identity: Option<ClientCertificateIdentity>,
 }
 
 impl AzureOpenAiConfig {
@@ -110,6 +114,7 @@ impl AzureOpenAiConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -134,6 +139,7 @@ impl AzureOpenAiConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -189,6 +195,16 @@ impl AzureOpenAiConfig {
         self
     }
 
+    /// 设置一次性内存 TLS 客户端证书身份。
+    #[must_use]
+    pub fn with_client_certificate_identity(
+        mut self,
+        client_certificate_identity: Option<ClientCertificateIdentity>,
+    ) -> Self {
+        self.client_certificate_identity = client_certificate_identity;
+        self
+    }
+
     /// 设置一次性内存秘密请求头 JSON。
     #[must_use]
     pub fn with_secret_custom_headers(
@@ -228,6 +244,10 @@ impl fmt::Debug for AzureOpenAiConfig {
                 "has_trusted_certificates_pem",
                 &self.trusted_certificates_pem.is_some(),
             )
+            .field(
+                "has_client_certificate_identity",
+                &self.client_certificate_identity.is_some(),
+            )
             .finish()
     }
 }
@@ -249,6 +269,7 @@ impl OpenAiConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -268,6 +289,7 @@ impl OpenAiConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -320,6 +342,16 @@ impl OpenAiConfig {
         trusted_certificates_pem: Option<String>,
     ) -> Self {
         self.trusted_certificates_pem = trusted_certificates_pem;
+        self
+    }
+
+    /// 设置一次性内存 TLS 客户端证书身份。
+    #[must_use]
+    pub fn with_client_certificate_identity(
+        mut self,
+        client_certificate_identity: Option<ClientCertificateIdentity>,
+    ) -> Self {
+        self.client_certificate_identity = client_certificate_identity;
         self
     }
 
@@ -376,6 +408,10 @@ impl fmt::Debug for OpenAiConfig {
                 "has_trusted_certificates_pem",
                 &self.trusted_certificates_pem.is_some(),
             )
+            .field(
+                "has_client_certificate_identity",
+                &self.client_certificate_identity.is_some(),
+            )
             .finish()
     }
 }
@@ -406,6 +442,8 @@ pub struct OpenAiResponsesConfig {
     pub streaming_idle_timeout: Duration,
     /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
     pub trusted_certificates_pem: Option<String>,
+    /// 可选的一次性内存 TLS 客户端证书身份。
+    pub client_certificate_identity: Option<ClientCertificateIdentity>,
 }
 
 impl OpenAiResponsesConfig {
@@ -425,6 +463,7 @@ impl OpenAiResponsesConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -444,6 +483,7 @@ impl OpenAiResponsesConfig {
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
             trusted_certificates_pem: None,
+            client_certificate_identity: None,
         }
     }
 
@@ -499,6 +539,16 @@ impl OpenAiResponsesConfig {
         self
     }
 
+    /// 设置一次性内存 TLS 客户端证书身份。
+    #[must_use]
+    pub fn with_client_certificate_identity(
+        mut self,
+        client_certificate_identity: Option<ClientCertificateIdentity>,
+    ) -> Self {
+        self.client_certificate_identity = client_certificate_identity;
+        self
+    }
+
     /// 设置可选的非秘密项目标识。
     #[must_use]
     pub fn with_project(mut self, project: Option<String>) -> Self {
@@ -551,6 +601,10 @@ impl fmt::Debug for OpenAiResponsesConfig {
             .field(
                 "has_trusted_certificates_pem",
                 &self.trusted_certificates_pem.is_some(),
+            )
+            .field(
+                "has_client_certificate_identity",
+                &self.client_certificate_identity.is_some(),
             )
             .finish()
     }
@@ -628,6 +682,7 @@ impl OpenAiCompatibleProvider {
             config.connection_timeout,
             config.streaming_idle_timeout,
             config.trusted_certificates_pem.as_deref(),
+            config.client_certificate_identity.as_ref(),
             OpenAiProtocol::ChatCompletions,
         )
     }
@@ -647,6 +702,7 @@ impl OpenAiCompatibleProvider {
             config.connection_timeout,
             config.streaming_idle_timeout,
             config.trusted_certificates_pem.as_deref(),
+            config.client_certificate_identity.as_ref(),
             OpenAiProtocol::Responses,
         )
     }
@@ -678,6 +734,7 @@ impl OpenAiCompatibleProvider {
             config.connection_timeout,
             config.streaming_idle_timeout,
             config.trusted_certificates_pem.as_deref(),
+            config.client_certificate_identity.as_ref(),
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
                 api_version,
@@ -709,6 +766,7 @@ impl OpenAiCompatibleProvider {
         connection_timeout: Duration,
         streaming_idle_timeout: Duration,
         trusted_certificates_pem: Option<&str>,
+        client_certificate_identity: Option<&ClientCertificateIdentity>,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
@@ -752,6 +810,16 @@ impl OpenAiCompatibleProvider {
             for certificate in certificates {
                 client_builder = client_builder.add_root_certificate(certificate);
             }
+        }
+        if let Some(identity) = client_certificate_identity {
+            let identity = reqwest::Identity::from_pem(identity.expose_secret().as_bytes())
+                .map_err(|_| {
+                    TranslationError::new(
+                        ErrorKind::InvalidConfiguration,
+                        "Provider client certificate identity is invalid.",
+                    )
+                })?;
+            client_builder = client_builder.identity(identity);
         }
         let client = client_builder
             .build()
@@ -1533,7 +1601,10 @@ mod tests {
     };
     use bytes::Bytes;
     use futures_util::StreamExt;
-    use linguamesh_domain::{ErrorKind, Glossary, GlossaryEntry, SecretValue, TranslationRequest};
+    use linguamesh_domain::{
+        ClientCertificateIdentity, ErrorKind, Glossary, GlossaryEntry, SecretValue,
+        TranslationRequest,
+    };
     use linguamesh_provider_api::ModelProvider;
     use std::fmt::Write;
     use std::sync::atomic::Ordering;
@@ -1554,6 +1625,24 @@ mod tests {
         .expect_err("invalid certificate bundle should fail configuration");
         assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
         assert_eq!(error.message, "Provider trusted certificates are invalid.");
+    }
+
+    #[test]
+    fn invalid_client_certificate_identity_is_rejected_without_disabling_tls() {
+        let identity = ClientCertificateIdentity::parse(&SecretValue::new(
+            "-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
+        ))
+        .expect("bounded identity markers");
+        let error = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential("https://provider.example/v1/")
+                .with_client_certificate_identity(Some(identity)),
+        )
+        .expect_err("invalid identity should fail configuration");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+        assert_eq!(
+            error.message,
+            "Provider client certificate identity is invalid."
+        );
     }
 
     #[test]

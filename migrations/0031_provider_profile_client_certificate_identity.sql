@@ -1,0 +1,1 @@
+ALTER TABLE provider_profiles ADD COLUMN client_certificate_identity_ref TEXT;

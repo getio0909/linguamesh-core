@@ -73,8 +73,10 @@ bounded streaming idle timeout (1–300 seconds, default 60), and schema 30 pers
 proxy-authentication `SecretRef`. Provider adapters apply all three timeout budgets independently;
 the streaming idle budget resets after each received response chunk. Proxy credentials are supplied
 once by the host secret broker, parsed as bounded `username:password`, applied as HTTP proxy Basic
-authentication, and never embedded in the proxy URL or stored in SQLite. TLS policy remains a
-separate contract.
+authentication, and never embedded in the proxy URL or stored in SQLite. Schema 31 adds an
+optional client-certificate identity `SecretRef`; the host resolves one combined PEM certificate
+and private-key identity for the connection, and adapters pass it to rustls without disabling
+verification. TLS policy remains a separate contract.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional
