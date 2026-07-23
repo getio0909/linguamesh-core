@@ -347,6 +347,7 @@ pub struct ProviderProfile {
     request_timeout_secs: u32,
     connection_timeout_secs: u32,
     streaming_idle_timeout_secs: u32,
+    trusted_certificates_pem: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -376,6 +377,10 @@ impl fmt::Debug for ProviderProfile {
             .field(
                 "streaming_idle_timeout_secs",
                 &self.streaming_idle_timeout_secs,
+            )
+            .field(
+                "has_trusted_certificates_pem",
+                &self.trusted_certificates_pem.is_some(),
             )
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
@@ -415,6 +420,7 @@ impl ProviderProfile {
             request_timeout_secs: DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECS,
             connection_timeout_secs: DEFAULT_PROVIDER_CONNECTION_TIMEOUT_SECS,
             streaming_idle_timeout_secs: DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS,
+            trusted_certificates_pem: None,
             enabled: true,
             selected_model: None,
         })
@@ -527,6 +533,12 @@ impl ProviderProfile {
     #[must_use]
     pub const fn streaming_idle_timeout_secs(&self) -> u32 {
         self.streaming_idle_timeout_secs
+    }
+
+    /// 返回可选的自定义可信证书 PEM 文本。
+    #[must_use]
+    pub fn trusted_certificates_pem(&self) -> Option<&str> {
+        self.trusted_certificates_pem.as_deref()
     }
 
     /// 返回配置是否允许被选择。
@@ -682,6 +694,18 @@ impl ProviderProfile {
         self.streaming_idle_timeout_secs = streaming_idle_timeout_secs;
         Ok(self)
     }
+
+    /// 设置显式配置的自定义可信证书 PEM 文本；系统证书仍然保留。
+    pub fn with_trusted_certificates_pem(
+        mut self,
+        trusted_certificates_pem: Option<String>,
+    ) -> Result<Self, ProfileValidationError> {
+        self.trusted_certificates_pem = trusted_certificates_pem
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| validate_trusted_certificates_pem(&value))
+            .transpose()?;
+        Ok(self)
+    }
 }
 
 /// 新建提供商配置时使用的安全请求超时。
@@ -702,6 +726,8 @@ pub const DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 60;
 pub const MIN_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 1;
 /// 提供商流式空闲超时的最大秒数。
 pub const MAX_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 300;
+/// 自定义可信证书 PEM 文本的最大字节数。
+pub const MAX_PROVIDER_TRUSTED_CERTIFICATES_PEM_BYTES: usize = 64 * 1024;
 
 /// 验证即将写入配置存储的模型标识不包含凭据形态。
 pub fn validate_model_identifier(value: &str) -> Result<(), ProfileValidationError> {
@@ -902,6 +928,24 @@ fn validate_proxy_url(value: &str) -> Result<String, ProfileValidationError> {
         return Err(ProfileValidationError::InvalidField("proxy_url"));
     }
     Ok(url.to_string())
+}
+
+fn validate_trusted_certificates_pem(value: &str) -> Result<String, ProfileValidationError> {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.len() > MAX_PROVIDER_TRUSTED_CERTIFICATES_PEM_BYTES
+        || normalized.contains('\0')
+        || normalized.contains("PRIVATE KEY")
+        || !normalized.contains("-----BEGIN CERTIFICATE-----")
+        || !normalized.contains("-----END CERTIFICATE-----")
+        || normalized
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err(ProfileValidationError::InvalidField(
+            "trusted_certificates_pem",
+        ));
+    }
+    Ok(normalized.trim().to_owned())
 }
 
 fn is_http_token_byte(byte: u8) -> bool {
@@ -2986,6 +3030,42 @@ mod tests {
                 profile.clone().with_streaming_idle_timeout_secs(invalid),
                 Err(ProfileValidationError::InvalidField(
                     "streaming_idle_timeout_secs",
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn provider_profile_trusted_certificates_are_bounded_and_never_private_keys() {
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-trusted-certificates").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "https://provider.example/v1/",
+            None,
+        )
+        .expect("profile");
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        let trusted_profile = profile
+            .clone()
+            .with_trusted_certificates_pem(Some(pem.to_owned()))
+            .expect("trusted certificates");
+        let trusted = trusted_profile
+            .trusted_certificates_pem()
+            .expect("trusted certificates value");
+        assert_eq!(trusted, pem.trim());
+        for invalid in [
+            "not PEM",
+            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            "-----BEGIN CERTIFICATE-----\nsecret\n-----END CERTIFICATE-----\u{0001}",
+        ] {
+            assert_eq!(
+                profile
+                    .clone()
+                    .with_trusted_certificates_pem(Some(invalid.to_owned())),
+                Err(ProfileValidationError::InvalidField(
+                    "trusted_certificates_pem",
                 ))
             );
         }

@@ -39,6 +39,8 @@ pub struct AnthropicConfig {
     pub connection_timeout: Duration,
     /// 流式响应等待下一数据块的超时。
     pub streaming_idle_timeout: Duration,
+    /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
+    pub trusted_certificates_pem: Option<String>,
 }
 
 impl AnthropicConfig {
@@ -53,6 +55,7 @@ impl AnthropicConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -71,6 +74,7 @@ impl AnthropicConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -101,6 +105,16 @@ impl AnthropicConfig {
         self.streaming_idle_timeout = streaming_idle_timeout;
         self
     }
+
+    /// 设置自定义可信证书 PEM；系统证书仍然保留。
+    #[must_use]
+    pub fn with_trusted_certificates_pem(
+        mut self,
+        trusted_certificates_pem: Option<String>,
+    ) -> Self {
+        self.trusted_certificates_pem = trusted_certificates_pem;
+        self
+    }
 }
 
 impl fmt::Debug for AnthropicConfig {
@@ -117,6 +131,10 @@ impl fmt::Debug for AnthropicConfig {
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
+            .field(
+                "has_trusted_certificates_pem",
+                &self.trusted_certificates_pem.is_some(),
+            )
             .finish()
     }
 }
@@ -178,6 +196,18 @@ impl AnthropicProvider {
             client_builder = client_builder.proxy(proxy);
         } else if base_url.scheme() == "http" {
             client_builder = client_builder.no_proxy();
+        }
+        if let Some(pem) = config.trusted_certificates_pem.as_deref() {
+            let certificates =
+                reqwest::Certificate::from_pem_bundle(pem.as_bytes()).map_err(|_| {
+                    TranslationError::new(
+                        ErrorKind::InvalidConfiguration,
+                        "Provider trusted certificates are invalid.",
+                    )
+                })?;
+            for certificate in certificates {
+                client_builder = client_builder.add_root_certificate(certificate);
+            }
         }
         let client = client_builder
             .build()

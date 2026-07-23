@@ -300,6 +300,7 @@ impl ProviderManager {
         let connection_timeout = Duration::from_secs(u64::from(profile.connection_timeout_secs()));
         let streaming_idle_timeout =
             Duration::from_secs(u64::from(profile.streaming_idle_timeout_secs()));
+        let trusted_certificates_pem = profile.trusted_certificates_pem().map(str::to_owned);
         let provider: Arc<dyn ManagedProvider> = if is_ollama {
             let config = match credential {
                 Some(secret) => OllamaConfig::with_credential(profile.base_endpoint(), secret),
@@ -308,7 +309,8 @@ impl ProviderManager {
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
-            .with_streaming_idle_timeout(streaming_idle_timeout);
+            .with_streaming_idle_timeout(streaming_idle_timeout)
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
             Arc::new(OllamaProvider::new(config)?)
         } else if is_anthropic {
             let model_id = manual_model_id.ok_or_else(|| {
@@ -326,7 +328,8 @@ impl ProviderManager {
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
-            .with_streaming_idle_timeout(streaming_idle_timeout);
+            .with_streaming_idle_timeout(streaming_idle_timeout)
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
             Arc::new(AnthropicProvider::new(config)?)
         } else if is_gemini {
             let config = match credential {
@@ -336,7 +339,8 @@ impl ProviderManager {
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
-            .with_streaming_idle_timeout(streaming_idle_timeout);
+            .with_streaming_idle_timeout(streaming_idle_timeout)
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone());
             Arc::new(GeminiProvider::new(config)?)
         } else if is_azure {
             let deployment = manual_model_id.ok_or_else(|| {
@@ -363,6 +367,7 @@ impl ProviderManager {
                 .with_request_timeout(request_timeout)
                 .with_connection_timeout(connection_timeout)
                 .with_streaming_idle_timeout(streaming_idle_timeout)
+                .with_trusted_certificates_pem(trusted_certificates_pem.clone())
                 .with_custom_headers(profile.custom_headers().map(str::to_owned))
                 .with_secret_custom_headers(
                     secret_custom_headers
@@ -383,6 +388,7 @@ impl ProviderManager {
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
+            .with_trusted_certificates_pem(trusted_certificates_pem.clone())
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers
@@ -401,6 +407,7 @@ impl ProviderManager {
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
+            .with_trusted_certificates_pem(trusted_certificates_pem)
             .with_custom_headers(profile.custom_headers().map(str::to_owned))
             .with_secret_custom_headers(
                 secret_custom_headers

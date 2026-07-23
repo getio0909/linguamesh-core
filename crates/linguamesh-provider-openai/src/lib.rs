@@ -54,6 +54,8 @@ pub struct OpenAiConfig {
     pub connection_timeout: Duration,
     /// 流式响应等待下一数据块的超时。
     pub streaming_idle_timeout: Duration,
+    /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
+    pub trusted_certificates_pem: Option<String>,
 }
 
 /// 配置 Azure `OpenAI` Chat Completions 部署端点。
@@ -78,6 +80,8 @@ pub struct AzureOpenAiConfig {
     pub connection_timeout: Duration,
     /// 流式响应等待下一数据块的超时。
     pub streaming_idle_timeout: Duration,
+    /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
+    pub trusted_certificates_pem: Option<String>,
 }
 
 impl AzureOpenAiConfig {
@@ -99,6 +103,7 @@ impl AzureOpenAiConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -121,6 +126,7 @@ impl AzureOpenAiConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -159,6 +165,16 @@ impl AzureOpenAiConfig {
         self
     }
 
+    /// 设置自定义可信证书 PEM；系统证书仍然保留。
+    #[must_use]
+    pub fn with_trusted_certificates_pem(
+        mut self,
+        trusted_certificates_pem: Option<String>,
+    ) -> Self {
+        self.trusted_certificates_pem = trusted_certificates_pem;
+        self
+    }
+
     /// 设置一次性内存秘密请求头 JSON。
     #[must_use]
     pub fn with_secret_custom_headers(
@@ -190,6 +206,10 @@ impl fmt::Debug for AzureOpenAiConfig {
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
+            .field(
+                "has_trusted_certificates_pem",
+                &self.trusted_certificates_pem.is_some(),
+            )
             .finish()
     }
 }
@@ -209,6 +229,7 @@ impl OpenAiConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -226,6 +247,7 @@ impl OpenAiConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -261,6 +283,16 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
         self.streaming_idle_timeout = streaming_idle_timeout;
+        self
+    }
+
+    /// 设置自定义可信证书 PEM；系统证书仍然保留。
+    #[must_use]
+    pub fn with_trusted_certificates_pem(
+        mut self,
+        trusted_certificates_pem: Option<String>,
+    ) -> Self {
+        self.trusted_certificates_pem = trusted_certificates_pem;
         self
     }
 
@@ -309,6 +341,10 @@ impl fmt::Debug for OpenAiConfig {
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
+            .field(
+                "has_trusted_certificates_pem",
+                &self.trusted_certificates_pem.is_some(),
+            )
             .finish()
     }
 }
@@ -335,6 +371,8 @@ pub struct OpenAiResponsesConfig {
     pub connection_timeout: Duration,
     /// 流式响应等待下一数据块的超时。
     pub streaming_idle_timeout: Duration,
+    /// 可选的自定义可信证书 PEM；不会关闭 TLS 校验。
+    pub trusted_certificates_pem: Option<String>,
 }
 
 impl OpenAiResponsesConfig {
@@ -352,6 +390,7 @@ impl OpenAiResponsesConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -369,6 +408,7 @@ impl OpenAiResponsesConfig {
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
+            trusted_certificates_pem: None,
         }
     }
 
@@ -404,6 +444,16 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
         self.streaming_idle_timeout = streaming_idle_timeout;
+        self
+    }
+
+    /// 设置自定义可信证书 PEM；系统证书仍然保留。
+    #[must_use]
+    pub fn with_trusted_certificates_pem(
+        mut self,
+        trusted_certificates_pem: Option<String>,
+    ) -> Self {
+        self.trusted_certificates_pem = trusted_certificates_pem;
         self
     }
 
@@ -452,6 +502,10 @@ impl fmt::Debug for OpenAiResponsesConfig {
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
+            .field(
+                "has_trusted_certificates_pem",
+                &self.trusted_certificates_pem.is_some(),
+            )
             .finish()
     }
 }
@@ -526,6 +580,7 @@ impl OpenAiCompatibleProvider {
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
+            config.trusted_certificates_pem.as_deref(),
             OpenAiProtocol::ChatCompletions,
         )
     }
@@ -543,6 +598,7 @@ impl OpenAiCompatibleProvider {
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
+            config.trusted_certificates_pem.as_deref(),
             OpenAiProtocol::Responses,
         )
     }
@@ -572,6 +628,7 @@ impl OpenAiCompatibleProvider {
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
+            config.trusted_certificates_pem.as_deref(),
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
                 api_version,
@@ -601,6 +658,7 @@ impl OpenAiCompatibleProvider {
         request_timeout: Duration,
         connection_timeout: Duration,
         streaming_idle_timeout: Duration,
+        trusted_certificates_pem: Option<&str>,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
@@ -623,6 +681,18 @@ impl OpenAiCompatibleProvider {
             let proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
             client_builder = client_builder.proxy(proxy);
+        }
+        if let Some(pem) = trusted_certificates_pem {
+            let certificates =
+                reqwest::Certificate::from_pem_bundle(pem.as_bytes()).map_err(|_| {
+                    TranslationError::new(
+                        ErrorKind::InvalidConfiguration,
+                        "Provider trusted certificates are invalid.",
+                    )
+                })?;
+            for certificate in certificates {
+                client_builder = client_builder.add_root_certificate(certificate);
+            }
         }
         let client = client_builder
             .build()
@@ -1412,6 +1482,20 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn invalid_trusted_certificates_are_rejected_without_disabling_tls() {
+        let error = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential("https://provider.example/v1/")
+                .with_trusted_certificates_pem(Some(
+                    "-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----"
+                        .to_owned(),
+                )),
+        )
+        .expect_err("invalid certificate bundle should fail configuration");
+        assert_eq!(error.kind, ErrorKind::InvalidConfiguration);
+        assert_eq!(error.message, "Provider trusted certificates are invalid.");
+    }
 
     #[test]
     fn diagnostics_redact_endpoint_and_credential() {
