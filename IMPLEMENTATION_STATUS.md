@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-23 — Provider streaming idle timeout checkpoint
+
+Assumption: a bounded streaming idle timeout of 1–300 seconds (default 60) is the smallest
+complete follow-up to connection timeout; the budget resets after each received response chunk,
+while TLS policy remains separate.
+
+- Core schema 28 migration `0028_provider_profile_streaming_idle_timeout.sql` persists the
+  validated idle timeout beside request and connection timeouts. Domain/storage tests cover the
+  default, range rejection, migration, and profile round-trip without storing credentials.
+- OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama streams apply a per-chunk
+  `tokio::time::timeout` and return the typed English `Timeout` diagnostic when the body stalls;
+  request-total and connection timeouts remain independent. A stalled-body OpenAI regression
+  proves the typed timeout path.
+- Local `cargo fmt --all`, `cargo check --workspace`, and full `cargo test --workspace` passed.
+  Remote CI/Fuzz/Native SDK evidence for `b247155ad429639fdb65d3b063c3efc580ce46a4` is recorded
+  after the GitHub runs complete; release remains `unreleased`.
+
 ## 2026-07-23 — Provider connection timeout checkpoint
 
 Assumption: a bounded connection-establishment timeout of 1–120 seconds (default 10) is the
