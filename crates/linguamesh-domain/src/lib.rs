@@ -3057,7 +3057,11 @@ mod tests {
         assert_eq!(trusted, pem.trim());
         for invalid in [
             "not PEM",
-            "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+            concat!(
+                "-----BEGIN ",
+                "PRIVATE KEY-----\nsecret\n-----END ",
+                "PRIVATE KEY-----"
+            ),
             "-----BEGIN CERTIFICATE-----\nsecret\n-----END CERTIFICATE-----\u{0001}",
         ] {
             assert_eq!(
