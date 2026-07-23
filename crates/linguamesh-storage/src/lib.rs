@@ -7,8 +7,8 @@ use linguamesh_document::{
 use linguamesh_domain::{
     ErrorKind, Glossary, MAX_ROUTING_PROFILE_JSON_BYTES, ModelDescriptor, ModelSource,
     ProfileValidationError, ProviderProfile, ProviderProfileId, RoutingProfile, SecretRef,
-    TranslationError, TranslationPreset, TranslationQualityMode, TranslationRequest,
-    deserialize_routing_profile, serialize_routing_profile, validate_model_identifier,
+    TranslationError, TranslationPreset, TranslationQualityMode, TranslationRequest, UsageRecord,
+    UsageSource, deserialize_routing_profile, serialize_routing_profile, validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Component, Path};
@@ -69,7 +69,8 @@ const PROVIDER_PROFILE_PROXY_AUTH_MIGRATION: &str =
     include_str!("../../../migrations/0030_provider_profile_proxy_auth.sql");
 const PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION: &str =
     include_str!("../../../migrations/0031_provider_profile_client_certificate_identity.sql");
-const LATEST_SCHEMA_VERSION: u32 = 31;
+const USAGE_RECORDS_MIGRATION: &str = include_str!("../../../migrations/0032_usage_records.sql");
+const LATEST_SCHEMA_VERSION: u32 = 32;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -129,6 +130,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (29, PROVIDER_PROFILE_TRUSTED_CERTIFICATES_MIGRATION),
     (30, PROVIDER_PROFILE_PROXY_AUTH_MIGRATION),
     (31, PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION),
+    (32, USAGE_RECORDS_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -148,6 +150,21 @@ pub struct TranslationHistoryEntry {
     pub target_locale: String,
     /// 使用的模型标识。
     pub model_id: String,
+}
+
+/// 描述一条不含正文和秘密的归一化 usage 记录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageRecordEntry {
+    /// 对应翻译操作的稳定标识。
+    pub operation_id: String,
+    /// 记录写入时的 Unix 秒时间戳。
+    pub created_at: i64,
+    /// 可选的稳定提供商标识，不包含端点或凭据。
+    pub provider_id: Option<String>,
+    /// 使用的模型标识。
+    pub model_id: String,
+    /// 归一化 usage 数据。
+    pub usage: UsageRecord,
 }
 
 /// 描述一条可复用的本地翻译记忆。
@@ -637,6 +654,35 @@ impl Storage {
             .map_err(|error| map_error(&error))
     }
 
+    /// 返回本地归一化 usage 记录数。
+    pub fn usage_record_count(&self) -> Result<usize, TranslationError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM usage_records", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| usize::try_from(count).unwrap_or(usize::MAX))
+            .map_err(|error| map_error(&error))
+    }
+
+    /// 按最近写入顺序返回有限数量的 usage 记录。
+    pub fn usage_records(&self, limit: usize) -> Result<Vec<UsageRecordEntry>, TranslationError> {
+        let limit = limit.min(MAX_TRANSLATION_HISTORY_ENTRIES);
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT operation_id, created_at, provider_id, model_id, source, input_tokens, output_tokens, total_tokens FROM usage_records ORDER BY created_at DESC, operation_id DESC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        statement
+            .query_map(
+                params![i64::try_from(limit).unwrap_or(i64::MAX)],
+                usage_record_from_row,
+            )
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))
+    }
+
     /// 返回是否允许新的标准请求写入本地翻译历史。
     pub fn translation_history_enabled(&self) -> Result<bool, TranslationError> {
         self.connection
@@ -842,6 +888,16 @@ impl Storage {
         request: &TranslationRequest,
         translated_text: &str,
     ) -> Result<(), TranslationError> {
+        self.record_translation_history_with_usage(request, translated_text, None)
+    }
+
+    /// 原子写入翻译历史和可选的归一化 usage 记录。
+    pub fn record_translation_history_with_usage(
+        &mut self,
+        request: &TranslationRequest,
+        translated_text: &str,
+        usage: Option<&UsageRecord>,
+    ) -> Result<(), TranslationError> {
         if request.is_incognito() {
             return Ok(());
         }
@@ -873,10 +929,32 @@ impl Storage {
                 ],
             )
             .map_err(|error| map_error(&error))?;
+        if let Some(usage) = usage {
+            transaction
+                .execute(
+                    "INSERT INTO usage_records (operation_id, provider_id, model_id, source, input_tokens, output_tokens, total_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(operation_id) DO UPDATE SET provider_id = excluded.provider_id, model_id = excluded.model_id, source = excluded.source, input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens, total_tokens = excluded.total_tokens, created_at = unixepoch()",
+                    params![
+                        request.operation_id.as_str(),
+                        safe_usage_provider_id(request.provider_identity.as_deref()),
+                        request.model_id.as_str(),
+                        usage_source_name(usage.source),
+                        usage.input_tokens.map(usage_token_sql_value),
+                        usage.output_tokens.map(usage_token_sql_value),
+                        usage.total_tokens.map(usage_token_sql_value),
+                    ],
+                )
+                .map_err(|error| map_error(&error))?;
+        }
         transaction
             .execute(
                 "DELETE FROM translation_history WHERE operation_id IN (SELECT operation_id FROM translation_history ORDER BY created_at DESC, operation_id DESC LIMIT -1 OFFSET ?1)",
                 params![i64::try_from(MAX_TRANSLATION_HISTORY_ENTRIES).unwrap_or(i64::MAX)],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM usage_records WHERE operation_id NOT IN (SELECT operation_id FROM translation_history)",
+                [],
             )
             .map_err(|error| map_error(&error))?;
         transaction.commit().map_err(|error| map_error(&error))
@@ -884,10 +962,17 @@ impl Storage {
 
     /// 清空全部本地翻译历史。
     pub fn clear_translation_history(&mut self) -> Result<(), TranslationError> {
-        self.connection
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        transaction
             .execute("DELETE FROM translation_history", [])
-            .map(|_| ())
-            .map_err(|error| map_error(&error))
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute("DELETE FROM usage_records", [])
+            .map_err(|error| map_error(&error))?;
+        transaction.commit().map_err(|error| map_error(&error))
     }
 
     /// 删除指定操作标识对应的本地翻译历史，并返回是否找到记录。
@@ -895,13 +980,23 @@ impl Storage {
         &mut self,
         operation_id: &str,
     ) -> Result<bool, TranslationError> {
-        let deleted = self
+        let transaction = self
             .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        let deleted = transaction
             .execute(
                 "DELETE FROM translation_history WHERE operation_id = ?1",
                 params![operation_id],
             )
             .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM usage_records WHERE operation_id = ?1",
+                params![operation_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction.commit().map_err(|error| map_error(&error))?;
         Ok(deleted != 0)
     }
 
@@ -1911,6 +2006,87 @@ fn translation_memory_from_row(
     })
 }
 
+// 将数据库中的 usage 行恢复为不含正文和秘密的领域记录。
+fn usage_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecordEntry> {
+    let source_name: String = row.get(4)?;
+    let source = usage_source_from_name(&source_name)?;
+    Ok(UsageRecordEntry {
+        operation_id: row.get(0)?,
+        created_at: row.get(1)?,
+        provider_id: row.get(2)?,
+        model_id: row.get(3)?,
+        usage: UsageRecord {
+            source,
+            input_tokens: usage_token_from_sql(row.get(5)?)?,
+            output_tokens: usage_token_from_sql(row.get(6)?)?,
+            total_tokens: usage_token_from_sql(row.get(7)?)?,
+        },
+    })
+}
+
+// 将无符号 token 数量安全地映射到 SQLite 的整数列。
+fn usage_token_sql_value(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+// 拒绝负数 usage，避免损坏数据库产生伪造统计。
+fn usage_token_from_sql(value: Option<i64>) -> rusqlite::Result<Option<u64>> {
+    value
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Integer,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "usage token count cannot be negative",
+                    )),
+                )
+            })
+        })
+        .transpose()
+}
+
+// 将受限 source 标签映射回领域枚举。
+fn usage_source_from_name(value: &str) -> rusqlite::Result<UsageSource> {
+    match value {
+        "provider_reported" => Ok(UsageSource::ProviderReported),
+        "locally_estimated" => Ok(UsageSource::LocallyEstimated),
+        "unknown" => Ok(UsageSource::Unknown),
+        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "usage source is invalid",
+            )),
+        )),
+    }
+}
+
+// 只保留稳定提供商标识，绝不把端点或其他身份后缀写入 usage 表。
+fn safe_usage_provider_id(identity: Option<&str>) -> Option<String> {
+    let value = identity?.split('@').next()?.trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+// 将 usage 来源枚举编码为稳定的数据库标签。
+const fn usage_source_name(source: UsageSource) -> &'static str {
+    match source {
+        UsageSource::ProviderReported => "provider_reported",
+        UsageSource::LocallyEstimated => "locally_estimated",
+        UsageSource::Unknown => "unknown",
+    }
+}
+
 fn translation_memory_identity_json(
     request: &TranslationRequest,
 ) -> Result<String, TranslationError> {
@@ -1953,6 +2129,7 @@ mod tests {
         ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, RoutingCandidate,
         RoutingConstraints, RoutingMode, RoutingProfile, SecretRef, SecretRefNamespace,
         TranslationPreset, TranslationPrivacyMode, TranslationQualityMode, TranslationRequest,
+        UsageRecord, UsageSource,
     };
     use rusqlite::Connection;
     #[cfg(unix)]
@@ -1992,7 +2169,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 31);
+        assert_eq!(storage.schema_version().expect("version"), 32);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -2021,7 +2198,7 @@ mod tests {
         drop(connection);
 
         let mut storage = Storage::open(&path).expect("schema 20 migration");
-        assert_eq!(storage.schema_version().expect("version"), 31);
+        assert_eq!(storage.schema_version().expect("version"), 32);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
@@ -2082,7 +2259,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 31);
+        assert_eq!(storage.schema_version().expect("version"), 32);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2721,6 +2898,54 @@ trailer
 
         storage.clear_translation_history().expect("clear history");
         assert_eq!(storage.translation_history_count().expect("count"), 0);
+        assert_eq!(storage.usage_record_count().expect("usage count"), 0);
+    }
+
+    #[test]
+    fn usage_records_round_trip_without_endpoints_and_follow_history_controls() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let request = TranslationRequest::new("Hello", "zh-CN", "fake-translator")
+            .with_provider_identity("profile-a@https://provider.invalid/v1/");
+        let usage = UsageRecord::provider_reported(Some(8), Some(3), Some(11));
+        storage
+            .record_translation_history_with_usage(&request, "你好", Some(&usage))
+            .expect("history and usage");
+
+        let entries = storage.usage_records(10).expect("usage entries");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider_id.as_deref(), Some("profile-a"));
+        assert_eq!(entries[0].model_id, "fake-translator");
+        assert_eq!(entries[0].usage, usage);
+        assert!(
+            storage.usage_records(10).expect("usage entries")[0]
+                .usage
+                .source
+                == UsageSource::ProviderReported
+        );
+
+        storage
+            .delete_translation_history_entry(request.operation_id.as_str())
+            .expect("delete history");
+        assert_eq!(storage.usage_record_count().expect("usage count"), 0);
+    }
+
+    #[test]
+    fn usage_records_skip_incognito_and_clear_with_history() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let request = TranslationRequest::new("Hello", "zh-CN", "model")
+            .with_provider_identity("profile-a@model");
+        let usage = UsageRecord::locally_estimated("Hello", "你好");
+        storage
+            .record_translation_history_with_usage(&request, "你好", Some(&usage))
+            .expect("usage");
+        let incognito = TranslationRequest::new("Private", "zh-CN", "model")
+            .with_privacy_mode(TranslationPrivacyMode::Incognito);
+        storage
+            .record_translation_history_with_usage(&incognito, "私密", Some(&usage))
+            .expect("incognito usage is skipped");
+        assert_eq!(storage.usage_record_count().expect("usage count"), 1);
+        storage.clear_translation_history().expect("clear history");
+        assert_eq!(storage.usage_record_count().expect("usage count"), 0);
     }
 
     #[test]
@@ -2945,7 +3170,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 31);
+        assert_eq!(storage.schema_version().expect("schema version"), 32);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -3042,7 +3267,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 31);
+        assert_eq!(storage.schema_version().expect("version"), 32);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -3124,7 +3349,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 31);
+        assert_eq!(storage.schema_version().expect("version"), 32);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {

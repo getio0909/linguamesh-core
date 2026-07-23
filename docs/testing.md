@@ -141,6 +141,12 @@ scenario in a child process that terminates abruptly after the commit; the paren
 database and verifies the committed profile. These are process-crash regressions, not a claim that
 every filesystem power-loss or SQLite VFS failure is covered.
 
+The storage suite also migrates schema 31 to 32 and round-trips normalized usage records without
+retaining source/output text, endpoints, or credential values. It verifies provider-reported and
+locally estimated sources, sanitizes an endpoint-bearing provider identity to its stable ID, skips
+Incognito writes, and removes usage rows with history deletion and clear operations. Pricing is not
+calculated from these records.
+
 The Core domain suite also covers the `FileLease` lifecycle for desktop, temporary/output, POSIX,
 Android ParcelFileDescriptor, and Windows-handle resource shapes. It rejects invalid resource
 identifiers before work and proves that an acquired guard cannot read its resource after expiry or

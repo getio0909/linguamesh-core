@@ -31,7 +31,7 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
-SQLite migrations currently reach schema version 27. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 32. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -76,7 +76,11 @@ once by the host secret broker, parsed as bounded `username:password`, applied a
 authentication, and never embedded in the proxy URL or stored in SQLite. Schema 31 adds an
 optional client-certificate identity `SecretRef`; the host resolves one combined PEM certificate
 and private-key identity for the connection, and adapters pass it to rustls without disabling
-verification. TLS policy remains a separate contract.
+verification. Schema 32 adds the non-secret `usage_records` table. Completed standard translations
+write the normalized usage source and bounded token counts atomically with history, while storing
+only a sanitized provider ID and model ID. Incognito and disabled-history requests do not create
+usage rows; history deletion and cleanup delete corresponding usage metadata. TLS policy remains a
+separate contract.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional

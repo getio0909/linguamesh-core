@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-23 — normalized usage-record persistence
+
+Assumption: usage metadata is safe to retain only as bounded, non-secret accounting metadata; the
+history policy and Incognito mode are the persistence controls, and no provider pricing is inferred.
+
+- Core schema 32 adds `usage_records` with the operation ID, sanitized provider ID, model ID,
+  source (`provider_reported`, `locally_estimated`, or `unknown`), and bounded token counts. It
+  never stores source text, translated text, endpoints, or credential values.
+- History completion writes the history row and usage row in one transaction; history trimming,
+  individual deletion, and **Clear history** remove orphaned usage records as well. Incognito
+  requests write neither record, and malformed provider identities are dropped rather than stored.
+- Storage tests cover schema migration, provider-identity redaction, source/count round trips,
+  incognito skipping, cleanup, and deletion. `cargo test --workspace --locked --all-targets`
+  passed (222 tests) and strict workspace Clippy passed; release remains `unreleased`.
+
 ## 2026-07-23 — Anthropic Messages testkit transport fixture
 
 Assumption: the Linux-first protocol boundary needs a deterministic `/v1/messages` service so the
