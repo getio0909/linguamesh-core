@@ -1,5 +1,19 @@
 # Implementation Status
 
+## 2026-07-23 — bounded TBX glossary import
+
+Assumption: Linux is the active client priority, so Core exposes a restricted, dependency-light
+TBX reader while other clients remain unchanged; the first `langSet` is the source language and
+each later language set contributes target rules.
+
+- `linguamesh-domain` now imports UTF-8 TBX under the existing 4 MiB/256-entry bounds, preserves
+  `xml:lang` and the first `descrip` note, decodes XML character references, and rejects DTDs,
+  unknown entities, malformed entries, missing source/target terms, conflicts, and credential-shaped
+  values without storing file contents.
+- Domain tests cover multilingual terms, notes and escaped text plus malformed, unsafe, missing,
+  oversized, and bounded-entry inputs. `cargo test --workspace --locked --all-targets` passed
+  (228 tests, 0 failed, 0 ignored), and strict all-feature Clippy passed. Release remains `unreleased`.
+
 ## 2026-07-23 — normalized usage-record persistence
 
 Assumption: usage metadata is safe to retain only as bounded, non-secret accounting metadata; the

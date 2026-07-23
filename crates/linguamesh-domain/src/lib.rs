@@ -1,5 +1,7 @@
 #![doc = "`LinguaMesh` 的稳定领域类型。"]
 
+use quick_xml::events::Event;
+use quick_xml::{Reader, XmlVersion};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1172,6 +1174,8 @@ const MAX_GLOSSARY_TERM_BYTES: usize = 512;
 const MAX_GLOSSARY_NOTE_BYTES: usize = 2048;
 /// 词汇表 CSV 文件的最大 UTF-8 字节数。
 pub const MAX_GLOSSARY_CSV_BYTES: usize = 4 * 1024 * 1024;
+/// 词汇表 TBX 文件的最大 UTF-8 字节数。
+pub const MAX_GLOSSARY_TBX_BYTES: usize = MAX_GLOSSARY_CSV_BYTES;
 /// 词汇表 CSV 的固定列顺序。
 pub const GLOSSARY_CSV_HEADER: &str = "source_term,target_term,source_locale,target_locale,case_sensitive,whole_word,immutable,domain,priority,notes,enabled";
 
@@ -1416,6 +1420,236 @@ impl Glossary {
         }
         output
     }
+
+    /// 从受限的 TBX XML 文件导入第一语言为源语言、其余语言为目标语言的术语。
+    #[allow(clippy::too_many_lines)]
+    pub fn from_tbx(source: &str) -> Result<Self, GlossaryTbxError> {
+        if source.len() > MAX_GLOSSARY_TBX_BYTES {
+            return Err(GlossaryTbxError::TooLarge);
+        }
+        let mut reader = Reader::from_str(source);
+        reader.config_mut().trim_text(false);
+        let mut depth = 0_usize;
+        let mut root_seen = false;
+        let mut root_closed = false;
+        let mut entry: Option<TbxEntry> = None;
+        let mut current_lang: Option<usize> = None;
+        let mut current_term: Option<String> = None;
+        let mut current_note: Option<String> = None;
+        let mut note_depth = 0_usize;
+        let mut entries = Vec::new();
+        loop {
+            match reader.read_event() {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(start)) => {
+                    depth = depth.checked_add(1).ok_or(GlossaryTbxError::Malformed)?;
+                    if depth == 1 {
+                        if root_seen {
+                            return Err(GlossaryTbxError::Malformed);
+                        }
+                        root_seen = true;
+                    } else if root_closed {
+                        return Err(GlossaryTbxError::Malformed);
+                    }
+                    match start.local_name().as_ref() {
+                        b"termEntry" => {
+                            if entry.is_some() {
+                                return Err(GlossaryTbxError::Malformed);
+                            }
+                            entry = Some(TbxEntry::default());
+                        }
+                        b"langSet" => {
+                            let Some(entry) = entry.as_mut() else {
+                                return Err(GlossaryTbxError::Malformed);
+                            };
+                            entry.lang_sets.push(TbxLangSet {
+                                locale: tbx_attribute(&start, b"lang", &reader)?,
+                                terms: Vec::new(),
+                            });
+                            current_lang = Some(entry.lang_sets.len() - 1);
+                        }
+                        b"term" => {
+                            if current_lang.is_none() || current_term.is_some() {
+                                return Err(GlossaryTbxError::Malformed);
+                            }
+                            current_term = Some(String::new());
+                        }
+                        b"descrip" => {
+                            if entry.is_none() || current_term.is_some() || note_depth > 0 {
+                                return Err(GlossaryTbxError::Malformed);
+                            }
+                            current_note = Some(String::new());
+                            note_depth = 1;
+                        }
+                        _ => {
+                            if note_depth > 0 {
+                                note_depth = note_depth.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Empty(empty)) => match empty.local_name().as_ref() {
+                    b"term" | b"langSet" | b"termEntry" => {
+                        return Err(GlossaryTbxError::Malformed);
+                    }
+                    _ => {}
+                },
+                Ok(Event::Text(text)) => {
+                    let decoded = std::str::from_utf8(text.as_ref())
+                        .map_err(|_| GlossaryTbxError::Malformed)?;
+                    let decoded = quick_xml::escape::unescape(decoded)
+                        .map_err(|_| GlossaryTbxError::Malformed)?;
+                    append_tbx_text(&mut current_term, &mut current_note, note_depth, &decoded)?;
+                }
+                Ok(Event::CData(text)) => {
+                    let decoded = std::str::from_utf8(text.as_ref())
+                        .map_err(|_| GlossaryTbxError::Malformed)?;
+                    append_tbx_text(&mut current_term, &mut current_note, note_depth, decoded)?;
+                }
+                Ok(Event::GeneralRef(reference)) => {
+                    let entity = std::str::from_utf8(reference.as_ref())
+                        .map_err(|_| GlossaryTbxError::Malformed)?;
+                    let entity_text = format!("&{entity};");
+                    let decoded = quick_xml::escape::unescape(&entity_text)
+                        .map_err(|_| GlossaryTbxError::Malformed)?;
+                    append_tbx_text(&mut current_term, &mut current_note, note_depth, &decoded)?;
+                }
+                Ok(Event::End(end)) => {
+                    if depth == 0 {
+                        return Err(GlossaryTbxError::Malformed);
+                    }
+                    match end.local_name().as_ref() {
+                        b"term" => {
+                            let term = current_term.take().ok_or(GlossaryTbxError::Malformed)?;
+                            let term = term.trim();
+                            if term.is_empty() {
+                                return Err(GlossaryTbxError::Malformed);
+                            }
+                            let index = current_lang.ok_or(GlossaryTbxError::Malformed)?;
+                            entry.as_mut().ok_or(GlossaryTbxError::Malformed)?.lang_sets[index]
+                                .terms
+                                .push(term.to_owned());
+                        }
+                        b"langSet" => current_lang = None,
+                        b"descrip" if note_depth > 0 => {
+                            note_depth -= 1;
+                            if note_depth == 0 {
+                                entry.as_mut().ok_or(GlossaryTbxError::Malformed)?.note =
+                                    current_note.take();
+                            }
+                        }
+                        b"termEntry" => {
+                            if current_term.is_some() || note_depth > 0 {
+                                return Err(GlossaryTbxError::Malformed);
+                            }
+                            let completed = entry.take().ok_or(GlossaryTbxError::Malformed)?;
+                            append_tbx_entries(&mut entries, &completed)?;
+                        }
+                        _ if note_depth > 0 => note_depth -= 1,
+                        _ => {}
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        root_closed = true;
+                    }
+                }
+                Ok(Event::Comment(_) | Event::Decl(_) | Event::PI(_)) => {}
+                Ok(Event::DocType(_)) | Err(_) => {
+                    return Err(GlossaryTbxError::Malformed);
+                }
+            }
+        }
+        if !root_seen || !root_closed || depth != 0 || entry.is_some() || current_term.is_some() {
+            return Err(GlossaryTbxError::Malformed);
+        }
+        if entries.is_empty() {
+            return Err(GlossaryTbxError::MissingTerms);
+        }
+        Self::new(entries).map_err(GlossaryTbxError::Glossary)
+    }
+}
+
+#[derive(Default)]
+struct TbxEntry {
+    lang_sets: Vec<TbxLangSet>,
+    note: Option<String>,
+}
+
+struct TbxLangSet {
+    locale: Option<String>,
+    terms: Vec<String>,
+}
+
+fn tbx_attribute(
+    start: &quick_xml::events::BytesStart<'_>,
+    local_name: &[u8],
+    reader: &Reader<&[u8]>,
+) -> Result<Option<String>, GlossaryTbxError> {
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|_| GlossaryTbxError::Malformed)?;
+        if attribute.key.local_name().as_ref() == local_name {
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .map_err(|_| GlossaryTbxError::Malformed)?;
+            return Ok(Some(value.trim().to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn append_tbx_text(
+    current_term: &mut Option<String>,
+    current_note: &mut Option<String>,
+    note_depth: usize,
+    text: &str,
+) -> Result<(), GlossaryTbxError> {
+    if let Some(term) = current_term.as_mut() {
+        term.push_str(text);
+    } else if note_depth > 0 {
+        current_note
+            .as_mut()
+            .ok_or(GlossaryTbxError::Malformed)?
+            .push_str(text);
+    }
+    Ok(())
+}
+
+fn append_tbx_entries(
+    entries: &mut Vec<GlossaryEntry>,
+    entry: &TbxEntry,
+) -> Result<(), GlossaryTbxError> {
+    let Some(source) = entry.lang_sets.first() else {
+        return Err(GlossaryTbxError::MissingTerms);
+    };
+    let Some(source_term) = source.terms.first() else {
+        return Err(GlossaryTbxError::MissingTerms);
+    };
+    if entry.lang_sets.len() < 2 {
+        return Err(GlossaryTbxError::MissingTerms);
+    }
+    for target in entry.lang_sets.iter().skip(1) {
+        if target.terms.is_empty() {
+            return Err(GlossaryTbxError::MissingTerms);
+        }
+        for target_term in &target.terms {
+            if entries.len() >= MAX_GLOSSARY_ENTRIES {
+                return Err(GlossaryTbxError::TooManyEntries);
+            }
+            let mut glossary_entry = GlossaryEntry::new(source_term, target_term)
+                .map_err(|error| GlossaryTbxError::InvalidEntry { error })?;
+            if let Some(locale) = source.locale.as_deref() {
+                glossary_entry = glossary_entry.with_source_locale(locale);
+            }
+            if let Some(locale) = target.locale.as_deref() {
+                glossary_entry = glossary_entry.with_target_locale(locale);
+            }
+            if let Some(note) = entry.note.as_deref().filter(|note| !note.trim().is_empty()) {
+                glossary_entry = glossary_entry.with_notes(note.trim());
+            }
+            entries.push(glossary_entry);
+        }
+    }
+    Ok(())
 }
 
 /// 描述词汇表 CSV 输入不满足安全或结构约束的原因。
@@ -1447,6 +1681,29 @@ pub enum GlossaryCsvError {
     InvalidEntry { row: usize, error: GlossaryError },
     /// 导入后的词汇表存在冲突。
     #[error("Glossary CSV contains invalid glossary rules: {0}")]
+    Glossary(GlossaryError),
+}
+
+/// 描述词汇表 TBX 输入不满足安全或结构约束的原因。
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum GlossaryTbxError {
+    /// 文件超过允许的 UTF-8 字节上限。
+    #[error("Glossary TBX exceeds the 4 MiB size limit.")]
+    TooLarge,
+    /// XML 结构或受限 TBX 内容无效。
+    #[error("Glossary TBX is malformed or uses unsupported XML content.")]
+    Malformed,
+    /// 术语条目缺少至少一组源语言和一组目标语言。
+    #[error("Glossary TBX entries must contain source and target terms.")]
+    MissingTerms,
+    /// 导入的规则数量超过上限。
+    #[error("Glossary TBX contains too many entries.")]
+    TooManyEntries,
+    /// 单条规则未通过领域校验。
+    #[error("Glossary TBX contains an invalid entry: {error}")]
+    InvalidEntry { error: GlossaryError },
+    /// 导入后的词汇表存在冲突。
+    #[error("Glossary TBX contains invalid glossary rules: {0}")]
     Glossary(GlossaryError),
 }
 
@@ -2711,9 +2968,9 @@ mod tests {
     use super::{
         ChunkingError, ClientCertificateIdentity, CompatibilityError, CompatibilityRequirements,
         CoreCompatibility, ErrorKind, Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError,
-        MAX_USAGE_TOKENS, ProfileValidationError, ProtectedTextError, ProviderProfile,
-        ProviderProfileId, ProxyAuthentication, SecretRef, SecretRefNamespace, SecretValue,
-        TranslationError, TranslationEvent, TranslationPreset, TranslationPrivacyMode,
+        GlossaryTbxError, MAX_USAGE_TOKENS, ProfileValidationError, ProtectedTextError,
+        ProviderProfile, ProviderProfileId, ProxyAuthentication, SecretRef, SecretRefNamespace,
+        SecretValue, TranslationError, TranslationEvent, TranslationPreset, TranslationPrivacyMode,
         TranslationQualityMode, TranslationRequest, UsageRecord, UsageSource, protect_source_text,
         protect_source_text_with_glossary, validate_non_secret_profile_field,
     };
@@ -3684,6 +3941,59 @@ mod tests {
                 super::GLOSSARY_CSV_HEADER
             )),
             Err(GlossaryCsvError::Malformed)
+        );
+    }
+
+    #[test]
+    fn glossary_tbx_imports_multilingual_terms_and_notes() {
+        let tbx = r#"<?xml version="1.0" encoding="UTF-8"?>
+<martif type="TBX" xmlns="urn:iso:std:iso:30042:ed-2">
+  <martifHeader/>
+  <text><body>
+    <termEntry id="linguamesh">
+      <descrip type="subjectField">Product &amp; UI</descrip>
+      <langSet xml:lang="en"><tig><term>Lingua&amp;Mesh</term></tig></langSet>
+      <langSet xml:lang="zh-CN"><tig><term>凌瓦网</term></tig></langSet>
+      <langSet xml:lang="ja"><tig><term>リングアメッシュ</term></tig></langSet>
+    </termEntry>
+  </body></text>
+</martif>"#;
+
+        let glossary = Glossary::from_tbx(tbx).expect("TBX glossary");
+        assert_eq!(glossary.entries().len(), 2);
+        assert_eq!(glossary.entries()[0].source_term, "Lingua&Mesh");
+        assert_eq!(glossary.entries()[0].target_term, "凌瓦网");
+        assert_eq!(glossary.entries()[0].source_locale.as_deref(), Some("en"));
+        assert_eq!(
+            glossary.entries()[0].target_locale.as_deref(),
+            Some("zh-CN")
+        );
+        assert_eq!(glossary.entries()[0].notes.as_deref(), Some("Product & UI"));
+        assert_eq!(glossary.entries()[1].target_locale.as_deref(), Some("ja"));
+    }
+
+    #[test]
+    fn glossary_tbx_rejects_unsafe_or_incomplete_documents() {
+        assert_eq!(
+            Glossary::from_tbx("<!DOCTYPE martif><martif/>"),
+            Err(GlossaryTbxError::Malformed)
+        );
+        assert_eq!(
+            Glossary::from_tbx(
+                "<martif><body><termEntry><langSet xml:lang=\"en\"><term>source</term></langSet></termEntry></body></martif>"
+            ),
+            Err(GlossaryTbxError::MissingTerms)
+        );
+        assert_eq!(
+            Glossary::from_tbx(
+                "<martif><body><termEntry><langSet><term></term></langSet><langSet><term>target</term></langSet></termEntry></body></martif>"
+            ),
+            Err(GlossaryTbxError::Malformed)
+        );
+        let oversized = "x".repeat(super::MAX_GLOSSARY_TBX_BYTES + 1);
+        assert_eq!(
+            Glossary::from_tbx(&oversized),
+            Err(GlossaryTbxError::TooLarge)
         );
     }
 

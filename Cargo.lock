@@ -796,6 +796,7 @@ dependencies = [
 name = "linguamesh-domain"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "quick-xml",
  "secrecy",
  "serde",
  "serde_json",

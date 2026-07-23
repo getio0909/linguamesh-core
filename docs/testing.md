@@ -39,6 +39,10 @@ Chat/Responses, Anthropic, Gemini, and Ollama decoder fixtures cover fragmented 
 partial-count merging, and final-text-plus-usage events. Azure reuses the Chat Completions parser.
 These tests do not claim provider billing equivalence or pricing accuracy.
 
+Glossary tests cover deterministic CSV round trips and the bounded TBX importer. TBX fixtures cover
+multiple target languages, XML entity decoding, locale and note preservation, DTD/entity rejection,
+missing source or target terms, malformed XML, entry limits, and the 4 MiB input bound.
+
 Translation-preset tests cover General/Technical/Marketing stable IDs, legacy-request defaults,
 bounded optional fields, control and credential-shaped input rejection, escaped prompt rendering,
 and translation-memory identity separation. The engine validates the preset before any provider

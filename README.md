@@ -29,6 +29,11 @@ code spans, fenced code, and placeholders while translating. Marker restoration 
 fails closed if a provider omits, duplicates, or changes a protected span. User glossaries and
 custom protected terms are not yet part of this prerelease slice.
 
+The shared domain also accepts a bounded, UTF-8 TBX glossary import. The restricted parser uses the
+first `langSet` as the source language, creates one rule for each subsequent target term, preserves
+`xml:lang` and the first `descrip` note, and rejects DTDs, unknown entities, malformed entries, and
+files larger than 4 MiB. Native clients should keep the same bound and fail-closed error policy.
+
 ## Explainable routing planner
 
 `linguamesh-domain` exposes `RoutingProfile` for deterministic Manual, Ordered, and Automatic
