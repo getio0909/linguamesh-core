@@ -5,10 +5,11 @@ use linguamesh_document::{
     MAX_DOCUMENT_BYTES,
 };
 use linguamesh_domain::{
-    ErrorKind, Glossary, MAX_ROUTING_PROFILE_JSON_BYTES, ModelDescriptor, ModelSource,
-    ProfileValidationError, ProviderProfile, ProviderProfileId, RoutingProfile, SecretRef,
-    TranslationError, TranslationPreset, TranslationQualityMode, TranslationRequest, UsageRecord,
-    UsageSource, deserialize_routing_profile, serialize_routing_profile, validate_model_identifier,
+    ErrorKind, Glossary, GlossaryEntry, MAX_ROUTING_PROFILE_JSON_BYTES, ModelDescriptor,
+    ModelSource, ProfileValidationError, ProviderProfile, ProviderProfileId, RoutingProfile,
+    SecretRef, TranslationError, TranslationPreset, TranslationQualityMode, TranslationRequest,
+    UsageRecord, UsageSource, deserialize_routing_profile, serialize_routing_profile,
+    validate_model_identifier,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Component, Path};
@@ -70,7 +71,9 @@ const PROVIDER_PROFILE_PROXY_AUTH_MIGRATION: &str =
 const PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION: &str =
     include_str!("../../../migrations/0031_provider_profile_client_certificate_identity.sql");
 const USAGE_RECORDS_MIGRATION: &str = include_str!("../../../migrations/0032_usage_records.sql");
-const LATEST_SCHEMA_VERSION: u32 = 32;
+const GLOSSARY_LIBRARIES_MIGRATION: &str =
+    include_str!("../../../migrations/0033_glossary_libraries.sql");
+const LATEST_SCHEMA_VERSION: u32 = 33;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -97,6 +100,8 @@ pub const MAX_DOCUMENT_JOB_GLOSSARY_BYTES: usize = 256 * 1024;
 pub const MAX_DOCUMENT_JOB_PRESET_BYTES: usize = 8 * 1024;
 /// 限制可保存的路由配置数量，避免配置数据库无限增长。
 pub const MAX_ROUTING_PROFILES: usize = 32;
+/// 限制本地可保存的词汇表库数量，避免配置数据库无限增长。
+pub const MAX_GLOSSARIES: usize = 32;
 /// 限制单个路由配置 JSON 大小，确保候选和约束元数据有界。
 const MIGRATIONS: &[(u32, &str)] = &[
     (1, INITIAL_MIGRATION),
@@ -131,6 +136,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (30, PROVIDER_PROFILE_PROXY_AUTH_MIGRATION),
     (31, PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION),
     (32, USAGE_RECORDS_MIGRATION),
+    (33, GLOSSARY_LIBRARIES_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -236,6 +242,19 @@ pub struct RoutingProfileRecord {
     /// 配置首次写入时的 Unix 秒时间戳。
     pub created_at: i64,
     /// 配置最近一次更新时的 Unix 秒时间戳。
+    pub updated_at: i64,
+}
+
+/// 描述一个可跨请求复用的本地词汇表库。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlossaryRecord {
+    /// 词汇表库稳定标识。
+    pub id: String,
+    /// 经过核心校验的术语规则。
+    pub glossary: Glossary,
+    /// 词汇表库首次写入时的 Unix 秒时间戳。
+    pub created_at: i64,
+    /// 词汇表库最近一次更新时的 Unix 秒时间戳。
     pub updated_at: i64,
 }
 
@@ -1256,6 +1275,150 @@ impl Storage {
         Ok(changed > 0)
     }
 
+    /// 保存或替换一个经过校验的本地词汇表库。
+    pub fn save_glossary(
+        &mut self,
+        glossary_id: &str,
+        glossary: &Glossary,
+    ) -> Result<GlossaryRecord, TranslationError> {
+        validate_glossary_id(glossary_id)?;
+        glossary.validate().map_err(|error| {
+            TranslationError::new(ErrorKind::InvalidConfiguration, error.to_string())
+        })?;
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| map_error(&error))?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM glossaries WHERE glossary_id = ?1",
+                params![glossary_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| map_error(&error))?
+            .is_some();
+        if !exists {
+            let count = transaction
+                .query_row("SELECT COUNT(*) FROM glossaries", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| map_error(&error))?;
+            if usize::try_from(count).unwrap_or(usize::MAX) >= MAX_GLOSSARIES {
+                return Err(TranslationError::new(
+                    ErrorKind::InvalidConfiguration,
+                    "The local glossary library limit has been reached.",
+                ));
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO glossaries (glossary_id) VALUES (?1) ON CONFLICT(glossary_id) DO UPDATE SET updated_at = unixepoch()",
+                params![glossary_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        transaction
+            .execute(
+                "DELETE FROM glossary_terms WHERE glossary_id = ?1",
+                params![glossary_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        for (term_index, entry) in glossary.entries().iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO glossary_terms (glossary_id, term_index, source_term, target_term, source_locale, target_locale, case_sensitive, whole_word, immutable, domain, priority, notes, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        glossary_id,
+                        i64::try_from(term_index).unwrap_or(i64::MAX),
+                        entry.source_term.as_str(),
+                        entry.target_term.as_str(),
+                        entry.source_locale.as_deref(),
+                        entry.target_locale.as_deref(),
+                        entry.case_sensitive,
+                        entry.whole_word,
+                        entry.immutable,
+                        entry.domain.as_deref(),
+                        entry.priority,
+                        entry.notes.as_deref(),
+                        entry.enabled,
+                    ],
+                )
+                .map_err(|error| map_error(&error))?;
+        }
+        transaction.commit().map_err(|error| map_error(&error))?;
+        self.glossary(glossary_id)?.ok_or_else(|| {
+            TranslationError::new(
+                ErrorKind::Persistence,
+                "The saved glossary library could not be reloaded.",
+            )
+        })
+    }
+
+    /// 按稳定标识读取一个本地词汇表库。
+    pub fn glossary(&self, glossary_id: &str) -> Result<Option<GlossaryRecord>, TranslationError> {
+        validate_glossary_id(glossary_id)?;
+        self.connection
+            .query_row(
+                "SELECT glossary_id, created_at, updated_at FROM glossaries WHERE glossary_id = ?1",
+                params![glossary_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| map_error(&error))?
+            .map(|(id, created_at, updated_at)| {
+                load_glossary_record(&self.connection, id, created_at, updated_at)
+            })
+            .transpose()
+    }
+
+    /// 返回按更新时间排序的全部本地词汇表库。
+    pub fn glossaries(&self) -> Result<Vec<GlossaryRecord>, TranslationError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT glossary_id, created_at, updated_at FROM glossaries ORDER BY updated_at DESC, glossary_id ASC LIMIT ?1",
+            )
+            .map_err(|error| map_error(&error))?;
+        let rows = statement
+            .query_map(
+                params![i64::try_from(MAX_GLOSSARIES).unwrap_or(i64::MAX)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(|error| map_error(&error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_error(&error))?;
+        rows.into_iter()
+            .map(|(id, created_at, updated_at)| {
+                load_glossary_record(&self.connection, id, created_at, updated_at)
+            })
+            .collect()
+    }
+
+    /// 删除一个本地词汇表库及其全部术语。
+    pub fn delete_glossary(&mut self, glossary_id: &str) -> Result<bool, TranslationError> {
+        validate_glossary_id(glossary_id)?;
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM glossaries WHERE glossary_id = ?1",
+                params![glossary_id],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(changed > 0)
+    }
+
     fn migrate(&mut self) -> Result<(), TranslationError> {
         let transaction = self
             .connection
@@ -2121,6 +2284,67 @@ fn normalize_translation_memory_source(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+// 校验词汇表库标识，避免控制字符和路径样式数据进入持久化层。
+fn validate_glossary_id(glossary_id: &str) -> Result<(), TranslationError> {
+    if glossary_id.is_empty()
+        || glossary_id.len() > 128
+        || glossary_id
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    {
+        return Err(TranslationError::new(
+            ErrorKind::InvalidConfiguration,
+            "The glossary library ID is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+// 从规范化数据库行恢复词汇表，并在读取边界重新执行领域校验。
+fn load_glossary_record(
+    connection: &Connection,
+    id: String,
+    created_at: i64,
+    updated_at: i64,
+) -> Result<GlossaryRecord, TranslationError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT source_term, target_term, source_locale, target_locale, case_sensitive, whole_word, immutable, domain, priority, notes, enabled FROM glossary_terms WHERE glossary_id = ?1 ORDER BY term_index ASC",
+        )
+        .map_err(|error| map_error(&error))?;
+    let entries = statement
+        .query_map(params![id.as_str()], |row| {
+            Ok(GlossaryEntry {
+                source_term: row.get(0)?,
+                target_term: row.get(1)?,
+                source_locale: row.get(2)?,
+                target_locale: row.get(3)?,
+                case_sensitive: row.get(4)?,
+                whole_word: row.get(5)?,
+                immutable: row.get(6)?,
+                domain: row.get(7)?,
+                priority: row.get(8)?,
+                notes: row.get(9)?,
+                enabled: row.get(10)?,
+            })
+        })
+        .map_err(|error| map_error(&error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| map_error(&error))?;
+    let glossary = Glossary::new(entries).map_err(|error| {
+        TranslationError::new(
+            ErrorKind::Persistence,
+            format!("Stored glossary library is invalid: {error}"),
+        )
+    })?;
+    Ok(GlossaryRecord {
+        id,
+        glossary,
+        created_at,
+        updated_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, MIGRATIONS, Storage};
@@ -2169,7 +2393,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 32);
+        assert_eq!(storage.schema_version().expect("version"), 33);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -2198,7 +2422,7 @@ mod tests {
         drop(connection);
 
         let mut storage = Storage::open(&path).expect("schema 20 migration");
-        assert_eq!(storage.schema_version().expect("version"), 32);
+        assert_eq!(storage.schema_version().expect("version"), 33);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
@@ -2259,7 +2483,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 32);
+        assert_eq!(storage.schema_version().expect("version"), 33);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2275,6 +2499,69 @@ mod tests {
                 .routing_profile("safe-routing")
                 .expect("missing")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn glossary_libraries_round_trip_across_reopen_and_delete_terms_atomically() {
+        let directory = tempdir().expect("directory");
+        let path = directory.path().join("glossaries.sqlite3");
+        let mut storage = Storage::open(&path).expect("storage");
+        let entry = GlossaryEntry::new("LinguaMesh", "凌瓦网")
+            .expect("entry")
+            .with_source_locale("en")
+            .with_target_locale("zh-CN")
+            .with_case_sensitive(false)
+            .with_immutable(true)
+            .with_domain("product")
+            .with_priority(10)
+            .with_notes("brand term")
+            .with_enabled(true);
+        let glossary = Glossary::new(vec![entry]).expect("glossary");
+        let saved = storage
+            .save_glossary("product-terms", &glossary)
+            .expect("save");
+        assert_eq!(saved.id, "product-terms");
+        assert_eq!(saved.glossary, glossary);
+        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.glossaries().expect("list"), vec![saved.clone()]);
+        drop(storage);
+
+        let mut reopened = Storage::open(&path).expect("reopen");
+        assert_eq!(
+            reopened.glossary("product-terms").expect("read"),
+            Some(saved)
+        );
+        assert!(reopened.delete_glossary("product-terms").expect("delete"));
+        assert!(
+            reopened
+                .glossary("product-terms")
+                .expect("missing")
+                .is_none()
+        );
+        let term_count = reopened
+            .connection
+            .query_row("SELECT COUNT(*) FROM glossary_terms", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("term count");
+        assert_eq!(term_count, 0);
+    }
+
+    #[test]
+    fn glossary_library_id_and_count_limits_are_enforced() {
+        let mut storage = Storage::in_memory().expect("storage");
+        let glossary = Glossary::new(vec![]).expect("empty glossary");
+        assert!(storage.save_glossary("invalid id", &glossary).is_err());
+        for index in 0..super::MAX_GLOSSARIES {
+            storage
+                .save_glossary(&format!("library-{index}"), &glossary)
+                .expect("save glossary");
+        }
+        assert!(
+            storage
+                .save_glossary("library-overflow", &glossary)
+                .is_err()
         );
     }
 
@@ -3170,7 +3457,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 32);
+        assert_eq!(storage.schema_version().expect("schema version"), 33);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -3267,7 +3554,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 32);
+        assert_eq!(storage.schema_version().expect("version"), 33);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -3349,7 +3636,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 32);
+        assert_eq!(storage.schema_version().expect("version"), 33);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
