@@ -26,6 +26,7 @@ pub const CORE_FEATURES: &[&str] = &[
     "file_lease_v1",
     "typed_rust_host_secret_broker_v1",
     "model_discovery_v1",
+    "provider_health_status_v1",
     "protected_spans_v1",
     "long_text_chunking_v1",
     "provider_profile_persistence_v1",

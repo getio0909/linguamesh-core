@@ -456,6 +456,8 @@ pub struct ProviderProfile {
     client_certificate_identity_ref: Option<Box<SecretRef>>,
     enabled: bool,
     selected_model: Option<String>,
+    last_successful_health_check: Option<i64>,
+    last_failure_category: Option<ErrorKind>,
 }
 
 impl fmt::Debug for ProviderProfile {
@@ -495,6 +497,11 @@ impl fmt::Debug for ProviderProfile {
             )
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
+            .field(
+                "last_successful_health_check",
+                &self.last_successful_health_check,
+            )
+            .field("last_failure_category", &self.last_failure_category)
             .finish_non_exhaustive()
     }
 }
@@ -536,6 +543,8 @@ impl ProviderProfile {
             client_certificate_identity_ref: None,
             enabled: true,
             selected_model: None,
+            last_successful_health_check: None,
+            last_failure_category: None,
         })
     }
 
@@ -678,6 +687,18 @@ impl ProviderProfile {
         self.selected_model.as_deref()
     }
 
+    /// 返回最近一次成功健康检查的 Unix 秒时间戳。
+    #[must_use]
+    pub const fn last_successful_health_check(&self) -> Option<i64> {
+        self.last_successful_health_check
+    }
+
+    /// 返回最近一次规范化失败类别。
+    #[must_use]
+    pub const fn last_failure_category(&self) -> Option<ErrorKind> {
+        self.last_failure_category
+    }
+
     /// 设置持久化启用状态。
     #[must_use]
     pub const fn with_enabled(mut self, enabled: bool) -> Self {
@@ -694,6 +715,27 @@ impl ProviderProfile {
             .map(|value| checked_profile_text(value, "selected_model"))
             .transpose()?;
         Ok(self)
+    }
+
+    /// 设置最近一次成功健康检查时间；时间戳必须是非负 Unix 秒值。
+    pub fn with_last_successful_health_check(
+        mut self,
+        timestamp: Option<i64>,
+    ) -> Result<Self, ProfileValidationError> {
+        if timestamp.is_some_and(|value| value < 0) {
+            return Err(ProfileValidationError::InvalidField(
+                "last_successful_health_check",
+            ));
+        }
+        self.last_successful_health_check = timestamp;
+        Ok(self)
+    }
+
+    /// 设置最近一次规范化失败类别，不保存提供商原始错误文本。
+    #[must_use]
+    pub const fn with_last_failure_category(mut self, category: Option<ErrorKind>) -> Self {
+        self.last_failure_category = category;
+        self
     }
 
     /// 设置有界且不含凭据的用户备注。

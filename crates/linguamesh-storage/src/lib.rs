@@ -73,7 +73,9 @@ const PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION: &str =
 const USAGE_RECORDS_MIGRATION: &str = include_str!("../../../migrations/0032_usage_records.sql");
 const GLOSSARY_LIBRARIES_MIGRATION: &str =
     include_str!("../../../migrations/0033_glossary_libraries.sql");
-const LATEST_SCHEMA_VERSION: u32 = 33;
+const PROVIDER_PROFILE_HEALTH_MIGRATION: &str =
+    include_str!("../../../migrations/0034_provider_profile_health.sql");
+const LATEST_SCHEMA_VERSION: u32 = 34;
 /// 限制本地历史记录的数量，避免数据库无限增长。
 pub const MAX_TRANSLATION_HISTORY_ENTRIES: usize = 100;
 /// 限制单条历史记录中源文本和译文的大小。
@@ -137,6 +139,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (31, PROVIDER_PROFILE_CLIENT_CERTIFICATE_IDENTITY_MIGRATION),
     (32, USAGE_RECORDS_MIGRATION),
     (33, GLOSSARY_LIBRARIES_MIGRATION),
+    (34, PROVIDER_PROFILE_HEALTH_MIGRATION),
 ];
 
 /// 描述一条已完成且允许持久化的文本翻译历史。
@@ -1040,6 +1043,44 @@ impl Storage {
         transaction.commit().map_err(|error| map_error(&error))
     }
 
+    /// 记录一次已完成的提供商健康检查，并清除过期失败类别。
+    pub fn record_provider_health_success(
+        &mut self,
+        profile_id: &ProviderProfileId,
+        timestamp: i64,
+    ) -> Result<bool, TranslationError> {
+        if timestamp < 0 {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider health timestamps must be non-negative.",
+            ));
+        }
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE provider_profiles SET last_successful_health_check = ?1, last_failure_category = NULL WHERE id = ?2",
+                params![timestamp, profile_id.as_str()],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(changed != 0)
+    }
+
+    /// 记录一次失败的提供商健康检查，仅保存规范化错误类别。
+    pub fn record_provider_health_failure(
+        &mut self,
+        profile_id: &ProviderProfileId,
+        category: ErrorKind,
+    ) -> Result<bool, TranslationError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE provider_profiles SET last_failure_category = ?1 WHERE id = ?2",
+                params![serialize_error_kind(category), profile_id.as_str()],
+            )
+            .map_err(|error| map_error(&error))?;
+        Ok(changed != 0)
+    }
+
     /// 原子保存并激活一个已启用的提供商配置。
     pub fn save_and_activate_provider(
         &mut self,
@@ -1898,9 +1939,9 @@ fn parse_routing_profile_record(
     })
 }
 
-const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
-const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
-const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
+const PROFILE_QUERY_BY_ID: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id, p.last_successful_health_check, p.last_failure_category FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE p.id = ?1";
+const PROFILE_QUERY_ALL: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id, p.last_successful_health_check, p.last_failure_category FROM provider_profiles p LEFT JOIN provider_model_selection s ON s.provider_id = p.id ORDER BY p.display_name, p.id";
+const PROFILE_QUERY_ACTIVE: &str = "SELECT p.id, p.display_name, p.preset_id, p.adapter_type, p.base_endpoint, p.secret_ref, p.user_notes, p.organization, p.project, p.region, p.account_identifier, p.custom_headers, p.secret_custom_headers_ref, p.proxy_url, p.proxy_auth_ref, p.request_timeout_secs, p.connection_timeout_secs, p.streaming_idle_timeout_secs, p.trusted_certificates_pem, p.client_certificate_identity_ref, p.enabled, s.model_id, p.last_successful_health_check, p.last_failure_category FROM active_provider_selection a JOIN provider_profiles p ON p.id = a.provider_id LEFT JOIN provider_model_selection s ON s.provider_id = p.id WHERE a.singleton = 1";
 
 struct StoredProfile {
     id: String,
@@ -1925,6 +1966,8 @@ struct StoredProfile {
     client_certificate_identity_ref: Option<String>,
     enabled: bool,
     selected_model: Option<String>,
+    last_successful_health_check: Option<i64>,
+    last_failure_category: Option<String>,
 }
 
 impl StoredProfile {
@@ -1951,6 +1994,17 @@ impl StoredProfile {
             .map(SecretRef::parse)
             .transpose()
             .map_err(|error| map_profile_validation(&error))?;
+        let last_failure_category = self
+            .last_failure_category
+            .as_deref()
+            .map(parse_error_kind)
+            .transpose()
+            .map_err(|_| {
+                TranslationError::new(
+                    ErrorKind::Persistence,
+                    "Stored provider health category is invalid.",
+                )
+            })?;
         ProviderProfile::new(
             id,
             self.display_name,
@@ -1979,6 +2033,10 @@ impl StoredProfile {
         .map(|profile| profile.with_secret_custom_headers_ref(secret_custom_headers_ref))
         .map(|profile| profile.with_enabled(self.enabled))
         .and_then(|profile| profile.with_selected_model(self.selected_model))
+        .and_then(|profile| {
+            profile.with_last_successful_health_check(self.last_successful_health_check)
+        })
+        .map(|profile| profile.with_last_failure_category(last_failure_category))
         .map_err(|error| map_profile_validation(&error))
     }
 }
@@ -2007,6 +2065,47 @@ fn stored_profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPr
         client_certificate_identity_ref: row.get(19)?,
         enabled: row.get(20)?,
         selected_model: row.get(21)?,
+        last_successful_health_check: row.get(22)?,
+        last_failure_category: row.get(23)?,
+    })
+}
+
+fn serialize_error_kind(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::Cancelled => "cancelled",
+        ErrorKind::InvalidEndpoint => "invalid_endpoint",
+        ErrorKind::Network => "network",
+        ErrorKind::Timeout => "timeout",
+        ErrorKind::Authentication => "authentication",
+        ErrorKind::ModelUnavailable => "model_unavailable",
+        ErrorKind::MalformedResponse => "malformed_response",
+        ErrorKind::Persistence => "persistence",
+        ErrorKind::ProtocolIncompatible => "protocol_incompatible",
+        ErrorKind::InvalidConfiguration => "invalid_configuration",
+        ErrorKind::UnsupportedCapability => "unsupported_capability",
+        ErrorKind::SecretUnavailable => "secret_unavailable",
+        ErrorKind::SecureStorageUnavailable => "secure_storage_unavailable",
+        ErrorKind::Internal => "internal",
+    }
+}
+
+fn parse_error_kind(value: &str) -> Result<ErrorKind, ()> {
+    Ok(match value {
+        "cancelled" => ErrorKind::Cancelled,
+        "invalid_endpoint" => ErrorKind::InvalidEndpoint,
+        "network" => ErrorKind::Network,
+        "timeout" => ErrorKind::Timeout,
+        "authentication" => ErrorKind::Authentication,
+        "model_unavailable" => ErrorKind::ModelUnavailable,
+        "malformed_response" => ErrorKind::MalformedResponse,
+        "persistence" => ErrorKind::Persistence,
+        "protocol_incompatible" => ErrorKind::ProtocolIncompatible,
+        "invalid_configuration" => ErrorKind::InvalidConfiguration,
+        "unsupported_capability" => ErrorKind::UnsupportedCapability,
+        "secret_unavailable" => ErrorKind::SecretUnavailable,
+        "secure_storage_unavailable" => ErrorKind::SecureStorageUnavailable,
+        "internal" => ErrorKind::Internal,
+        _ => return Err(()),
     })
 }
 
@@ -2034,7 +2133,7 @@ fn upsert_profile(
     }
     transaction
         .execute(
-            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, region, account_identifier, custom_headers, secret_custom_headers_ref, proxy_url, proxy_auth_ref, request_timeout_secs, connection_timeout_secs, streaming_idle_timeout_secs, trusted_certificates_pem, client_certificate_identity_ref, preset_id, adapter_type, enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, region = excluded.region, account_identifier = excluded.account_identifier, custom_headers = excluded.custom_headers, secret_custom_headers_ref = excluded.secret_custom_headers_ref, proxy_url = excluded.proxy_url, proxy_auth_ref = excluded.proxy_auth_ref, request_timeout_secs = excluded.request_timeout_secs, connection_timeout_secs = excluded.connection_timeout_secs, streaming_idle_timeout_secs = excluded.streaming_idle_timeout_secs, trusted_certificates_pem = excluded.trusted_certificates_pem, client_certificate_identity_ref = excluded.client_certificate_identity_ref, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
+            "INSERT INTO provider_profiles (id, display_name, base_endpoint, secret_ref, user_notes, organization, project, region, account_identifier, custom_headers, secret_custom_headers_ref, proxy_url, proxy_auth_ref, request_timeout_secs, connection_timeout_secs, streaming_idle_timeout_secs, trusted_certificates_pem, client_certificate_identity_ref, preset_id, adapter_type, enabled, last_successful_health_check, last_failure_category) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23) ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name, base_endpoint = excluded.base_endpoint, secret_ref = excluded.secret_ref, user_notes = excluded.user_notes, organization = excluded.organization, project = excluded.project, region = excluded.region, account_identifier = excluded.account_identifier, custom_headers = excluded.custom_headers, secret_custom_headers_ref = excluded.secret_custom_headers_ref, proxy_url = excluded.proxy_url, proxy_auth_ref = excluded.proxy_auth_ref, request_timeout_secs = excluded.request_timeout_secs, connection_timeout_secs = excluded.connection_timeout_secs, streaming_idle_timeout_secs = excluded.streaming_idle_timeout_secs, trusted_certificates_pem = excluded.trusted_certificates_pem, client_certificate_identity_ref = excluded.client_certificate_identity_ref, preset_id = excluded.preset_id, adapter_type = excluded.adapter_type, enabled = excluded.enabled",
             params![
                 profile.id().as_str(),
                 profile.display_name(),
@@ -2061,6 +2160,8 @@ fn upsert_profile(
                 profile.preset_id(),
                 profile.adapter_type(),
                 profile.enabled(),
+                profile.last_successful_health_check(),
+                profile.last_failure_category().map(serialize_error_kind),
             ],
         )
         .map_err(|error| map_error(&error))?;
@@ -2393,7 +2494,7 @@ mod tests {
     #[test]
     fn migration_and_manual_selection_are_persistent() {
         let storage = Storage::in_memory().expect("storage");
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         storage.upsert_manual_model("manual-model").expect("insert");
         storage.set_active_model("manual-model").expect("select");
         assert_eq!(
@@ -2422,7 +2523,7 @@ mod tests {
         drop(connection);
 
         let mut storage = Storage::open(&path).expect("schema 20 migration");
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         let job = DocumentJob::from_text("route.txt", DocumentFormat::Txt, "one");
         storage
             .save_document_job("route-job", &job, DocumentJobState::Pending)
@@ -2483,7 +2584,7 @@ mod tests {
         .expect("routing profile");
         let saved = storage.save_routing_profile(&profile).expect("save");
         assert_eq!(saved.profile, profile);
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         assert_eq!(
             storage.routing_profile("safe-routing").expect("read"),
             Some(saved)
@@ -2523,7 +2624,7 @@ mod tests {
             .expect("save");
         assert_eq!(saved.id, "product-terms");
         assert_eq!(saved.glossary, glossary);
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         assert_eq!(storage.glossaries().expect("list"), vec![saved.clone()]);
         drop(storage);
 
@@ -3457,7 +3558,7 @@ trailer
             .expect("database file");
         let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         let storage = Storage::open_from_trusted_descriptor(&descriptor_path).expect("storage");
-        assert_eq!(storage.schema_version().expect("schema version"), 33);
+        assert_eq!(storage.schema_version().expect("schema version"), 34);
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
@@ -3554,7 +3655,7 @@ trailer
         drop(connection);
 
         let storage = Storage::open(&path).expect("migrated storage");
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         let id = ProviderProfileId::parse("legacy-profile").expect("profile id");
         let loaded = storage
             .provider_profile(&id)
@@ -3636,7 +3737,7 @@ trailer
         assert!(saw_canary_before_retry);
 
         let storage = Storage::open(&path).expect("checkpoint retry");
-        assert_eq!(storage.schema_version().expect("version"), 33);
+        assert_eq!(storage.schema_version().expect("version"), 34);
         for entry in fs::read_dir(directory.path()).expect("database directory") {
             let path = entry.expect("database artifact").path();
             if path.is_file() {
@@ -3802,6 +3903,45 @@ trailer
             active.secret_ref().map(SecretRef::as_str),
             Some(PERSISTENT_SECRET_REF)
         );
+    }
+
+    #[test]
+    fn provider_profile_health_round_trip_and_failure_normalization() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("profile-health.sqlite3");
+        let profile = profile("health-profile", None, Some("health-model"));
+        {
+            let mut storage = Storage::open(&path).expect("storage");
+            storage
+                .save_and_activate_provider(&profile)
+                .expect("profile");
+            assert!(
+                storage
+                    .record_provider_health_failure(profile.id(), ErrorKind::Authentication)
+                    .expect("record failure")
+            );
+            let failed = storage
+                .provider_profile(profile.id())
+                .expect("failed profile query")
+                .expect("failed profile");
+            assert_eq!(failed.last_successful_health_check(), None);
+            assert_eq!(
+                failed.last_failure_category(),
+                Some(ErrorKind::Authentication)
+            );
+            assert!(
+                storage
+                    .record_provider_health_success(profile.id(), 1_750_000_000)
+                    .expect("record success")
+            );
+        }
+        let storage = Storage::open(&path).expect("reopened storage");
+        let restored = storage
+            .provider_profile(profile.id())
+            .expect("restored profile query")
+            .expect("restored profile");
+        assert_eq!(restored.last_successful_health_check(), Some(1_750_000_000));
+        assert_eq!(restored.last_failure_category(), None);
     }
 
     #[test]
