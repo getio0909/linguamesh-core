@@ -123,6 +123,19 @@ impl FakeProviderServer {
         .await
     }
 
+    /// 启动要求 `x-api-key` 请求头的 Anthropic Messages 回环服务。
+    pub async fn start_anthropic() -> std::io::Result<Self> {
+        Self::start_with_configuration(
+            0,
+            Some(SecretValue::new("anthropic-test-key")),
+            Duration::ZERO,
+            FakeProviderFlavor::Anthropic,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// 启动要求 `api-key` 请求头的 Azure `OpenAI` 回环服务。
     pub async fn start_azure() -> std::io::Result<Self> {
         Self::start_with_configuration(
@@ -237,6 +250,7 @@ impl FakeProviderServer {
                 "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
                 post(gemini_stream),
             )
+            .route("/v1/messages", post(anthropic_messages))
             .with_state(FakeProviderState {
                 expected_token: expected_token.map(Arc::new),
                 expected_project,
@@ -323,6 +337,7 @@ enum FakeProviderFlavor {
     Ollama,
     OllamaNative,
     Gemini,
+    Anthropic,
     Azure,
     Responses,
 }
@@ -378,6 +393,47 @@ async fn gemini_stream(
         .into_response()
 }
 
+// 返回碎片化的 Anthropic Messages SSE 事件，覆盖鉴权、用量和完成标记。
+async fn anthropic_messages(
+    State(state): State<FakeProviderState>,
+    headers: HeaderMap,
+    Json(_request): Json<serde_json::Value>,
+) -> Response {
+    state.chat_request_counter.fetch_add(1, Ordering::SeqCst);
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Authentication failed.").into_response();
+    }
+    let output = stream! {
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("message_start")
+            .data(json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 8}}
+            }).to_string()));
+        for fragment in ["你好", "，", "Anthropic", "！"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            yield Ok::<Event, Infallible>(Event::default()
+                .event("content_block_delta")
+                .data(json!({
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": fragment}
+                }).to_string()));
+        }
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("message_delta")
+            .data(json!({
+                "type": "message_delta",
+                "usage": {"output_tokens": 4}
+            }).to_string()));
+        yield Ok::<Event, Infallible>(Event::default()
+            .event("message_stop")
+            .data(json!({"type": "message_stop"}).to_string()));
+    };
+    Sse::new(output)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(5)))
+        .into_response()
+}
+
 async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> Response {
     state.model_request_counter.fetch_add(1, Ordering::SeqCst);
     if !state.model_delay.is_zero() {
@@ -394,7 +450,9 @@ async fn models(State(state): State<FakeProviderState>, headers: HeaderMap) -> R
         FakeProviderFlavor::Ollama | FakeProviderFlavor::OllamaNative => json!([
             { "id": "llama3.2:latest", "object": "model", "owned_by": "ollama" }
         ]),
-        FakeProviderFlavor::Gemini | FakeProviderFlavor::Azure => json!([]),
+        FakeProviderFlavor::Gemini | FakeProviderFlavor::Anthropic | FakeProviderFlavor::Azure => {
+            json!([])
+        }
     };
     Json(json!({ "object": "list", "data": models })).into_response()
 }
@@ -491,6 +549,7 @@ async fn chat_completions(
                 ["你好", "，", "Ollama", "！"]
             }
             FakeProviderFlavor::Gemini => ["你好", "，", "Gemini", "！"],
+            FakeProviderFlavor::Anthropic => ["你好", "，", "Anthropic", "！"],
             FakeProviderFlavor::Azure => ["你好", "，", "Azure", "！"],
             FakeProviderFlavor::Responses => ["你好", "，", "Responses", "！"],
         };
@@ -560,20 +619,25 @@ async fn azure_chat_completions(
 }
 
 fn authorized(state: &FakeProviderState, headers: &HeaderMap) -> bool {
-    let token_authorized = state.expected_token.as_ref().is_none_or(|expected| {
-        if matches!(state.flavor, FakeProviderFlavor::Azure) {
-            headers
-                .get("api-key")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|value| value == expected.expose_secret())
-        } else {
-            headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.strip_prefix("Bearer "))
-                .is_some_and(|value| value == expected.expose_secret())
-        }
-    });
+    let token_authorized =
+        state
+            .expected_token
+            .as_ref()
+            .is_none_or(|expected| match state.flavor {
+                FakeProviderFlavor::Azure => headers
+                    .get("api-key")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value == expected.expose_secret()),
+                FakeProviderFlavor::Anthropic => headers
+                    .get("x-api-key")
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value == expected.expose_secret()),
+                _ => headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("Bearer "))
+                    .is_some_and(|value| value == expected.expose_secret()),
+            });
     token_authorized
         && state.expected_project.as_deref().is_none_or(|expected| {
             headers
@@ -756,6 +820,42 @@ mod tests {
             .expect("stream response");
         assert!(body.contains("Gemini"));
         assert!(body.contains("finishReason"));
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn anthropic_server_requires_api_key_and_exposes_messages_sse() {
+        let server = FakeProviderServer::start_anthropic().await.expect("server");
+        let client = reqwest::Client::new();
+        let endpoint = format!("{}messages", server.base_url());
+        let unauthorized = client
+            .post(&endpoint)
+            .json(&serde_json::json!({
+                "model": "claude-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Hello"}]
+            }))
+            .send()
+            .await
+            .expect("unauthorized request");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let response = client
+            .post(endpoint)
+            .header("x-api-key", "anthropic-test-key")
+            .header("anthropic-version", "2023-06-01")
+            .json(&serde_json::json!({
+                "model": "claude-test",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Hello"}]
+            }))
+            .send()
+            .await
+            .expect("authorized request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await.expect("stream response");
+        assert!(body.contains("content_block_delta"));
+        assert!(body.contains("Anthropic"));
+        assert!(body.contains("message_stop"));
         server.shutdown().await;
     }
 

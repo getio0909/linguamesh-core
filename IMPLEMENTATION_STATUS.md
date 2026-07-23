@@ -1,5 +1,19 @@
 # Implementation Status
 
+## 2026-07-23 — Anthropic Messages testkit transport fixture
+
+Assumption: the Linux-first protocol boundary needs a deterministic `/v1/messages` service so the
+production GTK path can be verified without commercial credentials; live Anthropic account,
+quota, and model availability remain outside this fixture.
+
+- `linguamesh-testkit` now exposes `start_anthropic()`, authenticates only with `x-api-key`, and
+  emits fragmented `content_block_delta` events plus `message_start`, usage, and `message_stop`
+  events. The regression checks unauthorized and authorized requests and confirms the expected
+  stream markers without logging the canary key.
+- The adapter's existing Messages unit coverage remains unchanged; this fixture is shared by the
+  Linux production GTK protocol-preset test. Release remains `unreleased` pending remote gates
+  and the broader cross-client acceptance matrix.
+
 ## 2026-07-23 — Linux client-certificate TLS identity checkpoint
 
 Assumption: enterprise provider endpoints may require mutual TLS; the smallest safe Linux-first

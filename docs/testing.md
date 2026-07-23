@@ -18,7 +18,9 @@ NDJSON, completion markers, and cancellation through the deterministic fixture.
 The Gemini fixture covers `/v1beta/models` filtering, fragmented Generate Content SSE candidates,
 and the terminal `finishReason` event; the Linux worker regression exercises the same fixture
 through `ProviderManager` without a credential.
-The Azure fixture covers a deployment-scoped Chat Completions path, `api-key` authentication,
+The Anthropic testkit fixture covers the `/v1/messages` Messages path, `x-api-key` authentication,
+fragmented content deltas, provider usage events, and the terminal `message_stop` marker without a
+commercial credential. The Azure fixture covers a deployment-scoped Chat Completions path, `api-key` authentication,
 the pinned API-version query, manual deployment listing, streamed fragments, and redacted
 credential handling without a commercial credential.
 The OpenAI Responses fixture covers `/v1/responses`, Bearer authentication, model discovery,
