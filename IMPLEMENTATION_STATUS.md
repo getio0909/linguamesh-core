@@ -12,8 +12,10 @@ session `SecretRef`, never stored as a profile value.
 - OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama apply reqwest rustls identities while
   retaining system roots, hostname verification, redirect blocking, and TLS verification.
 - Local `cargo fmt --all`, full workspace tests (including schema 31 migration and identity
-  rejection/round-trip tests), and provider configuration checks passed. Linux and l10n consumers
-  are being repinned at their verified commits; release remains `unreleased`.
+  rejection/round-trip tests), strict all-feature Clippy, and the repository secret-pattern scan
+  passed. Core CI/Fuzz/Native SDK runs `29978060455`/`29978060459`/`29978060500` passed for
+  `2a3534faa9a2531cbbc6cc06d325ad7c82c69394`; Linux and l10n consumers are pinned to their
+  verified revisions, and release remains `unreleased`.
 
 ## 2026-07-23 — Proxy authentication SecretRef checkpoint
 
