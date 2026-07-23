@@ -62,6 +62,13 @@ impl GeminiConfig {
         self.proxy_url = proxy_url;
         self
     }
+
+    /// 设置请求总超时。
+    #[must_use]
+    pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
 }
 
 impl fmt::Debug for GeminiConfig {

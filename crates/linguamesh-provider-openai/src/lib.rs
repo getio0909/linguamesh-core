@@ -126,6 +126,13 @@ impl AzureOpenAiConfig {
         self
     }
 
+    /// 设置请求总超时。
+    #[must_use]
+    pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
+        self
+    }
+
     /// 设置一次性内存秘密请求头 JSON。
     #[must_use]
     pub fn with_secret_custom_headers(
@@ -201,6 +208,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置请求总超时。
+    #[must_use]
+    pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
         self
     }
 
@@ -313,6 +327,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置请求总超时。
+    #[must_use]
+    pub fn with_request_timeout(mut self, request_timeout: Duration) -> Self {
+        self.request_timeout = request_timeout;
         self
     }
 
