@@ -33,6 +33,8 @@ pub struct OllamaConfig {
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
     pub connection_timeout: Duration,
+    /// 流式响应等待下一数据块的超时。
+    pub streaming_idle_timeout: Duration,
 }
 
 impl OllamaConfig {
@@ -45,6 +47,7 @@ impl OllamaConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -57,6 +60,7 @@ impl OllamaConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -80,6 +84,13 @@ impl OllamaConfig {
         self.connection_timeout = connection_timeout;
         self
     }
+
+    /// 设置流式响应空闲超时。
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
+        self.streaming_idle_timeout = streaming_idle_timeout;
+        self
+    }
 }
 
 impl fmt::Debug for OllamaConfig {
@@ -94,6 +105,7 @@ impl fmt::Debug for OllamaConfig {
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .finish()
     }
 }
@@ -105,6 +117,7 @@ pub struct OllamaProvider {
     base_url: Url,
     credential: Arc<Mutex<CredentialState>>,
     session_cancellation: CancellationToken,
+    streaming_idle_timeout: Duration,
 }
 
 enum CredentialState {
@@ -128,6 +141,7 @@ impl fmt::Debug for OllamaProvider {
             .field("base_url", &"[REDACTED]")
             .field("credential_state", &credential_state)
             .field("session_closed", &self.session_cancellation.is_cancelled())
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -162,6 +176,7 @@ impl OllamaProvider {
                     .map_or(CredentialState::NotRequired, CredentialState::Available),
             )),
             session_cancellation: CancellationToken::new(),
+            streaming_idle_timeout: config.streaming_idle_timeout,
         })
     }
 
@@ -256,6 +271,7 @@ impl OllamaProvider {
         };
         let response = ensure_success(response)?;
         let mut bytes = response.bytes_stream();
+        let streaming_idle_timeout = self.streaming_idle_timeout;
         let stream = try_stream! {
             let mut decoder = NdjsonDecoder::default();
             let mut total_bytes = 0usize;
@@ -265,7 +281,13 @@ impl OllamaProvider {
                     biased;
                     () = cancellation.cancelled() => Err(TranslationError::cancelled()),
                     () = session_cancellation.cancelled() => Err(TranslationError::cancelled()),
-                    item = bytes.next() => Ok(item),
+                    item = tokio::time::timeout(streaming_idle_timeout, bytes.next()) => match item {
+                        Ok(item) => Ok(item),
+                        Err(_) => Err(TranslationError::new(
+                            ErrorKind::Timeout,
+                            "Provider stream timed out waiting for the next chunk.",
+                        )),
+                    },
                 }?;
                 let Some(chunk) = next else { break };
                 let chunk = chunk.map_err(|error| map_reqwest_error(&error))?;

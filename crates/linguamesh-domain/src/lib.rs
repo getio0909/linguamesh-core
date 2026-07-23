@@ -346,6 +346,7 @@ pub struct ProviderProfile {
     proxy_url: Option<String>,
     request_timeout_secs: u32,
     connection_timeout_secs: u32,
+    streaming_idle_timeout_secs: u32,
     enabled: bool,
     selected_model: Option<String>,
 }
@@ -372,6 +373,10 @@ impl fmt::Debug for ProviderProfile {
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("connection_timeout_secs", &self.connection_timeout_secs)
+            .field(
+                "streaming_idle_timeout_secs",
+                &self.streaming_idle_timeout_secs,
+            )
             .field("enabled", &self.enabled)
             .field("has_selected_model", &self.selected_model.is_some())
             .finish_non_exhaustive()
@@ -409,6 +414,7 @@ impl ProviderProfile {
             proxy_url: None,
             request_timeout_secs: DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECS,
             connection_timeout_secs: DEFAULT_PROVIDER_CONNECTION_TIMEOUT_SECS,
+            streaming_idle_timeout_secs: DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS,
             enabled: true,
             selected_model: None,
         })
@@ -515,6 +521,12 @@ impl ProviderProfile {
     #[must_use]
     pub const fn connection_timeout_secs(&self) -> u32 {
         self.connection_timeout_secs
+    }
+
+    /// 返回提供商流式响应的有界空闲超时秒数。
+    #[must_use]
+    pub const fn streaming_idle_timeout_secs(&self) -> u32 {
+        self.streaming_idle_timeout_secs
     }
 
     /// 返回配置是否允许被选择。
@@ -654,6 +666,22 @@ impl ProviderProfile {
         self.connection_timeout_secs = connection_timeout_secs;
         Ok(self)
     }
+
+    /// 设置提供商流式响应的有界空闲超时秒数。
+    pub fn with_streaming_idle_timeout_secs(
+        mut self,
+        streaming_idle_timeout_secs: u32,
+    ) -> Result<Self, ProfileValidationError> {
+        if !(MIN_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS..=MAX_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS)
+            .contains(&streaming_idle_timeout_secs)
+        {
+            return Err(ProfileValidationError::InvalidField(
+                "streaming_idle_timeout_secs",
+            ));
+        }
+        self.streaming_idle_timeout_secs = streaming_idle_timeout_secs;
+        Ok(self)
+    }
 }
 
 /// 新建提供商配置时使用的安全请求超时。
@@ -668,6 +696,12 @@ pub const DEFAULT_PROVIDER_CONNECTION_TIMEOUT_SECS: u32 = 10;
 pub const MIN_PROVIDER_CONNECTION_TIMEOUT_SECS: u32 = 1;
 /// 提供商连接超时的最大秒数。
 pub const MAX_PROVIDER_CONNECTION_TIMEOUT_SECS: u32 = 120;
+/// 新建提供商配置时使用的安全流式空闲超时。
+pub const DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 60;
+/// 提供商流式空闲超时的最小秒数。
+pub const MIN_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 1;
+/// 提供商流式空闲超时的最大秒数。
+pub const MAX_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 300;
 
 /// 验证即将写入配置存储的模型标识不包含凭据形态。
 pub fn validate_model_identifier(value: &str) -> Result<(), ProfileValidationError> {
@@ -2922,6 +2956,36 @@ mod tests {
                 profile.clone().with_connection_timeout_secs(invalid),
                 Err(ProfileValidationError::InvalidField(
                     "connection_timeout_secs",
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn provider_profile_streaming_idle_timeout_is_bounded() {
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-streaming-idle-timeout").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile");
+        assert_eq!(profile.streaming_idle_timeout_secs(), 60);
+        assert_eq!(
+            profile
+                .clone()
+                .with_streaming_idle_timeout_secs(90)
+                .expect("streaming idle timeout")
+                .streaming_idle_timeout_secs(),
+            90
+        );
+        for invalid in [0, 301] {
+            assert_eq!(
+                profile.clone().with_streaming_idle_timeout_secs(invalid),
+                Err(ProfileValidationError::InvalidField(
+                    "streaming_idle_timeout_secs",
                 ))
             );
         }

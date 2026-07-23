@@ -52,6 +52,8 @@ pub struct OpenAiConfig {
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
     pub connection_timeout: Duration,
+    /// 流式响应等待下一数据块的超时。
+    pub streaming_idle_timeout: Duration,
 }
 
 /// 配置 Azure `OpenAI` Chat Completions 部署端点。
@@ -74,6 +76,8 @@ pub struct AzureOpenAiConfig {
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
     pub connection_timeout: Duration,
+    /// 流式响应等待下一数据块的超时。
+    pub streaming_idle_timeout: Duration,
 }
 
 impl AzureOpenAiConfig {
@@ -94,6 +98,7 @@ impl AzureOpenAiConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -115,6 +120,7 @@ impl AzureOpenAiConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -143,6 +149,13 @@ impl AzureOpenAiConfig {
     #[must_use]
     pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
         self.connection_timeout = connection_timeout;
+        self
+    }
+
+    /// 设置流式响应空闲超时。
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
+        self.streaming_idle_timeout = streaming_idle_timeout;
         self
     }
 
@@ -176,6 +189,7 @@ impl fmt::Debug for AzureOpenAiConfig {
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .finish()
     }
 }
@@ -194,6 +208,7 @@ impl OpenAiConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -210,6 +225,7 @@ impl OpenAiConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -238,6 +254,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
         self.connection_timeout = connection_timeout;
+        self
+    }
+
+    /// 设置流式响应空闲超时。
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
+        self.streaming_idle_timeout = streaming_idle_timeout;
         self
     }
 
@@ -285,6 +308,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .finish()
     }
 }
@@ -309,6 +333,8 @@ pub struct OpenAiResponsesConfig {
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
     pub connection_timeout: Duration,
+    /// 流式响应等待下一数据块的超时。
+    pub streaming_idle_timeout: Duration,
 }
 
 impl OpenAiResponsesConfig {
@@ -325,6 +351,7 @@ impl OpenAiResponsesConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -341,6 +368,7 @@ impl OpenAiResponsesConfig {
             proxy_url: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
+            streaming_idle_timeout: Duration::from_secs(60),
         }
     }
 
@@ -369,6 +397,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_connection_timeout(mut self, connection_timeout: Duration) -> Self {
         self.connection_timeout = connection_timeout;
+        self
+    }
+
+    /// 设置流式响应空闲超时。
+    #[must_use]
+    pub fn with_streaming_idle_timeout(mut self, streaming_idle_timeout: Duration) -> Self {
+        self.streaming_idle_timeout = streaming_idle_timeout;
         self
     }
 
@@ -416,6 +451,7 @@ impl fmt::Debug for OpenAiResponsesConfig {
             .field("has_proxy_url", &self.proxy_url.is_some())
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .finish()
     }
 }
@@ -430,6 +466,7 @@ pub struct OpenAiCompatibleProvider {
     project: Option<String>,
     custom_headers: Vec<(HeaderName, HeaderValue)>,
     session_cancellation: CancellationToken,
+    streaming_idle_timeout: Duration,
     protocol: OpenAiProtocol,
 }
 
@@ -464,6 +501,7 @@ impl fmt::Debug for OpenAiCompatibleProvider {
             .field("base_url", &"[REDACTED]")
             .field("credential_state", &credential_state)
             .field("session_closed", &self.session_cancellation.is_cancelled())
+            .field("streaming_idle_timeout", &self.streaming_idle_timeout)
             .field("protocol", &self.protocol)
             .finish_non_exhaustive()
     }
@@ -487,6 +525,7 @@ impl OpenAiCompatibleProvider {
             config.proxy_url.as_deref(),
             config.request_timeout,
             config.connection_timeout,
+            config.streaming_idle_timeout,
             OpenAiProtocol::ChatCompletions,
         )
     }
@@ -503,6 +542,7 @@ impl OpenAiCompatibleProvider {
             config.proxy_url.as_deref(),
             config.request_timeout,
             config.connection_timeout,
+            config.streaming_idle_timeout,
             OpenAiProtocol::Responses,
         )
     }
@@ -531,6 +571,7 @@ impl OpenAiCompatibleProvider {
             config.proxy_url.as_deref(),
             config.request_timeout,
             config.connection_timeout,
+            config.streaming_idle_timeout,
             OpenAiProtocol::AzureChatCompletions {
                 deployment,
                 api_version,
@@ -559,6 +600,7 @@ impl OpenAiCompatibleProvider {
         proxy_url: Option<&str>,
         request_timeout: Duration,
         connection_timeout: Duration,
+        streaming_idle_timeout: Duration,
         protocol: OpenAiProtocol,
     ) -> Result<Self, TranslationError> {
         let base_url = validated_base_url(base_url)?;
@@ -595,6 +637,7 @@ impl OpenAiCompatibleProvider {
             project,
             custom_headers,
             session_cancellation: CancellationToken::new(),
+            streaming_idle_timeout,
             protocol,
         })
     }
@@ -771,6 +814,7 @@ impl OpenAiCompatibleProvider {
         };
         let response = ensure_success(response)?;
         let mut bytes = response.bytes_stream();
+        let streaming_idle_timeout = self.streaming_idle_timeout;
         let stream = try_stream! {
             let mut chat_decoder = SseDecoder::default();
             let mut responses_decoder = ResponsesSseDecoder::default();
@@ -781,7 +825,13 @@ impl OpenAiCompatibleProvider {
                     biased;
                     () = cancellation.cancelled() => Err(TranslationError::cancelled()),
                     () = session_cancellation.cancelled() => Err(TranslationError::cancelled()),
-                    item = bytes.next() => Ok(item),
+                    item = tokio::time::timeout(streaming_idle_timeout, bytes.next()) => match item {
+                        Ok(item) => Ok(item),
+                        Err(_) => Err(TranslationError::new(
+                            ErrorKind::Timeout,
+                            "Provider stream timed out waiting for the next chunk.",
+                        )),
+                    },
                 }?;
                 let Some(chunk) = next else {
                     break;
@@ -1743,6 +1793,48 @@ mod tests {
         };
         assert_eq!(error.kind, ErrorKind::Cancelled);
         cancel_task.await.expect("cancel task");
+        stalled_server.abort();
+        let _ = stalled_server.await;
+    }
+
+    #[tokio::test]
+    async fn streaming_idle_timeout_interrupts_stalled_body() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let stalled_server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("connection");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await
+                .expect("response headers");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let provider = OpenAiCompatibleProvider::new(
+            OpenAiConfig::without_credential(format!("http://{address}/v1/"))
+                .with_streaming_idle_timeout(Duration::from_millis(25)),
+        )
+        .expect("provider");
+        let mut stream = provider
+            .translate_stream(
+                TranslationRequest::new("Hello", "zh-CN", "fake-translator"),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stream");
+        let error = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream timeout")
+            .expect("stream error event")
+            .expect_err("stalled body should time out");
+        assert_eq!(error.kind, ErrorKind::Timeout);
+        assert_eq!(
+            error.message,
+            "Provider stream timed out waiting for the next chunk."
+        );
         stalled_server.abort();
         let _ = stalled_server.await;
     }
