@@ -11,8 +11,10 @@ the smallest complete boundary is one bounded `username:password` host secret re
   session references or credential values at the persistence boundary.
 - OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama resolve the host secret once and apply
   it to the configured HTTP proxy; embedded proxy URL userinfo remains rejected.
-- Local `cargo fmt --all` and `cargo check --workspace` passed. Full tests, strict Clippy, remote
-  CI, Linux client wiring, and l10n/resource evidence remain pending; release stays `unreleased`.
+- Local `cargo fmt --all`, `cargo check --workspace`, full workspace tests (all targets/features),
+  and strict Clippy passed. Core CI/Fuzz/Native SDK runs `29975202072`/`29975202087`/`29975202129`
+  passed for this exact commit; Linux client, l10n resources, and central coordination evidence
+  are recorded in their sibling repositories. Release stays `unreleased`.
 
 ## 2026-07-23 — Provider streaming idle timeout checkpoint
 
