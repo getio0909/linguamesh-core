@@ -12,8 +12,9 @@ smallest next ProviderProfile slice; streaming-idle timeout and TLS policy remai
   value into `reqwest::ClientBuilder::connect_timeout`; request-total timeout remains independent.
 - Local `cargo fmt --all`, `cargo check --workspace --locked --offline`, full workspace tests
   (domain 50, storage 44, application 15, provider and document suites), and strict all-feature
-  Clippy passed. Linux demo-provider tests (`159 passed; 3 ignored`), strict Clippy, and l10n
-  validation also passed; remote gates and compatibility pins remain pending.
+  Clippy passed. Core CI/Fuzz/Native SDK runs `29969609373`/`29969609372`/`29969609379` passed
+  for the exact revision; Linux demo-provider tests (`159 passed; 3 ignored`), strict Clippy, and
+  l10n validation also passed.
 
 ## 2026-07-22 — ABI 1 provider metadata projection
 
