@@ -2268,6 +2268,28 @@ impl TranslationPreset {
         }
     }
 
+    /// 返回偏好美国英语地区约定与拉丁文字脚本的预设。
+    #[must_use]
+    pub fn english_us() -> Self {
+        Self {
+            id: "english_us".to_owned(),
+            regional_locale: Some("en-US".to_owned()),
+            script: Some("Latn".to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// 返回偏好中国大陆地区约定与简体中文文字脚本的预设。
+    #[must_use]
+    pub fn chinese_simplified() -> Self {
+        Self {
+            id: "chinese_simplified".to_owned(),
+            regional_locale: Some("zh-CN".to_owned()),
+            script: Some("Hans".to_owned()),
+            ..Self::default()
+        }
+    }
+
     /// 根据稳定标识返回内置预设。
     #[must_use]
     pub fn from_id(id: &str) -> Option<Self> {
@@ -2275,6 +2297,8 @@ impl TranslationPreset {
             "general" => Some(Self::general()),
             "technical" => Some(Self::technical()),
             "marketing" => Some(Self::marketing()),
+            "english_us" => Some(Self::english_us()),
+            "chinese_simplified" => Some(Self::chinese_simplified()),
             _ => None,
         }
     }
@@ -2794,6 +2818,18 @@ mod tests {
         assert_eq!(
             TranslationPreset::from_id("marketing").map(|value| value.id),
             Some("marketing".to_owned())
+        );
+        let english_us = TranslationPreset::english_us();
+        english_us.validate().expect("English regional preset");
+        assert_eq!(english_us.regional_locale.as_deref(), Some("en-US"));
+        assert_eq!(english_us.script.as_deref(), Some("Latn"));
+        let chinese_simplified = TranslationPreset::chinese_simplified();
+        chinese_simplified
+            .validate()
+            .expect("Chinese script preset");
+        assert_eq!(
+            TranslationPreset::from_id("chinese_simplified"),
+            Some(chinese_simplified)
         );
     }
 
