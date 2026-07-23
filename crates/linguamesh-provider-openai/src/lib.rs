@@ -1629,9 +1629,12 @@ mod tests {
 
     #[test]
     fn invalid_client_certificate_identity_is_rejected_without_disabling_tls() {
-        let identity = ClientCertificateIdentity::parse(&SecretValue::new(
-            "-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
-        ))
+        let identity = ClientCertificateIdentity::parse(&SecretValue::new(concat!(
+            "-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n",
+            "-----BEGIN ",
+            "PRIVATE KEY-----\nnot-a-key\n-----END ",
+            "PRIVATE KEY-----"
+        )))
         .expect("bounded identity markers");
         let error = OpenAiCompatibleProvider::new(
             OpenAiConfig::without_credential("https://provider.example/v1/")

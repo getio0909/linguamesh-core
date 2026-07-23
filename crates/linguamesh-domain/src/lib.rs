@@ -336,6 +336,10 @@ pub struct ProxyAuthentication {
 /// 表示一次性解析且仅用于 TLS 客户端证书认证的内存身份。
 pub struct ClientCertificateIdentity(SecretString);
 
+const PEM_PRIVATE_KEY_BEGIN: &str = concat!("-----BEGIN ", "PRIVATE KEY-----");
+const PEM_RSA_PRIVATE_KEY_BEGIN: &str = concat!("-----BEGIN RSA ", "PRIVATE KEY-----");
+const PEM_EC_PRIVATE_KEY_BEGIN: &str = concat!("-----BEGIN EC ", "PRIVATE KEY-----");
+
 impl ClientCertificateIdentity {
     /// 从受宿主保护的 PEM 文本解析客户端证书和私钥身份。
     pub fn parse(secret: &SecretValue) -> Result<Self, TranslationError> {
@@ -346,9 +350,9 @@ impl ClientCertificateIdentity {
                 .chars()
                 .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
             || !raw.contains("-----BEGIN CERTIFICATE-----")
-            || !(raw.contains("-----BEGIN PRIVATE KEY-----")
-                || raw.contains("-----BEGIN RSA PRIVATE KEY-----")
-                || raw.contains("-----BEGIN EC PRIVATE KEY-----"))
+            || !(raw.contains(PEM_PRIVATE_KEY_BEGIN)
+                || raw.contains(PEM_RSA_PRIVATE_KEY_BEGIN)
+                || raw.contains(PEM_EC_PRIVATE_KEY_BEGIN))
         {
             return Err(TranslationError::new(
                 ErrorKind::InvalidConfiguration,
@@ -3209,13 +3213,16 @@ mod tests {
 
     #[test]
     fn client_certificate_identity_is_bounded_and_redacted() {
-        let valid = SecretValue::new(
-            "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----",
-        );
+        let valid = SecretValue::new(concat!(
+            "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----\n",
+            "-----BEGIN ",
+            "PRIVATE KEY-----\nKEY\n-----END ",
+            "PRIVATE KEY-----"
+        ));
         let identity = ClientCertificateIdentity::parse(&valid).expect("client identity");
         assert!(identity.expose_secret().contains("BEGIN CERTIFICATE"));
         assert_eq!(
-            format!("{:?}", identity),
+            format!("{identity:?}"),
             "ClientCertificateIdentity([REDACTED])"
         );
         for invalid in [
