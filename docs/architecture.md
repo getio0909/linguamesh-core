@@ -31,6 +31,12 @@ authentication and typed SSE event names, including `response.output_text.delta`
 protected-span restoration, and redacted credential lifetimes. In-process fixtures verify wire
 shapes, not interoperability with independently running third-party services.
 
+All provider adapters normalize HTTP 429 responses to the shared `RateLimited` error category and
+retain a bounded `Retry-After` hint when present. Clients may present that hint and retry through
+their policy layer; other non-success statuses continue to use the existing authentication,
+model-unavailable, or network categories. Quota and billing semantics are intentionally not
+inferred from provider response bodies.
+
 SQLite migrations currently reach schema version 32. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV

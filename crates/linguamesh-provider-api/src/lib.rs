@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use futures_core::Stream;
 use linguamesh_domain::{
-    ModelDescriptor, TranslationError, TranslationPreset, TranslationQualityMode,
+    ErrorKind, ModelDescriptor, TranslationError, TranslationPreset, TranslationQualityMode,
     TranslationRequest, UsageRecord,
 };
 use std::pin::Pin;
@@ -37,6 +37,17 @@ pub fn retry_after_ms(value: &str) -> Option<u64> {
         deadline.duration_since(SystemTime::now()).ok()?
     };
     Some(duration.as_millis().min(60_000) as u64)
+}
+
+/// 将提供商 HTTP 状态归一化为稳定的跨客户端错误类别。
+#[must_use]
+pub const fn error_kind_for_http_status(status: u16) -> ErrorKind {
+    match status {
+        401 | 403 => ErrorKind::Authentication,
+        404 => ErrorKind::ModelUnavailable,
+        429 => ErrorKind::RateLimited,
+        _ => ErrorKind::Network,
+    }
 }
 
 /// 构建隔离不可信源文本的提供商无关提示词。
@@ -112,8 +123,11 @@ pub trait ModelProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{TRANSLATION_PROMPT_TEMPLATE_VERSION, retry_after_ms, translation_prompt};
-    use linguamesh_domain::{TranslationPreset, TranslationQualityMode};
+    use super::{
+        TRANSLATION_PROMPT_TEMPLATE_VERSION, error_kind_for_http_status, retry_after_ms,
+        translation_prompt,
+    };
+    use linguamesh_domain::{ErrorKind, TranslationPreset, TranslationQualityMode};
 
     #[test]
     fn prompt_template_is_versioned_and_delimits_untrusted_text() {
@@ -135,5 +149,13 @@ mod tests {
         assert_eq!(retry_after_ms("2"), Some(2_000));
         assert_eq!(retry_after_ms("999999"), Some(60_000));
         assert_eq!(retry_after_ms("not-a-delay"), None);
+    }
+
+    #[test]
+    fn http_status_mapping_preserves_rate_limit_and_authentication_categories() {
+        assert_eq!(error_kind_for_http_status(401), ErrorKind::Authentication);
+        assert_eq!(error_kind_for_http_status(404), ErrorKind::ModelUnavailable);
+        assert_eq!(error_kind_for_http_status(429), ErrorKind::RateLimited);
+        assert_eq!(error_kind_for_http_status(503), ErrorKind::Network);
     }
 }

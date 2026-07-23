@@ -26,6 +26,9 @@ credential handling without a commercial credential.
 The OpenAI Responses fixture covers `/v1/responses`, Bearer authentication, model discovery,
 fragmented typed SSE events, terminal `response.completed`, and redacted credential handling
 without a commercial credential.
+The shared provider-api status test covers 401 authentication, 404 model-unavailable, 429
+rate-limited, and generic network normalization; each adapter preserves the bounded `Retry-After`
+hint while using that shared mapping.
 
 Quality-mode tests cover the versioned `translation-prompt-v2` wording, stable request names, and
 mode-specific Fast/Balanced/Best directives across the shared provider helper. Engine tests verify

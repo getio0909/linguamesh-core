@@ -11,10 +11,11 @@ use linguamesh_domain::{
     UsageRecord, protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
-    ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
+    ModelProvider, TranslationStream, TranslationStreamEvent, error_kind_for_http_status,
+    retry_after_ms, translation_prompt,
 };
 use reqwest::{
-    Client, StatusCode, Url,
+    Client, Url,
     header::{HeaderMap, HeaderName, HeaderValue},
     redirect::Policy,
 };
@@ -1567,11 +1568,7 @@ fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, Tran
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(retry_after_ms);
-    let kind = match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ErrorKind::Authentication,
-        StatusCode::NOT_FOUND => ErrorKind::ModelUnavailable,
-        _ => ErrorKind::Network,
-    };
+    let kind = error_kind_for_http_status(status.as_u16());
     Err(TranslationError::new(
         kind,
         format!("Provider request failed with HTTP status {status}."),

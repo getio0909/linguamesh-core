@@ -1249,6 +1249,7 @@ const fn error_kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::Network => "network",
         ErrorKind::Timeout => "timeout",
         ErrorKind::Authentication => "authentication",
+        ErrorKind::RateLimited => "rate_limited",
         ErrorKind::ModelUnavailable => "model_unavailable",
         ErrorKind::MalformedResponse => "malformed_response",
         ErrorKind::Persistence => "persistence",

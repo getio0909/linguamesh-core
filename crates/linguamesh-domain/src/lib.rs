@@ -2781,6 +2781,8 @@ pub enum ErrorKind {
     Timeout,
     /// 提供商拒绝身份验证。
     Authentication,
+    /// 提供商暂时限制请求速率。
+    RateLimited,
     /// 模型不存在或不可用。
     ModelUnavailable,
     /// 提供商响应无法安全解析。

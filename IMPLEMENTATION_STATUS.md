@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-23 — typed provider rate-limit category
+
+Assumption: HTTP 429 is the stable cross-provider signal for temporary throttling; quota exhaustion,
+provider billing, and stable-release policy remain separate contracts.
+
+- Added `ErrorKind::RateLimited` and a shared HTTP-status normalizer used by OpenAI-compatible,
+  Anthropic, Gemini, and Ollama adapters. Existing bounded `Retry-After` parsing is preserved.
+- Persisted provider-health categories and ABI error serialization now round-trip `rate_limited`
+  without exposing provider response bodies or credentials. Release remains `unreleased`.
+- `cargo fmt --all -- --check`, `cargo check --workspace --locked --all-targets`, strict workspace
+  Clippy, and `cargo test --workspace --locked --all-targets` pass locally; the provider-api
+  mapping test covers 401, 404, 429, and generic network statuses.
+
 ## 2026-07-23 — bounded TBX glossary import
 
 Assumption: Linux is the active client priority, so Core exposes a restricted, dependency-light
