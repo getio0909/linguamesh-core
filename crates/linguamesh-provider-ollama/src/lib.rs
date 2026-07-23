@@ -6,8 +6,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
-    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
+    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, ProxyAuthentication,
+    SecretValue, TranslationError, TranslationRequest, UsageRecord,
+    protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
     ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
@@ -29,6 +30,8 @@ pub struct OllamaConfig {
     pub credential: Option<SecretValue>,
     /// 可选的不含凭据代理地址。
     pub proxy_url: Option<String>,
+    /// 可选的一次性内存代理认证。
+    pub proxy_authentication: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
@@ -47,6 +50,7 @@ impl OllamaConfig {
             base_url: base_url.into(),
             credential: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -61,6 +65,7 @@ impl OllamaConfig {
             base_url: base_url.into(),
             credential: Some(credential),
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -72,6 +77,13 @@ impl OllamaConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置一次性内存代理认证。
+    #[must_use]
+    pub fn with_proxy_authentication(mut self, proxy_authentication: Option<SecretValue>) -> Self {
+        self.proxy_authentication = proxy_authentication;
         self
     }
 
@@ -117,6 +129,10 @@ impl fmt::Debug for OllamaConfig {
                 &self.credential.as_ref().map(|_| "[REDACTED]"),
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
+            .field(
+                "has_proxy_authentication",
+                &self.proxy_authentication.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
@@ -178,9 +194,18 @@ impl OllamaProvider {
             .timeout(config.request_timeout)
             .connect_timeout(config.connection_timeout);
         if let Some(proxy_url) = config.proxy_url.as_deref() {
-            let proxy =
+            let mut proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            if let Some(secret) = config.proxy_authentication.as_ref() {
+                let credentials = ProxyAuthentication::parse(secret)?;
+                proxy = proxy.basic_auth(credentials.username(), credentials.password());
+            }
             client_builder = client_builder.proxy(proxy);
+        } else if config.proxy_authentication.is_some() {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Proxy credentials require a proxy URL.",
+            ));
         }
         if let Some(pem) = config.trusted_certificates_pem.as_deref() {
             let certificates =

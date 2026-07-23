@@ -68,10 +68,13 @@ OpenAI Chat Completions and Responses apply the remaining headers. Secret custom
 settings remain separate host/provider contracts. Region and account metadata remain adapter-neutral
 until a provider-specific contract is defined. Schema 25 persists the bounded non-secret proxy URL,
 schema 26 persists the bounded total request timeout (1–600 seconds), schema 27 persists the
-bounded connection-establishment timeout (1–120 seconds, default 10), and schema 28 persists the
-bounded streaming idle timeout (1–300 seconds, default 60). Provider adapters apply all three
-independently; the streaming idle budget resets after each received response chunk. TLS policy
-remains a separate contract.
+bounded connection-establishment timeout (1–120 seconds, default 10), schema 28 persists the
+bounded streaming idle timeout (1–300 seconds, default 60), and schema 30 persists an optional
+proxy-authentication `SecretRef`. Provider adapters apply all three timeout budgets independently;
+the streaming idle budget resets after each received response chunk. Proxy credentials are supplied
+once by the host secret broker, parsed as bounded `username:password`, applied as HTTP proxy Basic
+authentication, and never embedded in the proxy URL or stored in SQLite. TLS policy remains a
+separate contract.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional

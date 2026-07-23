@@ -55,6 +55,11 @@ output. Schema 23 migration tests round-trip canonicalized non-secret custom hea
 authentication/credential-shaped names and values, and verify the OpenAI adapter applies a safe
 custom header without replacing authentication metadata.
 
+Schema 30 migration tests round-trip only the persistent proxy-authentication `SecretRef` and
+reject session references at the storage boundary. Domain tests bound and redact parsed proxy
+credentials; application and provider fixtures verify one-time host-secret resolution and proxy
+Basic authentication without putting credentials in URLs, SQLite, or diagnostics.
+
 Routing planner tests cover Manual/Ordered/Automatic mode selection, stable quality ranking,
 explicit fallback ordering, capability filtering, privacy-sensitive remote rejection, malformed
 allow/deny lists, locale tags, zero request limits, and invalid

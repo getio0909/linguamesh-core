@@ -293,6 +293,10 @@ impl ProviderManager {
             Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
             None => None,
         };
+        let proxy_authentication = match profile.proxy_auth_ref() {
+            Some(secret_ref) => Some(self.secret_broker.resolve(secret_ref, cancellation).await?),
+            None => None,
+        };
         if cancellation.is_cancelled() {
             return Err(TranslationError::cancelled());
         }
@@ -307,6 +311,7 @@ impl ProviderManager {
                 None => OllamaConfig::without_credential(profile.base_endpoint()),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
+            .with_proxy_authentication(proxy_authentication)
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
@@ -326,6 +331,7 @@ impl ProviderManager {
                 None => AnthropicConfig::without_credential(profile.base_endpoint(), model_id),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
+            .with_proxy_authentication(proxy_authentication)
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
@@ -337,6 +343,7 @@ impl ProviderManager {
                 None => GeminiConfig::without_credential(profile.base_endpoint()),
             }
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
+            .with_proxy_authentication(proxy_authentication)
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
@@ -364,6 +371,7 @@ impl ProviderManager {
             };
             let config = config
                 .with_proxy_url(profile.proxy_url().map(str::to_owned))
+                .with_proxy_authentication(proxy_authentication)
                 .with_request_timeout(request_timeout)
                 .with_connection_timeout(connection_timeout)
                 .with_streaming_idle_timeout(streaming_idle_timeout)
@@ -385,6 +393,7 @@ impl ProviderManager {
             .with_organization(profile.organization().map(str::to_owned))
             .with_project(profile.project().map(str::to_owned))
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
+            .with_proxy_authentication(proxy_authentication)
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)
@@ -404,6 +413,7 @@ impl ProviderManager {
             .with_organization(profile.organization().map(str::to_owned))
             .with_project(profile.project().map(str::to_owned))
             .with_proxy_url(profile.proxy_url().map(str::to_owned))
+            .with_proxy_authentication(proxy_authentication)
             .with_request_timeout(request_timeout)
             .with_connection_timeout(connection_timeout)
             .with_streaming_idle_timeout(streaming_idle_timeout)

@@ -327,6 +327,66 @@ impl fmt::Debug for SecretValue {
     }
 }
 
+/// 表示一次性解析且仅用于代理认证的内存秘密。
+pub struct ProxyAuthentication {
+    username: String,
+    password: SecretString,
+}
+
+impl ProxyAuthentication {
+    /// 从受宿主保护的 `username:password` 文本解析代理认证。
+    pub fn parse(secret: &SecretValue) -> Result<Self, TranslationError> {
+        let raw = secret.expose_secret();
+        if raw.len() > MAX_PROXY_AUTHENTICATION_BYTES
+            || raw.chars().any(char::is_control)
+            || raw.contains('\0')
+        {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider proxy credentials are invalid.",
+            ));
+        }
+        let Some((username, password)) = raw.split_once(':') else {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider proxy credentials are invalid.",
+            ));
+        };
+        if username.is_empty()
+            || password.is_empty()
+            || username.len() > MAX_PROXY_AUTH_USERNAME_BYTES
+            || password.len() > MAX_PROXY_AUTH_PASSWORD_BYTES
+        {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Provider proxy credentials are invalid.",
+            ));
+        }
+        Ok(Self {
+            username: username.to_owned(),
+            password: SecretString::from(password.to_owned()),
+        })
+    }
+
+    /// 返回代理用户名。
+    #[must_use]
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// 返回仅用于构造代理认证头的密码。
+    #[must_use]
+    pub fn password(&self) -> &str {
+        self.password.expose_secret()
+    }
+}
+
+impl fmt::Debug for ProxyAuthentication {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProxyAuthentication([REDACTED])")
+    }
+}
+
 /// 描述不含任何凭据值的规范提供商配置。
 #[derive(Clone, Eq, PartialEq)]
 pub struct ProviderProfile {
@@ -344,6 +404,7 @@ pub struct ProviderProfile {
     account_identifier: Option<String>,
     custom_headers: Option<String>,
     proxy_url: Option<String>,
+    proxy_auth_ref: Option<Box<SecretRef>>,
     request_timeout_secs: u32,
     connection_timeout_secs: u32,
     streaming_idle_timeout_secs: u32,
@@ -372,6 +433,7 @@ impl fmt::Debug for ProviderProfile {
             .field("has_account_identifier", &self.account_identifier.is_some())
             .field("has_custom_headers", &self.custom_headers.is_some())
             .field("has_proxy_url", &self.proxy_url.is_some())
+            .field("has_proxy_auth_ref", &self.proxy_auth_ref.is_some())
             .field("request_timeout_secs", &self.request_timeout_secs)
             .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field(
@@ -417,6 +479,7 @@ impl ProviderProfile {
             account_identifier: None,
             custom_headers: None,
             proxy_url: None,
+            proxy_auth_ref: None,
             request_timeout_secs: DEFAULT_PROVIDER_REQUEST_TIMEOUT_SECS,
             connection_timeout_secs: DEFAULT_PROVIDER_CONNECTION_TIMEOUT_SECS,
             streaming_idle_timeout_secs: DEFAULT_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS,
@@ -515,6 +578,12 @@ impl ProviderProfile {
     #[must_use]
     pub fn proxy_url(&self) -> Option<&str> {
         self.proxy_url.as_deref()
+    }
+
+    /// 返回可选的宿主代理认证秘密引用。
+    #[must_use]
+    pub fn proxy_auth_ref(&self) -> Option<&SecretRef> {
+        self.proxy_auth_ref.as_deref()
     }
 
     /// 返回提供商请求的有界总超时秒数。
@@ -649,6 +718,13 @@ impl ProviderProfile {
         Ok(self)
     }
 
+    /// 设置只保存引用、不保存代理认证值的宿主秘密引用。
+    #[must_use]
+    pub fn with_proxy_auth_ref(mut self, secret_ref: Option<SecretRef>) -> Self {
+        self.proxy_auth_ref = secret_ref.map(Box::new);
+        self
+    }
+
     /// 设置提供商请求的有界总超时秒数。
     pub fn with_request_timeout_secs(
         mut self,
@@ -728,6 +804,13 @@ pub const MIN_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 1;
 pub const MAX_PROVIDER_STREAMING_IDLE_TIMEOUT_SECS: u32 = 300;
 /// 自定义可信证书 PEM 文本的最大字节数。
 pub const MAX_PROVIDER_TRUSTED_CERTIFICATES_PEM_BYTES: usize = 64 * 1024;
+/// 代理认证用户名的最大字节数。
+pub const MAX_PROXY_AUTH_USERNAME_BYTES: usize = 256;
+/// 代理认证密码的最大字节数。
+pub const MAX_PROXY_AUTH_PASSWORD_BYTES: usize = 4096;
+/// 代理认证秘密文本的最大字节数。
+pub const MAX_PROXY_AUTHENTICATION_BYTES: usize =
+    MAX_PROXY_AUTH_USERNAME_BYTES + 1 + MAX_PROXY_AUTH_PASSWORD_BYTES;
 
 /// 验证即将写入配置存储的模型标识不包含凭据形态。
 pub fn validate_model_identifier(value: &str) -> Result<(), ProfileValidationError> {
@@ -2541,11 +2624,11 @@ mod tests {
     use super::{
         ChunkingError, CompatibilityError, CompatibilityRequirements, CoreCompatibility, ErrorKind,
         Glossary, GlossaryCsvError, GlossaryEntry, GlossaryError, MAX_USAGE_TOKENS,
-        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId, SecretRef,
-        SecretRefNamespace, SecretValue, TranslationError, TranslationEvent, TranslationPreset,
-        TranslationPrivacyMode, TranslationQualityMode, TranslationRequest, UsageRecord,
-        UsageSource, protect_source_text, protect_source_text_with_glossary,
-        validate_non_secret_profile_field,
+        ProfileValidationError, ProtectedTextError, ProviderProfile, ProviderProfileId,
+        ProxyAuthentication, SecretRef, SecretRefNamespace, SecretValue, TranslationError,
+        TranslationEvent, TranslationPreset, TranslationPrivacyMode, TranslationQualityMode,
+        TranslationRequest, UsageRecord, UsageSource, protect_source_text,
+        protect_source_text_with_glossary, validate_non_secret_profile_field,
     };
 
     const PERSISTENT_SECRET_REF: &str = "secret-service:66666666-6666-4666-8666-666666666666";
@@ -2945,6 +3028,36 @@ mod tests {
                 .proxy_url(),
             None
         );
+    }
+
+    #[test]
+    fn proxy_authentication_is_bounded_and_redacted() {
+        let authentication = ProxyAuthentication::parse(&SecretValue::new("proxy-user:proxy-pass"))
+            .expect("proxy authentication");
+        assert_eq!(authentication.username(), "proxy-user");
+        assert_eq!(authentication.password(), "proxy-pass");
+        assert!(!format!("{authentication:?}").contains("proxy-pass"));
+        for invalid in ["missing-separator", ":password", "username:", "user\n:pass"] {
+            assert!(ProxyAuthentication::parse(&SecretValue::new(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_profile_proxy_auth_ref_is_reference_only() {
+        let profile = ProviderProfile::new(
+            ProviderProfileId::parse("profile-proxy-auth").expect("profile id"),
+            "Local provider",
+            "local-loopback",
+            "openai_chat_completions",
+            "http://127.0.0.1:11434/v1/",
+            None,
+        )
+        .expect("profile")
+        .with_proxy_auth_ref(Some(
+            SecretRef::parse(PERSISTENT_SECRET_REF).expect("secret ref"),
+        ));
+        assert!(profile.proxy_auth_ref().is_some());
+        assert!(!format!("{profile:?}").contains(PERSISTENT_SECRET_REF));
     }
 
     #[test]

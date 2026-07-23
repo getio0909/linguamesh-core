@@ -1,5 +1,19 @@
 # Implementation Status
 
+## 2026-07-23 — Proxy authentication SecretRef checkpoint
+
+Assumption: Linux needs optional proxy Basic authentication while proxy URLs remain credential-free;
+the smallest complete boundary is one bounded `username:password` host secret referenced by
+`ProviderProfile.proxy_auth_ref`, with session-only input unless the user explicitly remembers it.
+
+- Core schema 30 migration `0030_provider_profile_proxy_auth.sql` persists only a persistent
+  `SecretRef`. Domain parsing bounds and redacts the username/password pair, and storage rejects
+  session references or credential values at the persistence boundary.
+- OpenAI Chat/Responses/Azure, Anthropic, Gemini, and Ollama resolve the host secret once and apply
+  it to the configured HTTP proxy; embedded proxy URL userinfo remains rejected.
+- Local `cargo fmt --all` and `cargo check --workspace` passed. Full tests, strict Clippy, remote
+  CI, Linux client wiring, and l10n/resource evidence remain pending; release stays `unreleased`.
+
 ## 2026-07-23 — Provider streaming idle timeout checkpoint
 
 Assumption: a bounded streaming idle timeout of 1–300 seconds (default 60) is the smallest

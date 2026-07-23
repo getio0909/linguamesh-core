@@ -6,8 +6,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use linguamesh_domain::{
     ChunkingError, DEFAULT_TRANSLATION_CHUNK_BYTES, EndpointConfiguration, ErrorKind,
-    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, SecretValue,
-    TranslationError, TranslationRequest, UsageRecord, protect_source_text_with_glossary,
+    ModelDescriptor, ModelSource, ProtectedSource, ProtectedTextError, ProxyAuthentication,
+    SecretValue, TranslationError, TranslationRequest, UsageRecord,
+    protect_source_text_with_glossary,
 };
 use linguamesh_provider_api::{
     ModelProvider, TranslationStream, TranslationStreamEvent, retry_after_ms, translation_prompt,
@@ -48,6 +49,8 @@ pub struct OpenAiConfig {
     pub secret_custom_headers: Option<SecretValue>,
     /// 可选的不含凭据代理地址。
     pub proxy_url: Option<String>,
+    /// 可选的一次性内存代理认证。
+    pub proxy_authentication: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
@@ -74,6 +77,8 @@ pub struct AzureOpenAiConfig {
     pub secret_custom_headers: Option<SecretValue>,
     /// 可选的不含凭据代理地址。
     pub proxy_url: Option<String>,
+    /// 可选的一次性内存代理认证。
+    pub proxy_authentication: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
@@ -100,6 +105,7 @@ impl AzureOpenAiConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -123,6 +129,7 @@ impl AzureOpenAiConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -141,6 +148,13 @@ impl AzureOpenAiConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置一次性内存代理认证。
+    #[must_use]
+    pub fn with_proxy_authentication(mut self, proxy_authentication: Option<SecretValue>) -> Self {
+        self.proxy_authentication = proxy_authentication;
         self
     }
 
@@ -203,6 +217,10 @@ impl fmt::Debug for AzureOpenAiConfig {
                 &self.secret_custom_headers.is_some(),
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
+            .field(
+                "has_proxy_authentication",
+                &self.proxy_authentication.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
@@ -226,6 +244,7 @@ impl OpenAiConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -244,6 +263,7 @@ impl OpenAiConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -262,6 +282,13 @@ impl OpenAiConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置一次性内存代理认证。
+    #[must_use]
+    pub fn with_proxy_authentication(mut self, proxy_authentication: Option<SecretValue>) -> Self {
+        self.proxy_authentication = proxy_authentication;
         self
     }
 
@@ -338,6 +365,10 @@ impl fmt::Debug for OpenAiConfig {
                 &self.secret_custom_headers.is_some(),
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
+            .field(
+                "has_proxy_authentication",
+                &self.proxy_authentication.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
@@ -365,6 +396,8 @@ pub struct OpenAiResponsesConfig {
     pub secret_custom_headers: Option<SecretValue>,
     /// 可选的不含凭据代理地址。
     pub proxy_url: Option<String>,
+    /// 可选的一次性内存代理认证。
+    pub proxy_authentication: Option<SecretValue>,
     /// 连接和普通响应超时。
     pub request_timeout: Duration,
     /// 建立网络连接的超时。
@@ -387,6 +420,7 @@ impl OpenAiResponsesConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -405,6 +439,7 @@ impl OpenAiResponsesConfig {
             custom_headers: None,
             secret_custom_headers: None,
             proxy_url: None,
+            proxy_authentication: None,
             request_timeout: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
             streaming_idle_timeout: Duration::from_secs(60),
@@ -423,6 +458,13 @@ impl OpenAiResponsesConfig {
     #[must_use]
     pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Self {
         self.proxy_url = proxy_url;
+        self
+    }
+
+    /// 设置一次性内存代理认证。
+    #[must_use]
+    pub fn with_proxy_authentication(mut self, proxy_authentication: Option<SecretValue>) -> Self {
+        self.proxy_authentication = proxy_authentication;
         self
     }
 
@@ -499,6 +541,10 @@ impl fmt::Debug for OpenAiResponsesConfig {
                 &self.secret_custom_headers.is_some(),
             )
             .field("has_proxy_url", &self.proxy_url.is_some())
+            .field(
+                "has_proxy_authentication",
+                &self.proxy_authentication.is_some(),
+            )
             .field("request_timeout", &self.request_timeout)
             .field("connection_timeout", &self.connection_timeout)
             .field("streaming_idle_timeout", &self.streaming_idle_timeout)
@@ -577,6 +623,7 @@ impl OpenAiCompatibleProvider {
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
+            config.proxy_authentication.as_ref(),
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
@@ -595,6 +642,7 @@ impl OpenAiCompatibleProvider {
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
+            config.proxy_authentication.as_ref(),
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
@@ -625,6 +673,7 @@ impl OpenAiCompatibleProvider {
             config.custom_headers.as_deref(),
             config.secret_custom_headers.as_ref(),
             config.proxy_url.as_deref(),
+            config.proxy_authentication.as_ref(),
             config.request_timeout,
             config.connection_timeout,
             config.streaming_idle_timeout,
@@ -655,6 +704,7 @@ impl OpenAiCompatibleProvider {
         custom_headers: Option<&str>,
         secret_custom_headers: Option<&SecretValue>,
         proxy_url: Option<&str>,
+        proxy_authentication: Option<&SecretValue>,
         request_timeout: Duration,
         connection_timeout: Duration,
         streaming_idle_timeout: Duration,
@@ -678,9 +728,18 @@ impl OpenAiCompatibleProvider {
             .timeout(request_timeout)
             .connect_timeout(connection_timeout);
         if let Some(proxy_url) = proxy_url {
-            let proxy =
+            let mut proxy =
                 reqwest::Proxy::all(proxy_url).map_err(|error| map_reqwest_error(&error))?;
+            if let Some(secret) = proxy_authentication {
+                let credentials = ProxyAuthentication::parse(secret)?;
+                proxy = proxy.basic_auth(credentials.username(), credentials.password());
+            }
             client_builder = client_builder.proxy(proxy);
+        } else if proxy_authentication.is_some() {
+            return Err(TranslationError::new(
+                ErrorKind::InvalidConfiguration,
+                "Proxy credentials require a proxy URL.",
+            ));
         }
         if let Some(pem) = trusted_certificates_pem {
             let certificates =
@@ -1676,6 +1735,10 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&request);
             assert!(request.starts_with("GET http://127.0.0.1:9/v1/models HTTP/1.1"));
+            assert!(request.lines().any(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("proxy-authorization: basic ")
+            }));
             socket
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}",
@@ -1685,7 +1748,8 @@ mod tests {
         });
         let provider = OpenAiCompatibleProvider::new(
             OpenAiConfig::without_credential("http://127.0.0.1:9/v1/")
-                .with_proxy_url(Some(format!("http://{proxy_address}"))),
+                .with_proxy_url(Some(format!("http://{proxy_address}")))
+                .with_proxy_authentication(Some(SecretValue::new("proxy-user:proxy-secret"))),
         )
         .expect("provider");
         let models = tokio::time::timeout(Duration::from_secs(1), provider.list_models())
