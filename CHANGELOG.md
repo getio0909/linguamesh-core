@@ -12,5 +12,8 @@
   protocol envelopes; valid provider commands remain outside this network-free smoke.
 - Added a bounded FFI lifecycle-sequence fuzz target covering synchronized control calls, forged
   buffer descriptors, and file-lease token handling without destroying an active engine mid-sequence.
+- Added a bounded valid-command FFI fuzz target using the loopback fake provider to exercise
+  submit, streamed events, buffer ownership, terminal completion, and engine destruction without
+  commercial credentials.
 
 No stable Core release has been published.

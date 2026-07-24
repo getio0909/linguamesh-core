@@ -135,6 +135,16 @@ engine-pointer calls remain outside the safe fuzz boundary. Reproduce the smoke 
 cargo +nightly-2026-07-20 fuzz run ffi_sequences -- -runs=2000 -max_total_time=30
 ```
 
+The workflow also runs `ffi_commands` against the loopback `FakeProviderServer`. It turns bounded
+arbitrary UTF-8 source text into a valid ABI 1 `TranslateText` command, submits through the real C
+ABI, frees each event buffer, and requires exactly one terminal event before destroying the engine.
+The fixture is deterministic and credential-free; raw engine-pointer use-after-free and live
+provider behavior remain outside this target. Reproduce the smoke with:
+
+```sh
+cargo +nightly-2026-07-20 fuzz run ffi_commands -- -runs=2000 -max_total_time=30
+```
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 

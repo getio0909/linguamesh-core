@@ -12,7 +12,9 @@ libfuzzer-sys = "0.4"
 linguamesh-document = { path = "../crates/linguamesh-document" }
 linguamesh-ffi = { path = "../crates/linguamesh-ffi" }
 linguamesh-protocol = { path = "../crates/linguamesh-protocol" }
+linguamesh-testkit = { path = "../crates/linguamesh-testkit" }
 prost = "0.14.1"
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "time"] }
 
 [[bin]]
 name = "protocol_decoders"
@@ -38,6 +40,13 @@ bench = false
 [[bin]]
 name = "ffi_sequences"
 path = "fuzz_targets/ffi_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ffi_commands"
+path = "fuzz_targets/ffi_commands.rs"
 test = false
 doc = false
 bench = false

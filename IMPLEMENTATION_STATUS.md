@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-24 — Valid FFI command fuzz and local fake-provider smoke
+
+Assumption: the loopback `FakeProviderServer` is a deterministic, network-free provider fixture;
+the fuzz target bounds source text to 4 KiB and event polling to 16 events, so it does not claim
+coverage for commercial providers, live credentials, or cross-client projections.
+
+- Added the `ffi_commands` libFuzzer target. Each generated UTF-8-safe source string builds a valid
+  ABI 1 `TranslateText` envelope, submits it through `lm_engine_submit`, frees every returned
+  buffer, requires exactly one terminal event, and destroys the engine after completion.
+- Local pinned nightly smoke `cargo +nightly-2026-07-20 fuzz run ffi_commands -- -runs=200
+  -max_total_time=20` completed without a crash after 136 time-bounded iterations, reaching
+  10,653 coverage features and a 49-file minimized corpus. Stable offline workspace checks also
+  passed after the fuzz workspace added its testkit and Tokio fixture dependencies.
+- Existing `ffi_inputs` and `ffi_sequences` smokes still pass 200 iterations each without a crash;
+  valid-command fuzz remains local-fixture evidence only until the remote sanitizer and Native SDK
+  jobs complete. Raw engine-pointer use-after-free, cross-client conformance, signed artifacts,
+  rollback, and stable release remain separate gates.
+
 ## 2026-07-24 — FFI input fuzz and AddressSanitizer smoke
 
 Assumption: malformed and unsupported C ABI envelopes are the safe fuzz boundary; valid
@@ -18,8 +36,9 @@ consume provider credentials.
   and build gates. Fuzz/AddressSanitizer run `30060612978` passed protocol, document, and FFI
   targets in job `89381326908`; Native SDK run `30060612972` passed Windows `89381326909`,
   Android `89381326913`, Apple `89381326948`, and Linux `89381326956` jobs.
-- This strengthens malformed-input FFI coverage only; valid-command behavior, raw-handle misuse,
-  cross-client conformance, signed artifacts, and stable release remain separate gates.
+- This strengthens malformed-input FFI coverage; valid-command behavior now has a separate bounded
+  loopback fuzz target, while raw-handle misuse, cross-client conformance, signed artifacts, and
+  stable release remain separate gates.
 
 The follow-up `ffi_sequences` target fuzzes safe lifecycle/control-call sequences without destroying
 the active engine mid-sequence. It covers idempotent shutdown, cancellation, polling, compatibility
