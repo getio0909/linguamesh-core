@@ -50,8 +50,11 @@ rejects any symbolic-link component in ordinary database paths before migrations
 `Storage::open_from_trusted_descriptor` path accepts only `/proc/self/fd/<fd>` and is reserved for a
 host that has already opened a private regular file with no-follow flags; the Linux client pins the
 parent with `openat2(RESOLVE_NO_SYMLINKS)` before creating that descriptor. Other VFS
-implementations require platform-specific enforcement and tests; native hosts still enforce
-private directories and leaf-file metadata. See
+implementations require platform-specific enforcement and tests. A Linux storage regression now
+also exercises SQLite's bundled `unix-excl` VFS with the no-follow flag and verifies migrations,
+WAL-backed profile persistence, and symlink rejection; custom VFS and physical power-loss behavior
+remain outside that evidence. Native hosts still enforce private directories and leaf-file metadata.
+See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 
 Schema 15 adds bounded `routing_profiles` JSON persistence. Schema 16 adds an optional

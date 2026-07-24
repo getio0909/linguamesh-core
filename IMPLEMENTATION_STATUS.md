@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-24 — Linux alternate SQLite VFS regression
+
+Assumption: SQLite's bundled `unix-excl` VFS is a representative Linux alternate VFS for the
+tested storage contract; custom or third-party VFS implementations and physical power-loss
+behavior require separate evidence.
+
+- Added the Linux-only `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` regression.
+  It opens the database through `unix-excl` with `SQLITE_OPEN_NOFOLLOW`, applies the full schema
+  migration and `WAL`/`synchronous=FULL` configuration, persists a provider profile, reopens it,
+  and rejects a symbolic-link alias before migration.
+- Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
+  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`56 passed; 0 failed`).
+- This closes only the tested bundled VFS path. Physical power-loss recovery, custom/third-party
+  VFS behavior, cross-client conformance, signing, rollback, and stable release remain open.
+
 ## 2026-07-24 — ABI 1 opaque engine-handle lifetime hardening
 
 Assumption: the C ABI remains source-compatible when its opaque `LmEngine *` value becomes a

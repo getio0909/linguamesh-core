@@ -287,6 +287,22 @@ impl Storage {
     fn open_with_flags(path: impl AsRef<Path>, flags: OpenFlags) -> Result<Self, TranslationError> {
         let connection =
             Connection::open_with_flags(path, flags).map_err(|error| map_error(&error))?;
+        Self::finish_open(connection)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[cfg(test)]
+    fn open_with_vfs(path: impl AsRef<Path>, vfs: &str) -> Result<Self, TranslationError> {
+        let connection = Connection::open_with_flags_and_vfs(
+            path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            vfs,
+        )
+        .map_err(|error| map_error(&error))?;
+        Self::finish_open(connection)
+    }
+
+    fn finish_open(connection: Connection) -> Result<Self, TranslationError> {
         if current_schema_version(&connection)? > LATEST_SCHEMA_VERSION {
             return Err(TranslationError::new(
                 ErrorKind::Persistence,
@@ -3564,6 +3580,44 @@ trailer
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_exclusive_vfs_preserves_migrations_and_committed_profiles() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("unix-exclusive.sqlite3");
+        let mut storage = Storage::open_with_vfs(&path, "unix-excl").expect("storage");
+        assert_eq!(storage.schema_version().expect("schema version"), 34);
+        storage
+            .upsert_provider_profile(&profile(
+                "unix-exclusive-provider",
+                Some(PERSISTENT_SECRET_REF),
+                Some("unix-exclusive-model"),
+            ))
+            .expect("profile");
+        drop(storage);
+
+        let reopened = Storage::open_with_vfs(&path, "unix-excl").expect("reopened storage");
+        let profile_id = ProviderProfileId::parse("unix-exclusive-provider").expect("profile id");
+        assert_eq!(
+            reopened
+                .provider_profile(&profile_id)
+                .expect("profile lookup")
+                .expect("saved profile")
+                .selected_model()
+                .map(str::to_owned),
+            Some("unix-exclusive-model".to_owned())
+        );
+
+        let target = directory.path().join("symlink-target.sqlite3");
+        let link = directory.path().join("symlink-alias.sqlite3");
+        Connection::open(&target).expect("symlink target database");
+        symlink(&target, &link).expect("database symbolic link");
+        assert!(matches!(
+            Storage::open_with_vfs(&link, "unix-excl"),
+            Err(error) if error.kind == ErrorKind::Persistence
         ));
     }
 

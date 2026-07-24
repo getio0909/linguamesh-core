@@ -188,6 +188,12 @@ scenario in a child process that terminates abruptly after the commit; the paren
 database and verifies the committed profile. These are process-crash regressions, not a claim that
 every filesystem power-loss or SQLite VFS failure is covered.
 
+On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
+contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
+migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery after close/reopen,
+and symbolic-link rejection. This is evidence for that built-in alternate VFS only; custom or
+third-party VFS implementations and physical power-loss behavior remain unverified.
+
 The storage suite also migrates schema 31 to 32 and round-trips normalized usage records without
 retaining source/output text, endpoints, or credential values. It verifies provider-reported and
 locally estimated sources, sanitizes an endpoint-bearing provider identity to its stable ID, skips
