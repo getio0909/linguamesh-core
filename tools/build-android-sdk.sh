@@ -123,7 +123,9 @@ for required_class in \
     org/linguamesh/core/LinguaMeshEngine.class \
     org/linguamesh/core/NativeBridge.class \
     org/linguamesh/core/protocol/Envelope.class \
-    org/linguamesh/core/protocol/TranslateTextCommand.class; do
+    org/linguamesh/core/protocol/TranslateTextCommand.class \
+    org/linguamesh/core/protocol/SecretRequiredEvent.class \
+    org/linguamesh/core/protocol/HostSecretResponse.class; do
     if ! grep -Fqx "$required_class" <<<"$class_entries"; then
         printf 'Android AAR is missing %s.\n' "$required_class" >&2
         exit 1

@@ -3,6 +3,7 @@ package org.linguamesh.core
 import com.google.protobuf.ByteString
 import org.linguamesh.core.protocol.Envelope
 import org.linguamesh.core.protocol.FailureEvent
+import org.linguamesh.core.protocol.SecretRequiredEvent
 import org.linguamesh.core.protocol.TextDeltaEvent
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -36,6 +37,21 @@ class CoreEventTest {
         assertEquals(CoreEventKind.FAILED, failed.kind)
         assertEquals("provider", failed.errorKind)
         assertEquals("Provider rejected the request.", failed.message)
+    }
+
+    @Test
+    fun decodesTypedSecretRequestWithoutExposingProtocolType() {
+        val payload = SecretRequiredEvent.newBuilder()
+            .setRequestId("request-1")
+            .setSecretRef("provider/profile-1")
+            .build()
+        val event = decodeCoreEvent(envelope("secret_required", payload.toByteString()))
+
+        assertTrue(event is CoreEvent.SecretRequired)
+        val required = event as CoreEvent.SecretRequired
+        assertEquals(CoreEventKind.SECRET_REQUIRED, required.kind)
+        assertEquals("request-1", required.requestId)
+        assertEquals("provider/profile-1", required.secretRef)
     }
 
     @Test

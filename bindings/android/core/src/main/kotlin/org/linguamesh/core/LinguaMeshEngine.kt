@@ -3,6 +3,7 @@ package org.linguamesh.core
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import org.linguamesh.core.protocol.Envelope
+import org.linguamesh.core.protocol.HostSecretResponse
 import org.linguamesh.core.protocol.TranslateTextCommand
 import java.io.Closeable
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -34,6 +35,13 @@ enum class CoreResult(val rawValue: Int) {
         /** 从原始 ABI 值创建稳定结果。 */
         fun fromRawValue(value: Int): CoreResult = entries.firstOrNull { it.rawValue == value } ?: UNKNOWN
     }
+}
+
+/** 表示宿主对一次性秘密请求的有界处理结果。 */
+enum class HostSecretResolution(val wireValue: String) {
+    PROVIDED("provided"),
+    UNAVAILABLE("unavailable"),
+    SECURE_STORAGE_UNAVAILABLE("secure_storage_unavailable"),
 }
 
 /** 表示核心 ABI 调用失败。 */
@@ -95,6 +103,7 @@ class LinguaMeshEngine private constructor(
         organization: String? = null,
         project: String? = null,
         customHeadersJson: String? = null,
+        secretRef: String? = null,
     ) {
         val payload = TranslateTextCommand.newBuilder()
             .setEndpoint(endpoint)
@@ -102,6 +111,7 @@ class LinguaMeshEngine private constructor(
             .setSourceText(sourceText)
             .setTargetLocale(targetLocale)
             .apply {
+                secretRef?.let(::setSecretRef)
                 organization?.let(::setOrganization)
                 project?.let(::setProject)
                 customHeadersJson?.let(::setCustomHeadersJson)
@@ -156,6 +166,46 @@ class LinguaMeshEngine private constructor(
         checkResult(NativeBridge.sendHostResponse(current, response))
     }
 
+    /** 编码并发送一次性主机秘密响应，避免应用直接依赖 Protobuf 类型。 */
+    fun sendHostResponse(
+        operationId: String,
+        correlationId: String,
+        requestId: String,
+        resolution: HostSecretResolution,
+        secret: String? = null,
+    ) {
+        require(operationId.isNotBlank()) { "Operation id must not be blank." }
+        require(correlationId.isNotBlank()) { "Correlation id must not be blank." }
+        require(requestId.isNotBlank() && requestId.length <= MAX_HOST_REQUEST_ID_LENGTH) {
+            "Host secret request id is invalid."
+        }
+        val value = secret.orEmpty()
+        when (resolution) {
+            HostSecretResolution.PROVIDED -> {
+                require(value.isNotEmpty() && value.toByteArray(Charsets.UTF_8).size <= MAX_HOST_SECRET_BYTES) {
+                    "Provided host secret is invalid."
+                }
+            }
+            HostSecretResolution.UNAVAILABLE,
+            HostSecretResolution.SECURE_STORAGE_UNAVAILABLE,
+            -> require(value.isEmpty()) { "Unavailable host secret responses must not include a secret." }
+        }
+        val payload = HostSecretResponse.newBuilder()
+            .setRequestId(requestId)
+            .setResolution(resolution.wireValue)
+            .setSecret(value)
+            .build()
+        val envelope = Envelope.newBuilder()
+            .setProtocolVersion(compatibility.protocolVersion.toInt())
+            .setOperationId(operationId)
+            .setCorrelationId(correlationId)
+            .setSequence(0)
+            .setMessageType(MESSAGE_HOST_SECRET_RESPONSE)
+            .setPayload(ByteString.copyFrom(payload.toByteArray()))
+            .build()
+        sendHostResponse(envelope.toByteArray())
+    }
+
     /** 请求当前操作取消且不重试。 */
     fun cancel() = withHandle { current ->
         checkResult(NativeBridge.cancel(current))
@@ -191,6 +241,9 @@ class LinguaMeshEngine private constructor(
         const val ABI_VERSION_MAJOR: UInt = 1u
         const val PROTOCOL_VERSION: UInt = 1u
         const val MESSAGE_TRANSLATE_TEXT: String = "translate_text"
+        const val MESSAGE_HOST_SECRET_RESPONSE: String = "host_secret_response"
+        private const val MAX_HOST_REQUEST_ID_LENGTH = 128
+        private const val MAX_HOST_SECRET_BYTES = 64 * 1024
 
         /** 验证 ABI 和协议后创建引擎。 */
         fun create(

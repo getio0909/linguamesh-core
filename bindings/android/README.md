@@ -28,6 +28,8 @@ records the source revision, ABI, protocol, selected ABIs, embedded Core Rust wo
 the `package_version` field, and prerelease status; `SHA256SUMS` covers both files. The native SDK
 workflow uploads the complete set on pull requests, manual runs, and pushes to `main`.
 
-Current gap: the ABI accepts and validates raw host-response envelopes, but typed secret and file
-lease request/response messages are not implemented yet. Do not claim those flows or background
-document support from this prerelease source package.
+Typed secret request decoding and one-shot host-response encoding are now exposed through
+`CoreEvent.SecretRequired` and `sendHostResponse(...)`; the wrapper keeps the response envelope
+and Protobuf details private while the app remains responsible for resolving platform secrets.
+Typed file-lease request/response messages and background document support remain outside this
+prerelease source package.

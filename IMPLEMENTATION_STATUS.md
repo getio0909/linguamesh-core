@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-24 — typed Android host-secret transport
+
+Assumption: Android's Keystore-backed credential broker is the host of the existing Core ABI
+secret channel; typed wrapper support is the smallest cross-client slice, while Core-owned
+persistence and file-lease projections remain separate contracts.
+
+- The Android wrapper now carries `TranslateTextCommand.secret_ref`, decodes
+  `CoreEvent.SecretRequired`, and encodes bounded one-shot `HostSecretResponse` values through a
+  typed `HostSecretResolution` API without requiring application code to import Protobuf types.
+- The Android release gateway validates the requested reference against the registered profile,
+  resolves the secret once, rejects oversized or invalid UTF-8 values, clears the returned byte
+  array, and reports unavailable storage without exposing secret material in diagnostics.
+- Core Rust formatting, strict all-feature Clippy, locked offline workspace tests (including the
+  22-test FFI suite), and locked offline workspace build passed locally. The Android SDK test/AAR
+  build is pending a complete local NDK 28.2 installation and must be confirmed by hosted CI.
+- Release remains `unreleased`; Core-owned persistence, file leases, native client conformance,
+  signed artifacts, rollback, and stable-release evidence remain open.
+
 ## 2026-07-24 — Explicit source-language prompt hint
 
 Assumption: an explicit `TranslationRequest.source_locale` is a provider prompt hint, while a

@@ -3,6 +3,7 @@ package org.linguamesh.core
 import com.google.protobuf.InvalidProtocolBufferException
 import org.linguamesh.core.protocol.Envelope
 import org.linguamesh.core.protocol.FailureEvent
+import org.linguamesh.core.protocol.SecretRequiredEvent
 import org.linguamesh.core.protocol.TextDeltaEvent
 
 /** 表示无需了解 Protobuf 细节即可处理的稳定事件类别。 */
@@ -12,6 +13,7 @@ enum class CoreEventKind {
     COMPLETED,
     CANCELLED,
     FAILED,
+    SECRET_REQUIRED,
     UNKNOWN,
 }
 
@@ -60,6 +62,15 @@ sealed class CoreEvent(
         val message: String,
     ) : CoreEvent(operationId, correlationId, sequence, CoreEventKind.FAILED)
 
+    /** 请求宿主解析一次性不透明秘密引用。 */
+    data class SecretRequired(
+        override val operationId: String,
+        override val correlationId: String,
+        override val sequence: ULong,
+        val requestId: String,
+        val secretRef: String,
+    ) : CoreEvent(operationId, correlationId, sequence, CoreEventKind.SECRET_REQUIRED)
+
     /** 保留来自较新协议的未知事件以便诊断或转发。 */
     data class Unknown(
         override val operationId: String,
@@ -94,6 +105,16 @@ internal fun decodeCoreEvent(envelope: Envelope): CoreEvent {
                     event.message,
                 )
             }
+            MESSAGE_SECRET_REQUIRED -> {
+                val event = SecretRequiredEvent.parseFrom(envelope.payload)
+                CoreEvent.SecretRequired(
+                    operationId,
+                    correlationId,
+                    sequence,
+                    event.requestId,
+                    event.secretRef,
+                )
+            }
             else -> CoreEvent.Unknown(
                 operationId,
                 correlationId,
@@ -112,3 +133,4 @@ private const val MESSAGE_TEXT_DELTA = "text_delta"
 private const val MESSAGE_COMPLETED = "completed"
 private const val MESSAGE_CANCELLED = "cancelled"
 private const val MESSAGE_FAILED = "failed"
+private const val MESSAGE_SECRET_REQUIRED = "secret_required"
