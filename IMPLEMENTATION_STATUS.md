@@ -14,6 +14,10 @@ consume provider credentials.
 - Local AddressSanitizer smoke `cargo +nightly-2026-07-20 fuzz run ffi_inputs -- -runs=200
   -max_total_time=10` passed 200 runs with no crash, reaching 299 coverage features and a 29-file
   minimized corpus. The CI gate runs 2,000 iterations or 30 seconds.
+- Core CI `30060612966` passed the stable Rust 1.93.0 formatting, strict Clippy, workspace tests,
+  and build gates. Fuzz/AddressSanitizer run `30060612978` passed protocol, document, and FFI
+  targets in job `89381326908`; Native SDK run `30060612972` passed Windows `89381326909`,
+  Android `89381326913`, Apple `89381326948`, and Linux `89381326956` jobs.
 - This strengthens malformed-input FFI coverage only; valid-command behavior, raw-handle misuse,
   cross-client conformance, signed artifacts, and stable release remain separate gates.
 
