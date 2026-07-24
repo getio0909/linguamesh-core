@@ -18,7 +18,7 @@ behavior require separate evidence.
   required WAL journal mode; no schema tables are created. This is an explicit unsupported-VFS
   boundary, not a claim of `unix-dotfile` compatibility.
 - Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
-  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`57 passed; 0 failed`).
+  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`58 passed; 0 failed`).
 - This closes only the tested bundled `unix-excl` VFS path. Physical power-loss recovery,
   custom/third-party VFS behavior, cross-client conformance, signing, rollback, and stable release
   remain open.
