@@ -3632,6 +3632,26 @@ trailer
         assert!(!real_parent.join("nested.sqlite3").exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_dotfile_vfs_fails_closed_without_required_wal() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("unix-dotfile.sqlite3");
+        let Err(error) = Storage::open_with_vfs(&path, "unix-dotfile") else {
+            panic!("unix-dotfile VFS unexpectedly bypassed the required WAL mode");
+        };
+        assert_eq!(error.kind, ErrorKind::Persistence);
+        let connection = Connection::open(&path).expect("inspect rejected database");
+        let table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .expect("schema count");
+        assert_eq!(table_count, 0);
+    }
+
     #[test]
     fn manual_model_identifier_cannot_persist_a_credential() {
         const SECRET_CANARY: &str = concat!("s", "k", "-LM_MODEL_SECRET_1234567890");

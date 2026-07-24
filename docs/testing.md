@@ -194,8 +194,10 @@ migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery 
 and symbolic-link rejection for both the database file and an ancestor path component. Its companion
 `unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit` aborts a child process
 after a committed WAL transaction and verifies recovery through the same VFS. This is evidence for
-that built-in alternate VFS only; custom or third-party VFS implementations and physical power-loss
-behavior remain unverified.
+that built-in alternate VFS only. The companion `unix_dotfile_vfs_fails_closed_without_required_wal`
+probe records that SQLite's bundled `unix-dotfile` VFS is rejected before migrations when it cannot
+provide the required WAL mode; Core does not silently downgrade durability. Custom or third-party
+VFS implementations and physical power-loss behavior remain unverified.
 
 The storage suite also migrates schema 31 to 32 and round-trips normalized usage records without
 retaining source/output text, endpoints, or credential values. It verifies provider-reported and

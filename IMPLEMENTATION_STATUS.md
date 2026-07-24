@@ -13,10 +13,15 @@ behavior require separate evidence.
 - Added `unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit`, which aborts a
   child process after a committed WAL transaction and verifies profile recovery through the same
   bundled VFS.
+- Added `unix_dotfile_vfs_fails_closed_without_required_wal`, which probes the bundled
+  `unix-dotfile` VFS and verifies that Core rejects it before migrations when it cannot provide the
+  required WAL journal mode; no schema tables are created. This is an explicit unsupported-VFS
+  boundary, not a claim of `unix-dotfile` compatibility.
 - Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
   `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`57 passed; 0 failed`).
-- This closes only the tested bundled VFS path. Physical power-loss recovery, custom/third-party
-  VFS behavior, cross-client conformance, signing, rollback, and stable release remain open.
+- This closes only the tested bundled `unix-excl` VFS path. Physical power-loss recovery,
+  custom/third-party VFS behavior, cross-client conformance, signing, rollback, and stable release
+  remain open.
 
 ## 2026-07-24 — ABI 1 opaque engine-handle lifetime hardening
 
