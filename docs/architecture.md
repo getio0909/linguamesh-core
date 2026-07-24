@@ -160,6 +160,8 @@ persist the selected preset through schema 18 and reuse it after restart or retr
 The ABI owns a Tokio runtime, a bounded event channel, and at most one active operation per opaque
 engine handle. A submitted `translate_text` envelope is decoded into the same `TranslationEngine`
 used by Rust callers. A forwarding task encodes ordered domain events back into Protobuf envelopes;
-native polling never invokes arbitrary callbacks. See [native-sdk.md](native-sdk.md) for the wire
-contract and current host-service limitations. The typed Rust secret broker is not yet projected
-through `lm_engine_send_host_response`, so non-Linux wrappers cannot claim that capability.
+native polling never invokes arbitrary callbacks. The ABI emits a correlated `secret_required` event
+and accepts one bounded `host_secret_response` through `lm_engine_send_host_response`, while the
+secret value remains inside the runtime-only broker session. See [native-sdk.md](native-sdk.md) for
+the wire contract and the remaining host-service limitations, including platform secure-storage
+integration and generated typed projections.

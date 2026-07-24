@@ -100,9 +100,10 @@ component in the database path is rejected before migrations or journal configur
 implementations require platform-specific verification. Native hosts remain responsible for
 private parent directories, regular-file checks, and platform-specific file permissions.
 
-The Linux client consumes this typed Rust path directly. The C ABI projection of the secret broker
-remains future work and must not be inferred from the Rust API. Rust consumers moving from alpha 1
-must follow the
+The Linux client consumes this typed Rust path directly. ABI 1 also projects the bounded one-shot
+host-secret exchange through `lm_engine_send_host_response`; native wrappers must negotiate the
+compatibility snapshot and keep secret values runtime-only. Rust consumers moving from alpha 1 must
+follow the
 [alpha-2 source migration](docs/migrations/core-alpha-1-to-alpha-2.md).
 
 ## Native SDK foundations

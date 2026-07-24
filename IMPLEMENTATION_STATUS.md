@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-24 — C ABI host-secret documentation reconciliation
+
+Assumption: the current ABI implementation and its focused tests are authoritative for the
+one-shot host-secret boundary; documentation must not describe an already-exported function as
+future work.
+
+- `lm_engine_send_host_response` is implemented in `linguamesh-ffi` and validates the versioned
+  `HostSecretResponse`, request/operation/correlation identity, bounded resolutions, one-shot
+  delivery, replay/late responses, and runtime-only secret handling.
+- The existing FFI authenticated loopback regression, protocol tests, and wrapper call sites remain
+  the evidence for this capability. This documentation-only correction does not change the
+  functional Core revision consumed by Linux (`9e69d01cbae1ca0421923e059aa3252c4ecbe1be`), ABI,
+  protocol, or release-manifest pins.
+- Generated typed Protobuf projections, platform secure-storage integration, signed artifacts,
+  cross-client conformance, and stable-release evidence remain open; no release claim is made.
+
 ## 2026-07-24 — Linux registered custom VFS compatibility probe
 
 Assumption: a test-registered VFS alias that delegates to SQLite's already-verified `unix-excl`
