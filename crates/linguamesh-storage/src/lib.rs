@@ -87,7 +87,7 @@ pub const MAX_TRANSLATION_MEMORY_TEXT_BYTES: usize = 4 * 1024 * 1024;
 /// 翻译记忆身份中的保护策略版本。
 pub const TRANSLATION_MEMORY_PROTECTED_SPAN_POLICY: &str = "protected-spans-v1";
 /// 翻译记忆身份中的提示模板版本。
-pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "translation-prompt-v2";
+pub const TRANSLATION_MEMORY_PROMPT_TEMPLATE_VERSION: &str = "translation-prompt-v3";
 /// 限制本地可恢复文档任务的数量，避免任务队列无限增长。
 pub const MAX_DOCUMENT_JOBS: usize = 100;
 /// 限制单个文档任务的段数量，避免恶意输入制造过大元数据。

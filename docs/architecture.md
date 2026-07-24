@@ -140,7 +140,8 @@ custom protected-term system; those require explicit translation options and add
 `TranslationQualityMode` is part of the provider-neutral request contract. `Fast` asks for one direct
 pass, `Balanced` keeps one pass and applies deterministic output validation, and `Best` asks the
 model for an internal critique and revision before returning only the final translation. The shared
-`translation-prompt-v2` helper versions this wording across all built-in adapters, delimits source
+`translation-prompt-v3` helper versions this wording across all built-in adapters, carries an
+explicit source-language hint when selected, and delimits source
 content as untrusted data, and keeps protected-marker instructions explicit. Core rejects empty
 output or Unicode replacement characters before marking an operation completed; it never silently
 turns one request into multiple paid calls.

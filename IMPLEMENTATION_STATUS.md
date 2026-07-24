@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-24 — Explicit source-language prompt hint
+
+Assumption: an explicit `TranslationRequest.source_locale` is a provider prompt hint, while a
+missing source locale continues to request automatic detection; provider-specific detection
+quality and language availability remain outside this deterministic contract.
+
+- The shared `translation_prompt` helper now accepts the optional source locale and all built-in
+  OpenAI-compatible, Anthropic, Gemini, and Ollama adapters forward the request value without
+  exposing source text or credentials in diagnostics.
+- The prompt contract and translation-memory identity advance to `translation-prompt-v3`, so
+  entries created under the previous wording cannot be reused for requests with different source
+  language semantics. Tests cover both explicit hints and automatic-detection omission.
+- Release remains `unreleased`; native client conformance, generated projections, signed artifacts,
+  live-provider evidence, rollback, and stable-release gates remain open.
+
 ## 2026-07-24 — ABI status reconciliation
 
 Assumption: Core `f5b818c3598d78e7cac30604577fa8057d380737` is the current Linux-consumed runtime

@@ -340,6 +340,7 @@ impl GeminiProvider {
                     text: format!(
                         "{}\n<source>\n{}\n</source>",
                         translation_prompt(
+                            request.source_locale.as_deref(),
                             &request.target_locale,
                             request.quality_mode,
                             Some(&request.preset),

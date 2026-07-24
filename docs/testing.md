@@ -30,7 +30,8 @@ The shared provider-api status test covers 401 authentication, 404 model-unavail
 rate-limited, and generic network normalization; each adapter preserves the bounded `Retry-After`
 hint while using that shared mapping.
 
-Quality-mode tests cover the versioned `translation-prompt-v2` wording, stable request names, and
+Quality-mode tests cover the versioned `translation-prompt-v3` wording, explicit source-language
+hints, stable request names, and
 mode-specific Fast/Balanced/Best directives across the shared provider helper. Engine tests verify
 that non-empty source text cannot reach `Completed` with empty output or Unicode replacement
 characters; received deltas remain available before the typed failure. This validation is

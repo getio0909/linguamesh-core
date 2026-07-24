@@ -356,6 +356,7 @@ impl AnthropicProvider {
             max_tokens: DEFAULT_MAX_TOKENS,
             stream: true,
             system: translation_prompt(
+                request.source_locale.as_deref(),
                 &request.target_locale,
                 request.quality_mode,
                 Some(&request.preset),

@@ -956,6 +956,7 @@ impl OpenAiCompatibleProvider {
                     ResponsesInput {
                         role: "developer",
                         content: translation_prompt(
+                            request.source_locale.as_deref(),
                             &request.target_locale,
                             request.quality_mode,
                             Some(&request.preset),
@@ -981,6 +982,7 @@ impl OpenAiCompatibleProvider {
                     ChatMessage {
                         role: "system",
                         content: translation_prompt(
+                            request.source_locale.as_deref(),
                             &request.target_locale,
                             request.quality_mode,
                             Some(&request.preset),
