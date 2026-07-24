@@ -10,5 +10,7 @@
   compatibility validation.
 - Added a bounded FFI input fuzz target with AddressSanitizer coverage for malformed and unsupported
   protocol envelopes; valid provider commands remain outside this network-free smoke.
+- Added a bounded FFI lifecycle-sequence fuzz target covering synchronized control calls, forged
+  buffer descriptors, and file-lease token handling without destroying an active engine mid-sequence.
 
 No stable Core release has been published.

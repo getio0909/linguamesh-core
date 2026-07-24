@@ -45,3 +45,9 @@ jobs:
           CARGOFLAGS: --locked
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_TOOLCHAIN }}
         run: cargo fuzz run ffi_inputs -- -runs=2000 -max_total_time=30
+      - name: Run bounded FFI lifecycle fuzz smoke with AddressSanitizer
+        working-directory: fuzz
+        env:
+          CARGOFLAGS: --locked
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_TOOLCHAIN }}
+        run: cargo fuzz run ffi_sequences -- -runs=2000 -max_total_time=30

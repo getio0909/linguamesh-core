@@ -125,6 +125,16 @@ cargo +nightly-2026-07-20 fuzz run ffi_inputs -- -runs=2000 -max_total_time=30
 This is malformed-input ASAN coverage; it does not claim sanitizer-backed tests for forged raw
 handles, valid provider commands, or cross-client projections.
 
+The workflow also runs `ffi_sequences`, which fuzzes bounded lifecycle/control-call sequences on a
+valid engine: cancellation, idempotent shutdown, nonblocking polling, compatibility-buffer release,
+forged buffer descriptors, temporary file-lease token operations, and malformed host responses.
+It never destroys the engine until the sequence is complete, so use-after-free and arbitrary raw
+engine-pointer calls remain outside the safe fuzz boundary. Reproduce the smoke with:
+
+```sh
+cargo +nightly-2026-07-20 fuzz run ffi_sequences -- -runs=2000 -max_total_time=30
+```
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 

@@ -35,4 +35,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "ffi_sequences"
+path = "fuzz_targets/ffi_sequences.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

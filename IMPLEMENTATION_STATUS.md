@@ -21,6 +21,13 @@ consume provider credentials.
 - This strengthens malformed-input FFI coverage only; valid-command behavior, raw-handle misuse,
   cross-client conformance, signed artifacts, and stable release remain separate gates.
 
+The follow-up `ffi_sequences` target fuzzes safe lifecycle/control-call sequences without destroying
+the active engine mid-sequence. It covers idempotent shutdown, cancellation, polling, compatibility
+buffers, forged descriptors, file-lease token operations, and malformed host responses; arbitrary
+raw engine-pointer use-after-free remains outside the C ABI's safe caller contract. Local pinned
+nightly ASAN smoke passed 200 runs with 2,326 coverage features and a 47-file minimized corpus;
+the CI gate runs 2,000 iterations or 30 seconds.
+
 ## 2026-07-23 — typed provider rate-limit category
 
 Assumption: HTTP 429 is the stable cross-provider signal for temporary throttling; quota exhaustion,
