@@ -2474,7 +2474,7 @@ mod tests {
         TranslationPreset, TranslationPrivacyMode, TranslationQualityMode, TranslationRequest,
         UsageRecord, UsageSource,
     };
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
     #[cfg(unix)]
     use std::env;
     use std::fs;
@@ -3891,6 +3891,70 @@ trailer
             .expect("recovered profile query")
             .expect("recovered profile");
         assert_eq!(restored.selected_model(), Some("wal-crash-model"));
+        assert_eq!(
+            restored.secret_ref().map(SecretRef::as_str),
+            Some(PERSISTENT_SECRET_REF)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_UNIX_EXCL_WAL_CRASH_CHILD_PATH";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let profile = profile(
+                "unix-exclusive-wal-crash-profile",
+                Some(PERSISTENT_SECRET_REF),
+                Some("unix-exclusive-wal-crash-model"),
+            );
+            let mut storage = Storage::open_with_vfs(&path, "unix-excl").expect("child storage");
+            let reader = Connection::open_with_flags_and_vfs(
+                &path,
+                OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+                "unix-excl",
+            )
+            .expect("child reader");
+            reader
+                .execute_batch("BEGIN")
+                .expect("child reader transaction");
+            reader
+                .query_row("SELECT COUNT(*) FROM provider_profiles", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("child reader snapshot");
+            storage
+                .save_and_activate_provider(&profile)
+                .expect("child committed profile");
+            assert!(path.with_extension("sqlite3-wal").is_file());
+            std::process::abort();
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("unix-exclusive-wal-crash.sqlite3");
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .expect("spawn crash child");
+        assert!(!child.success(), "crash child unexpectedly completed");
+
+        let reopened = Storage::open_with_vfs(&path, "unix-excl").expect("recovered storage");
+        let profile_id =
+            ProviderProfileId::parse("unix-exclusive-wal-crash-profile").expect("profile id");
+        let restored = reopened
+            .provider_profile(&profile_id)
+            .expect("recovered profile query")
+            .expect("recovered profile");
+        assert_eq!(
+            restored.selected_model(),
+            Some("unix-exclusive-wal-crash-model")
+        );
         assert_eq!(
             restored.secret_ref().map(SecretRef::as_str),
             Some(PERSISTENT_SECRET_REF)

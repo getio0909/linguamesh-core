@@ -10,8 +10,11 @@ behavior require separate evidence.
   It opens the database through `unix-excl` with `SQLITE_OPEN_NOFOLLOW`, applies the full schema
   migration and `WAL`/`synchronous=FULL` configuration, persists a provider profile, reopens it,
   and rejects a symbolic-link alias before migration.
+- Added `unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit`, which aborts a
+  child process after a committed WAL transaction and verifies profile recovery through the same
+  bundled VFS.
 - Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
-  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`56 passed; 0 failed`).
+  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`57 passed; 0 failed`).
 - This closes only the tested bundled VFS path. Physical power-loss recovery, custom/third-party
   VFS behavior, cross-client conformance, signing, rollback, and stable release remain open.
 
