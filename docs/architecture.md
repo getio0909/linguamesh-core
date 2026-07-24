@@ -52,8 +52,8 @@ host that has already opened a private regular file with no-follow flags; the Li
 parent with `openat2(RESOLVE_NO_SYMLINKS)` before creating that descriptor. Other VFS
 implementations require platform-specific enforcement and tests. A Linux storage regression now
 also exercises SQLite's bundled `unix-excl` VFS with the no-follow flag and verifies migrations,
-WAL-backed profile persistence, process-crash replay, and symlink rejection; custom VFS and physical
-power-loss behavior remain outside that evidence. Native hosts still enforce private directories and
+WAL-backed profile persistence, process-crash replay, and rejection of both file and ancestor-path
+symlinks; custom VFS and physical power-loss behavior remain outside that evidence. Native hosts still enforce private directories and
 leaf-file metadata.
 See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).

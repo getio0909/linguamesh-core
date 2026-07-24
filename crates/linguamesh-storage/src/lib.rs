@@ -3619,6 +3619,17 @@ trailer
             Storage::open_with_vfs(&link, "unix-excl"),
             Err(error) if error.kind == ErrorKind::Persistence
         ));
+
+        let real_parent = directory.path().join("real-parent");
+        let parent_alias = directory.path().join("parent-alias");
+        fs::create_dir(&real_parent).expect("real parent directory");
+        symlink(&real_parent, &parent_alias).expect("parent symbolic link");
+        let nested_path = parent_alias.join("nested.sqlite3");
+        assert!(matches!(
+            Storage::open_with_vfs(&nested_path, "unix-excl"),
+            Err(error) if error.kind == ErrorKind::Persistence
+        ));
+        assert!(!real_parent.join("nested.sqlite3").exists());
     }
 
     #[test]

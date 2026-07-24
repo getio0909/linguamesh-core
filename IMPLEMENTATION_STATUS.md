@@ -9,7 +9,7 @@ behavior require separate evidence.
 - Added the Linux-only `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` regression.
   It opens the database through `unix-excl` with `SQLITE_OPEN_NOFOLLOW`, applies the full schema
   migration and `WAL`/`synchronous=FULL` configuration, persists a provider profile, reopens it,
-  and rejects a symbolic-link alias before migration.
+  and rejects both a symbolic-link database alias and a symbolic-link parent path before migration.
 - Added `unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit`, which aborts a
   child process after a committed WAL transaction and verifies profile recovery through the same
   bundled VFS.

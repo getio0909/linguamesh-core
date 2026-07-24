@@ -191,7 +191,7 @@ every filesystem power-loss or SQLite VFS failure is covered.
 On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
 contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
 migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery after close/reopen,
-and symbolic-link rejection. Its companion
+and symbolic-link rejection for both the database file and an ancestor path component. Its companion
 `unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit` aborts a child process
 after a committed WAL transaction and verifies recovery through the same VFS. This is evidence for
 that built-in alternate VFS only; custom or third-party VFS implementations and physical power-loss
