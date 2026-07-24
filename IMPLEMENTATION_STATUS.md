@@ -16,6 +16,19 @@ future work.
 - Generated typed Protobuf projections, platform secure-storage integration, signed artifacts,
   cross-client conformance, and stable-release evidence remain open; no release claim is made.
 
+## 2026-07-24 — Core storage and document documentation reconciliation
+
+Assumption: the current storage migration list and document-codec tests are authoritative; public
+architecture/testing text must describe the implemented schema and bounded archive surface.
+
+- Updated Core architecture/testing documentation from schema 32 and text-only archive wording to
+  the current schema 34 surface, including schema 33 glossary libraries, schema 34 provider-health
+  metadata, and bounded DOCX/PPTX/XLSX/EPUB/text-PDF codecs.
+- Clarified that multi-job queue presentation remains a native-client responsibility and that this
+  documentation update does not claim cross-client parity, physical recovery, signed artifacts, or
+  stable-release readiness.
+- No Rust, ABI, protocol, functional pin, or release-manifest component revision changed.
+
 ## 2026-07-24 — Linux registered custom VFS compatibility probe
 
 Assumption: a test-registered VFS alias that delegates to SQLite's already-verified `unix-excl`

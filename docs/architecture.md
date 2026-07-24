@@ -37,7 +37,7 @@ their policy layer; other non-success statuses continue to use the existing auth
 model-unavailable, or network categories. Quota and billing semantics are intentionally not
 inferred from provider response bodies.
 
-SQLite migrations currently reach schema version 32. Schema 2 adds provider preset/adapter/enabled
+SQLite migrations currently reach schema version 34. Schema 2 adds provider preset/adapter/enabled
 state, active-provider selection, and per-profile last-model selection; later migrations add bounded
 translation history, optional translation-memory policy/entries, and bounded TXT/Markdown/SRT/WebVTT/CSV
 document jobs with segment snapshots. The migrations are transactional,
@@ -95,8 +95,9 @@ and private-key identity for the connection, and adapters pass it to rustls with
 verification. Schema 32 adds the non-secret `usage_records` table. Completed standard translations
 write the normalized usage source and bounded token counts atomically with history, while storing
 only a sanitized provider ID and model ID. Incognito and disabled-history requests do not create
-usage rows; history deletion and cleanup delete corresponding usage metadata. TLS policy remains a
-separate contract.
+usage rows; history deletion and cleanup delete corresponding usage metadata. Schema 33 adds
+bounded persistent glossary libraries and schema 34 adds normalized provider-health metadata. TLS
+policy remains a separate contract.
 
 The `linguamesh-document` crate is the first `bounded_text_document_v1` document-codec contract. It recognizes
 UTF-8 TXT, Markdown, SRT, WebVTT, and CSV names, enforces a 4 MiB input/output bound, strips an optional
@@ -110,8 +111,9 @@ values; schema 7 adds a transactionally migrated paused state, and schema 8 adds
 non-secret document translation options; schema 9 expands the stored format check for CSV and the
 subtitle codecs. Linux worker startup restores pending/running/paused jobs
 and exposes explicit segment/state commands; resume/retry reuses the saved provider/model/glossary
-or reconnects the saved routing profile when one is recorded. Archive formats and a multi-job GUI
-queue remain future work.
+or reconnects the saved routing profile when one is recorded. The current bounded codec contract
+also includes DOCX, PPTX, XLSX, EPUB, and text-based PDF package handling; multi-job queue
+presentation remains a native-client responsibility rather than a Core promise.
 
 `linguamesh-engine::core_compatibility` reports Core semantic version, ABI major, protocol version,
 bundled provider-catalog version, and stable enabled-feature identifiers. Clients compare every

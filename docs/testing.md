@@ -1,6 +1,6 @@
 # Testing
 
-Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-9 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, quality-mode persistence, and restart recovery without persisting paths or credential values. Schema 15 routing-profile tests cover bounded JSON persistence, validation, listing, deletion, and the absence of endpoint or credential fields.
+Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-14 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, archive-package persistence, quality-mode persistence, and restart recovery without persisting paths or credential values. Schema 15-to-34 tests cover routing profiles, glossary libraries, usage records, client-certificate identity references, and provider-health metadata without credential values.
 
 OOXML document tests also reject encrypted, symlinked, duplicate, traversal, and suspiciously
 compressed ZIP entries before XML inspection. DOCX, PPTX, and XLSX packages enforce the 4 MiB and
@@ -209,8 +209,9 @@ profile reopen, and retains no-follow symbolic-link rejection. This is evidence 
 registration and callback wiring only; it does not qualify arbitrary third-party VFS behavior or
 physical power-loss recovery.
 
-The storage suite also migrates schema 31 to 32 and round-trips normalized usage records without
-retaining source/output text, endpoints, or credential values. It verifies provider-reported and
+The storage suite also migrates schema 31 through 34 and round-trips normalized usage records,
+glossary libraries, and provider-health metadata without retaining source/output text, endpoints,
+or credential values. It verifies provider-reported and
 locally estimated sources, sanitizes an endpoint-bearing provider identity to its stable ID, skips
 Incognito writes, and removes usage rows with history deletion and clear operations. Pricing is not
 calculated from these records.
