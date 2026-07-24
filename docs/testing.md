@@ -113,6 +113,18 @@ The `Fuzz and sanitizers` workflow runs the same bounded smoke on every Core pus
 The production workspace remains pinned to stable Rust 1.93.0; nightly is isolated to this fuzz
 harness and is not used for release artifacts.
 
+The same workflow also runs the `ffi_inputs` target through the real C ABI submit boundary. The
+target reuses one engine, bounds input at 1 MiB, skips valid translation envelopes to avoid
+provider/network work, and accepts only documented malformed, incompatible, unsupported, or busy
+result codes. Reproduce the local smoke with:
+
+```sh
+cargo +nightly-2026-07-20 fuzz run ffi_inputs -- -runs=2000 -max_total_time=30
+```
+
+This is malformed-input ASAN coverage; it does not claim sanitizer-backed tests for forged raw
+handles, valid provider commands, or cross-client projections.
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 

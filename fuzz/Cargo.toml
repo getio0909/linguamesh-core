@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 linguamesh-document = { path = "../crates/linguamesh-document" }
+linguamesh-ffi = { path = "../crates/linguamesh-ffi" }
 linguamesh-protocol = { path = "../crates/linguamesh-protocol" }
 prost = "0.14.1"
 
@@ -23,6 +24,13 @@ bench = false
 [[bin]]
 name = "document_decoders"
 path = "fuzz_targets/document_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ffi_inputs"
+path = "fuzz_targets/ffi_inputs.rs"
 test = false
 doc = false
 bench = false

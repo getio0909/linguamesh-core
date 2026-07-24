@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-24 — FFI input fuzz and AddressSanitizer smoke
+
+Assumption: malformed and unsupported C ABI envelopes are the safe fuzz boundary; valid
+`TranslateText` envelopes are skipped so the harness cannot create arbitrary network traffic or
+consume provider credentials.
+
+- Added the `ffi_inputs` libFuzzer target to the isolated `fuzz/` workspace. It reuses one real
+  `lm_engine_create` handle, sends bounded arbitrary bytes through `lm_engine_submit`, asserts the
+  controlled rejection result set, and leaves valid translation commands to the existing provider
+  fixtures.
+- Local `cargo +nightly-2026-07-20 check --manifest-path fuzz/Cargo.toml --offline` passed.
+- Local AddressSanitizer smoke `cargo +nightly-2026-07-20 fuzz run ffi_inputs -- -runs=200
+  -max_total_time=10` passed 200 runs with no crash, reaching 299 coverage features and a 29-file
+  minimized corpus. The CI gate runs 2,000 iterations or 30 seconds.
+- This strengthens malformed-input FFI coverage only; valid-command behavior, raw-handle misuse,
+  cross-client conformance, signed artifacts, and stable release remain separate gates.
+
 ## 2026-07-23 — typed provider rate-limit category
 
 Assumption: HTTP 429 is the stable cross-provider signal for temporary throttling; quota exhaustion,
