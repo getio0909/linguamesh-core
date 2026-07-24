@@ -145,6 +145,14 @@ provider behavior remain outside this target. Reproduce the smoke with:
 cargo +nightly-2026-07-20 fuzz run ffi_commands -- -runs=2000 -max_total_time=30
 ```
 
+The workflow also runs `ffi_handles`, which destroys an engine at arbitrary points and continues
+calling control, polling, compatibility, and repeated-destroy entry points through the stale opaque
+address. The handle registry must reject calls after destroy without dereferencing freed memory.
+
+```sh
+cargo +nightly-2026-07-20 fuzz run ffi_handles -- -runs=2000 -max_total_time=30
+```
+
 Run `bash tools/test-native-sdk-fake-provider.sh` to verify that the standalone loopback provider
 reports a usable endpoint, serves the deterministic model catalog, and shuts down cleanly.
 

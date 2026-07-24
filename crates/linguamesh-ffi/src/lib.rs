@@ -25,8 +25,8 @@ use std::io::Read;
 use std::os::fd::BorrowedFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -109,6 +109,13 @@ pub struct LmEngine {
     next_file_lease_id: AtomicU64,
 }
 
+static ENGINE_REGISTRY: OnceLock<Mutex<HashMap<usize, Arc<LmEngine>>>> = OnceLock::new();
+static NEXT_ENGINE_HANDLE: AtomicUsize = AtomicUsize::new(1);
+
+fn engine_registry() -> &'static Mutex<HashMap<usize, Arc<LmEngine>>> {
+    ENGINE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// 创建新的不透明引擎句柄。
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lm_engine_create(output: *mut *mut LmEngine) -> LmResultCode {
@@ -127,7 +134,7 @@ pub unsafe extern "C" fn lm_engine_create(output: *mut *mut LmEngine) -> LmResul
             return LmResultCode::Internal;
         };
         let (event_sender, events) = mpsc::channel(EVENT_QUEUE_CAPACITY);
-        let engine = Box::new(LmEngine {
+        let engine = Arc::new(LmEngine {
             shutdown: AtomicBool::new(false),
             runtime,
             event_sender,
@@ -140,8 +147,17 @@ pub unsafe extern "C" fn lm_engine_create(output: *mut *mut LmEngine) -> LmResul
             next_buffer_allocation_id: AtomicU64::new(1),
             next_file_lease_id: AtomicU64::new(1),
         });
+        let handle_id = loop {
+            let candidate = NEXT_ENGINE_HANDLE.fetch_add(1, Ordering::Relaxed);
+            if candidate != 0 {
+                break candidate;
+            }
+        };
+        let handle = handle_id as *mut LmEngine;
+        lock_unpoisoned(engine_registry()).insert(handle as usize, engine);
+        // 句柄是注册表中的单调不重复令牌，不会被解引用，也不会产生悬空地址。
         // SAFETY：调用方提供了经过非空验证且可写的输出指针。
-        unsafe { output.write(Box::into_raw(engine)) };
+        unsafe { output.write(handle) };
         LmResultCode::Ok
     })
 }
@@ -391,7 +407,7 @@ pub unsafe extern "C" fn lm_engine_file_lease_consume_document(
         let Ok(source_name) = std::str::from_utf8(source_name) else {
             return LmResultCode::InvalidArgument;
         };
-        consume_document_bytes(engine, lease_id, source_name, document)
+        consume_document_bytes(&engine, lease_id, source_name, document)
     })
 }
 
@@ -454,7 +470,7 @@ pub unsafe extern "C" fn lm_engine_file_lease_consume_posix_document(
         if document.len() > MAX_DOCUMENT_BYTES {
             return LmResultCode::InvalidArgument;
         }
-        consume_document_bytes(engine, lease_id, source_name, &document)
+        consume_document_bytes(&engine, lease_id, source_name, &document)
     })
 }
 
@@ -519,8 +535,10 @@ pub unsafe extern "C" fn lm_engine_submit(
             Ok(envelope) => envelope,
             Err(code) => return code,
         };
-        // SAFETY：解码成功证明句柄非空且在本次调用期间有效。
-        let engine = unsafe { &*engine };
+        // SAFETY：解码成功证明句柄在注册表中仍然有效。
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
         engine.submit(&envelope)
     })
 }
@@ -538,8 +556,10 @@ pub unsafe extern "C" fn lm_engine_send_host_response(
             Ok(envelope) => envelope,
             Err(code) => return code,
         };
-        // SAFETY：解码成功证明句柄非空且在本次调用期间有效。
-        let engine = unsafe { &*engine };
+        // SAFETY：解码成功证明句柄在注册表中仍然有效。
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
         engine.send_host_response(&envelope)
     })
 }
@@ -636,13 +656,13 @@ pub unsafe extern "C" fn lm_engine_destroy(engine: *mut LmEngine) -> LmResultCod
         if engine.is_null() {
             return LmResultCode::InvalidArgument;
         }
-        // SAFETY：调用方必须仅传入由 lm_engine_create 返回且尚未销毁的句柄。
-        let engine = unsafe { Box::from_raw(engine) };
+        let Some(engine) = lock_unpoisoned(engine_registry()).remove(&(engine as usize)) else {
+            return LmResultCode::InvalidArgument;
+        };
         engine.shutdown.store(true, Ordering::Release);
         if let Some(active) = lock_unpoisoned(&engine.active).as_ref() {
             active.cancellation.cancel();
         }
-        drop(engine);
         LmResultCode::Ok
     })
 }
@@ -1262,12 +1282,15 @@ const fn error_kind_name(kind: ErrorKind) -> &'static str {
     }
 }
 
-unsafe fn engine_ref<'a>(engine: *mut LmEngine) -> Option<&'a LmEngine> {
+unsafe fn engine_ref(engine: *mut LmEngine) -> Option<Arc<LmEngine>> {
     if engine.is_null() {
         None
     } else {
-        // SAFETY：非空句柄的生命周期由调用方保证覆盖本次同步调用。
-        Some(unsafe { &*engine })
+        Some(
+            lock_unpoisoned(engine_registry())
+                .get(&(engine as usize))?
+                .clone(),
+        )
     }
 }
 
@@ -1315,7 +1338,7 @@ fn ffi_guard(operation: impl FnOnce() -> LmResultCode) -> LmResultCode {
 mod tests {
     use super::{
         LmBuffer, LmEngine, LmResultCode, MAX_DOCUMENT_BYTES, MAX_FILE_LEASES,
-        MAX_OUTSTANDING_BUFFERS, MAX_PROTOCOL_MESSAGE_BYTES, lm_engine_buffer_free,
+        MAX_OUTSTANDING_BUFFERS, MAX_PROTOCOL_MESSAGE_BYTES, engine_ref, lm_engine_buffer_free,
         lm_engine_cancel, lm_engine_create, lm_engine_destroy,
         lm_engine_file_lease_consume_document, lm_engine_file_lease_consume_posix_document,
         lm_engine_file_lease_create_desktop_path, lm_engine_file_lease_create_posix_descriptor,
@@ -1357,6 +1380,77 @@ mod tests {
         assert_eq!(unsafe { lm_engine_shutdown(engine) }, LmResultCode::Ok);
         // SAFETY：句柄由本测试创建且只销毁一次。
         assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+    }
+
+    #[test]
+    fn destroyed_handles_are_rejected_without_dereferencing_stale_memory() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        // SAFETY：句柄由本测试创建且只销毁一次。
+        assert_eq!(unsafe { lm_engine_destroy(engine) }, LmResultCode::Ok);
+
+        let mut output = LmBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+            capacity: 0,
+            allocation_id: 0,
+        };
+        // SAFETY：已销毁句柄只用于验证注册表的拒绝路径。
+        assert_eq!(
+            unsafe { lm_engine_cancel(engine) },
+            LmResultCode::InvalidArgument
+        );
+        // SAFETY：已销毁句柄只用于验证注册表的拒绝路径。
+        assert_eq!(
+            unsafe { lm_engine_poll_event(engine, 0, &raw mut output) },
+            LmResultCode::InvalidArgument
+        );
+        // SAFETY：已销毁句柄只用于验证重复销毁的拒绝路径。
+        assert_eq!(
+            unsafe { lm_engine_destroy(engine) },
+            LmResultCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn concurrent_destroy_and_control_calls_are_fail_closed() {
+        let mut engine: *mut LmEngine = ptr::null_mut();
+        // SAFETY：测试提供有效的输出指针并遵循句柄所有权协议。
+        assert_eq!(
+            unsafe { lm_engine_create(&raw mut engine) },
+            LmResultCode::Ok
+        );
+        let address = engine as usize;
+        let workers = (0..8)
+            .map(|index| {
+                thread::spawn(move || {
+                    let engine = address as *mut LmEngine;
+                    if index == 0 {
+                        // SAFETY：多个线程竞争销毁时，注册表只允许一个线程取得所有权。
+                        unsafe { lm_engine_destroy(engine) }
+                    } else {
+                        // SAFETY：控制调用通过注册表取得独立的 Arc 保活状态。
+                        unsafe { lm_engine_cancel(engine) }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            let result = worker.join().expect("concurrent engine handle call");
+            assert!(matches!(
+                result,
+                LmResultCode::Ok | LmResultCode::InvalidArgument | LmResultCode::Shutdown
+            ));
+        }
+        // SAFETY：重复销毁只验证墓碑句柄的拒绝路径。
+        assert_eq!(
+            unsafe { lm_engine_destroy(engine) },
+            LmResultCode::InvalidArgument
+        );
     }
 
     #[test]
@@ -1522,8 +1616,9 @@ mod tests {
             buffers.push(buffer);
         }
         // SAFETY：句柄有效，测试只读取受互斥锁保护的分配数量。
+        let engine_state = unsafe { engine_ref(engine) }.expect("engine registry entry");
         assert_eq!(
-            lock_unpoisoned(&unsafe { &*engine }.buffer_allocations).len(),
+            lock_unpoisoned(&engine_state.buffer_allocations).len(),
             MAX_OUTSTANDING_BUFFERS
         );
         let mut overflow = LmBuffer {
@@ -1563,8 +1658,9 @@ mod tests {
         );
         buffers.push(replacement);
         // SAFETY：句柄有效，测试只读取受互斥锁保护的分配数量。
+        let engine_state = unsafe { engine_ref(engine) }.expect("engine registry entry");
         assert_eq!(
-            lock_unpoisoned(&unsafe { &*engine }.buffer_allocations).len(),
+            lock_unpoisoned(&engine_state.buffer_allocations).len(),
             MAX_OUTSTANDING_BUFFERS
         );
         for mut buffer in buffers {
@@ -2622,8 +2718,10 @@ mod tests {
         output: &mut LmBuffer,
         bytes: Vec<u8>,
     ) -> LmResultCode {
-        // SAFETY：调用方保证句柄由本库创建且在本次调用期间有效。
-        let engine = unsafe { &*engine };
+        // SAFETY：调用方保证句柄在注册表中仍然有效。
+        let Some(engine) = (unsafe { engine_ref(engine) }) else {
+            return LmResultCode::InvalidArgument;
+        };
         let Ok(buffer_slot) = engine.reserve_buffer_slot() else {
             return LmResultCode::ResourceExhausted;
         };

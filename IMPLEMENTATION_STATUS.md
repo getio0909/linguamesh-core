@@ -1,5 +1,26 @@
 # Implementation Status
 
+## 2026-07-24 — ABI 1 opaque engine-handle lifetime hardening
+
+Assumption: the C ABI remains source-compatible when its opaque `LmEngine *` value becomes a
+registry token; clients never dereference the handle, and worker shutdown coordination remains a
+caller responsibility.
+
+- Replaced raw `Box<LmEngine>` pointer dereferences with a process-local `Arc` registry keyed by
+  monotonic opaque handle tokens. Calls that already acquired a registry entry keep the state alive
+  during concurrent destroy; stale, forged, and repeated-destroy handles fail closed without
+  dereferencing freed memory.
+- Added regression coverage for stale handles and concurrent destroy/control calls. The FFI suite
+  now passes 22 tests, including the existing buffer, lease, protocol, secret, and cancellation
+  checks. The new `ffi_handles` AddressSanitizer target destroys an engine at arbitrary points and
+  completed 1,068 time-bounded iterations locally without a crash or leak report (coverage peaked at
+  2,120 features); CI runs 2,000 iterations or 30 seconds.
+- Updated the ABI migration, native SDK contract, fuzz workflow, and testing guidance. Local
+  `cargo fmt --all -- --check`, fuzz-workspace bin check, strict FFI Clippy, full locked offline
+  workspace tests, and `bash tools/test-native-sdk.sh` passed. Release remains `unreleased`; native
+  client close/worker coordination, cross-client conformance, signed artifacts, rollback, and
+  stable-release evidence remain separate gates.
+
 ## 2026-07-24 — Valid FFI command fuzz and local fake-provider smoke
 
 Assumption: the loopback `FakeProviderServer` is a deterministic, network-free provider fixture;

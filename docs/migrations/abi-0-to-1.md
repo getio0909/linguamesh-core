@@ -15,6 +15,9 @@ registry. Native clients must make these changes:
    every buffer must be released before destroying that engine.
 5. Handle `LM_RESULT_RESOURCE_EXHAUSTED` when an engine already owns 64 outstanding buffers. Release
    a buffer before polling again.
+6. Treat `LM_RESULT_INVALID_ARGUMENT` after destroy as the expected result for stale or repeated
+   engine-handle calls. ABI 1 keeps opaque handle tombstones so rejected calls never dereference a
+   freed engine address; callers must still coordinate worker shutdown before destroy.
 
 The Protobuf protocol remains at version 1. Command and event payloads are unchanged by this ABI
 migration.

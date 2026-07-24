@@ -57,3 +57,9 @@ jobs:
           CARGOFLAGS: --locked
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_TOOLCHAIN }}
         run: cargo fuzz run ffi_commands -- -runs=2000 -max_total_time=30
+      - name: Run bounded stale FFI handle fuzz smoke with AddressSanitizer
+        working-directory: fuzz
+        env:
+          CARGOFLAGS: --locked
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_TOOLCHAIN }}
+        run: cargo fuzz run ffi_handles -- -runs=2000 -max_total_time=30
