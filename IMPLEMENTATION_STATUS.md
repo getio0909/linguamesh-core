@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-24 — ABI status reconciliation
+
+Assumption: Core `f5b818c3598d78e7cac30604577fa8057d380737` is the current Linux-consumed runtime
+revision; this correction aligns the historical release audit with the implemented ABI surface and
+does not change source or dependency behavior.
+
+- The ABI 1 file-lease surface is implemented and tested: engine-scoped numeric tokens cover
+  desktop/temporary/output paths, POSIX descriptors, Android parcel descriptors, Windows handles,
+  bounded document consumption, one-shot consumption, expiration, revocation, and cleanup.
+- Bounded FFI fuzz coverage is implemented for malformed inputs, safe lifecycle/control sequences,
+  valid loopback commands, and opaque handle lifetime; sanitizer-backed misuse of unjoined raw
+  callers remains outside the ABI contract.
+- Generated Swift/C++ projections, remaining platform symbol/package/distribution work, signed
+  artifacts, cross-platform conformance, and stable-release evidence remain open.
+
 ## 2026-07-24 — Linux alternate SQLite VFS regression
 
 Assumption: SQLite's bundled `unix-excl` VFS is a representative Linux alternate VFS for the
@@ -1030,9 +1045,9 @@ Not verified or not implemented:
 - Swift and Xcode are unavailable locally. The remote Apple job validates the wrapper,
   XCFramework, and universal archive, but client application linkage, signing, symbols,
   notarization, and distribution remain separate gates.
-- C ABI file-lease capabilities, generated Swift and
-  C++ Protobuf types, sanitizer/fuzz coverage, Android/Apple symbol
-  bundles, SBOMs, immutable release checksums, and cross-platform conformance remain incomplete.
+- Generated Swift and C++ Protobuf types, Android/Apple symbol bundles, SBOMs, immutable release
+  checksums, and cross-platform conformance remain incomplete; the bounded ABI file-lease and
+  sanitizer/fuzz surfaces are covered by the current status entries above.
 - Engine-handle forgery, stale-handle use, repeated destruction, and destruction racing unjoined
   raw callers remain outside the ABI-major-1 contract and lack sanitizer-backed misuse tests.
 - The Windows job emitted a non-blocking GitHub Actions annotation because the pinned
