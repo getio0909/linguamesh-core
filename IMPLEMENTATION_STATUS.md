@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-24 — Linux registered custom VFS compatibility probe
+
+Assumption: a test-registered VFS alias that delegates to SQLite's already-verified `unix-excl`
+implementation is the smallest reproducible custom-registration boundary; it does not represent
+an arbitrary third-party VFS or physical power-loss behavior.
+
+- Added the Linux-only `registered_custom_vfs_preserves_migrations_and_profile_reopen` regression.
+  It registers a distinct VFS name at runtime, opens the full Core storage contract through that
+  name, verifies schema migration and provider-profile reopen, and preserves the existing
+  `SQLITE_OPEN_NOFOLLOW` symbolic-link rejection.
+- The focused host-pinned Rust 1.93.0 test passed:
+  `cargo +1.93.0 test -p linguamesh-storage registered_custom_vfs --locked --offline`
+  (`1 passed; 0 failed`).
+- This advances custom VFS registration evidence without claiming compatibility with arbitrary
+  third-party implementations. Physical power-loss recovery, broader VFS behavior, cross-client
+  conformance, signing, rollback, and stable release remain open.
+
 ## 2026-07-24 — typed Android host-secret transport
 
 Assumption: Android's Keystore-backed credential broker is the host of the existing Core ABI
@@ -68,6 +85,9 @@ behavior require separate evidence.
 - Added `unix_none_vfs_fails_closed_without_required_wal`, applying the same pre-migration
   fail-closed check to SQLite's non-locking `unix-none` VFS; the rejected database remains free of
   schema tables.
+- Added `registered_custom_vfs_preserves_migrations_and_profile_reopen`, which registers a
+  distinct test VFS name backed by the reviewed `unix-excl` operations and verifies migration,
+  profile reopen, and no-follow alias rejection through that registered name.
 - Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
   `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`59 passed; 0 failed`).
 - This closes only the tested bundled `unix-excl` VFS path. Physical power-loss recovery,

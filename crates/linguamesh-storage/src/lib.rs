@@ -2487,6 +2487,8 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(unix)]
     use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::sync::OnceLock;
     use tempfile::tempdir;
     use zip::ZipArchive;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -3580,6 +3582,74 @@ trailer
         assert!(matches!(
             Storage::open_from_trusted_descriptor(&path),
             Err(error) if error.kind == ErrorKind::InvalidConfiguration
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn registered_custom_vfs_name() -> &'static str {
+        static VFS_NAME: OnceLock<&'static str> = OnceLock::new();
+
+        // 注册测试专用的 VFS 名称并复用已验证的 unix-excl 操作实现。
+        VFS_NAME.get_or_init(|| unsafe {
+            let source_name = std::ffi::CString::new("unix-excl").expect("source VFS name");
+            let source = rusqlite::ffi::sqlite3_vfs_find(source_name.as_ptr());
+            assert!(!source.is_null(), "bundled unix-excl VFS is unavailable");
+
+            let name =
+                std::ffi::CString::new("linguamesh-custom-test-vfs").expect("custom VFS name");
+            let name = Box::leak(name.into_boxed_c_str());
+            let mut custom = Box::new(*source);
+            custom.pNext = std::ptr::null_mut();
+            custom.zName = name.as_ptr();
+            let custom = Box::into_raw(custom);
+            assert_eq!(
+                rusqlite::ffi::sqlite3_vfs_register(custom, 0),
+                rusqlite::ffi::SQLITE_OK,
+                "custom VFS registration failed"
+            );
+            name.to_str().expect("custom VFS name is UTF-8")
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_custom_vfs_preserves_migrations_and_profile_reopen() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("registered-custom-vfs.sqlite3");
+        let vfs = registered_custom_vfs_name();
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("custom VFS storage");
+        assert_eq!(storage.schema_version().expect("schema version"), 34);
+        storage
+            .upsert_provider_profile(&profile(
+                "registered-custom-vfs-provider",
+                Some(PERSISTENT_SECRET_REF),
+                Some("registered-custom-vfs-model"),
+            ))
+            .expect("profile");
+        drop(storage);
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened custom VFS storage");
+        let profile_id =
+            ProviderProfileId::parse("registered-custom-vfs-provider").expect("profile id");
+        assert_eq!(
+            reopened
+                .provider_profile(&profile_id)
+                .expect("profile lookup")
+                .expect("saved profile")
+                .selected_model()
+                .map(str::to_owned),
+            Some("registered-custom-vfs-model".to_owned())
+        );
+
+        let target = directory
+            .path()
+            .join("registered-custom-vfs-target.sqlite3");
+        let link = directory.path().join("registered-custom-vfs-alias.sqlite3");
+        Connection::open(&target).expect("symlink target database");
+        symlink(&target, &link).expect("database symbolic link");
+        assert!(matches!(
+            Storage::open_with_vfs(&link, vfs),
+            Err(error) if error.kind == ErrorKind::Persistence
         ));
     }
 

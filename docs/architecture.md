@@ -57,6 +57,10 @@ symlinks. The bundled `unix-dotfile` VFS is explicitly rejected before migration
 provide the required WAL mode, preventing a silent durability downgrade. Custom VFS and physical
 power-loss behavior remain outside that evidence. Native hosts still enforce private directories and
 leaf-file metadata.
+The Linux storage tests also register a distinct custom VFS name that delegates to the reviewed
+`unix-excl` operations, then verify migration, profile reopen, and no-follow alias rejection through
+that registration. This exercises registration and callback wiring only; arbitrary third-party VFS
+semantics and physical power-loss behavior remain unqualified.
 See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 

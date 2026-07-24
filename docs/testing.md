@@ -202,6 +202,13 @@ provide the required WAL mode; Core does not silently downgrade durability. The 
 non-locking `unix-none` VFS. Custom or third-party
 VFS implementations and physical power-loss behavior remain unverified.
 
+The Linux-only `registered_custom_vfs_preserves_migrations_and_profile_reopen` regression registers
+a distinct SQLite VFS name at runtime while delegating to the reviewed `unix-excl` operations. It
+then opens the full storage contract through the registered name, verifies migrations and provider
+profile reopen, and retains no-follow symbolic-link rejection. This is evidence for custom VFS
+registration and callback wiring only; it does not qualify arbitrary third-party VFS behavior or
+physical power-loss recovery.
+
 The storage suite also migrates schema 31 to 32 and round-trips normalized usage records without
 retaining source/output text, endpoints, or credential values. It verifies provider-reported and
 locally estimated sources, sanitizes an endpoint-bearing provider identity to its stable ID, skips
