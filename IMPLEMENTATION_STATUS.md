@@ -17,8 +17,11 @@ behavior require separate evidence.
   `unix-dotfile` VFS and verifies that Core rejects it before migrations when it cannot provide the
   required WAL journal mode; no schema tables are created. This is an explicit unsupported-VFS
   boundary, not a claim of `unix-dotfile` compatibility.
+- Added `unix_none_vfs_fails_closed_without_required_wal`, applying the same pre-migration
+  fail-closed check to SQLite's non-locking `unix-none` VFS; the rejected database remains free of
+  schema tables.
 - Focused and full storage validation passed with the host-pinned Rust 1.93.0 command:
-  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`58 passed; 0 failed`).
+  `cargo +1.93.0 test -p linguamesh-storage --locked --offline` (`59 passed; 0 failed`).
 - This closes only the tested bundled `unix-excl` VFS path. Physical power-loss recovery,
   custom/third-party VFS behavior, cross-client conformance, signing, rollback, and stable release
   remain open.
