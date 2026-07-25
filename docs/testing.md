@@ -1,5 +1,19 @@
 # Testing
 
+## CLI acceptance smoke
+
+The reference CLI's deterministic fake-provider demo is the local evidence for Scenario 1. Run
+it with the pinned toolchain and no network or credential:
+
+```sh
+cargo +1.93.0 run --locked --offline -p linguamesh-cli -- \
+  demo --text 'Hello, LinguaMesh!' --target zh-CN
+```
+
+The command must list the fake models, select `fake-translator`, print streamed translated output,
+and finish with `Translation completed.`. The cancellation path can be checked with
+`--model fake-slow-translator --cancel-after-ms 20`; it must finish with `Translation cancelled.`.
+
 Default tests use only local deterministic fixtures and the loopback fake provider. They must not require commercial credentials or the public internet. Provider contract tests cover fragmented SSE and Ollama NDJSON, split UTF-8, malformed messages, disconnects, errors, response limits, and cancellation. Persistence tests use isolated temporary or in-memory SQLite databases. Document persistence tests cover schema 6-to-14 migration, bounded job/segment snapshots, exact segment updates, structural-segment protection, SRT/WebVTT timestamp validation, CSV quoting and selected-column reconstruction, pause persistence, validated non-secret option round trips, archive-package persistence, quality-mode persistence, and restart recovery without persisting paths or credential values. Schema 15-to-34 tests cover routing profiles, glossary libraries, usage records, client-certificate identity references, and provider-health metadata without credential values.
 
 OOXML document tests also reject encrypted, symlinked, duplicate, traversal, and suspiciously

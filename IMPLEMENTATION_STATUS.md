@@ -1,5 +1,18 @@
 # Implementation Status
 
+## 2026-07-25 — Core CLI acceptance recheck
+
+Assumption: the deterministic loopback fake-provider CLI is authoritative for Scenario 1 and
+requires no commercial credentials or external network access.
+
+- With Core `1a13b2b7a97876ff55963a5d34b360f607d66a0f` checked out, Rust 1.93.0 ran
+  `cargo +1.93.0 run --locked --offline -p linguamesh-cli -- demo --text 'Hello, LinguaMesh!' --target zh-CN`.
+- The CLI discovered `fake-translator` and `fake-slow-translator`, selected `fake-translator`,
+  emitted the streamed output `你好，LinguaMesh！`, and completed successfully.
+- The cancellation path also ran with `fake-slow-translator` and `--cancel-after-ms 20`; it
+  emitted the cancellation terminal result without a credential or retry. This recheck does not
+  claim native-client parity or stable-release evidence.
+
 ## 2026-07-25 — Linux uncommitted transaction crash rollback
 
 Assumption: an abrupt Unix process termination during an uncommitted SQLite transaction must not
