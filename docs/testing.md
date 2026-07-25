@@ -189,6 +189,12 @@ scenario in a child process that terminates abruptly after the commit; the paren
 database and verifies the committed profile. These are process-crash regressions, not a claim that
 every filesystem power-loss or SQLite VFS failure is covered.
 
+The Unix `document_job_wal_replay_survives_process_termination_after_segment_commit` regression
+applies the same boundary to document work: a child commits the first translated segment of a
+two-segment job, terminates abruptly while the WAL is retained, and the parent reopens the database
+to verify that the job remains resumable with the committed segment intact. This is bounded
+process-crash evidence, not physical power-loss recovery or arbitrary-VFS compatibility.
+
 On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
 contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
 migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery after close/reopen,

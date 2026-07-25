@@ -1,5 +1,23 @@
 # Implementation Status
 
+## 2026-07-25 — Document-job WAL replay after abrupt process termination
+
+Assumption: a committed document segment that remains in SQLite's WAL must be recoverable after an
+abrupt Unix process termination; this strengthens process-crash evidence but does not emulate
+physical power loss or qualify every SQLite VFS.
+
+- Added `document_job_wal_replay_survives_process_termination_after_segment_commit`. A child test
+  process persists a two-segment text job, commits the first translated segment while a reader
+  holds the WAL snapshot, aborts, and the parent reopens the database.
+- The recovery assertion verifies the job is still `Running`, the first segment retains its
+  translated text, and the second segment remains pending.
+- Focused storage validation passed (`1 passed; 0 failed`). Full Core validation passed with
+  rustfmt, strict all-target/all-feature Clippy, locked offline workspace tests (`61` storage
+  tests; all workspace test targets passed), and locked offline workspace build.
+- This test-only Core hardening does not change the functional Linux Core pin or release manifest;
+  physical power-loss, arbitrary third-party VFS, signing, rollback, and stable-release gates
+  remain open.
+
 ## 2026-07-24 — C ABI host-secret documentation reconciliation
 
 Assumption: the current ABI implementation and its focused tests are authoritative for the

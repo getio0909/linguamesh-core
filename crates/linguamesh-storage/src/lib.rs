@@ -4018,6 +4018,61 @@ trailer
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn document_job_wal_replay_survives_process_termination_after_segment_commit() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_DOCUMENT_JOB_WAL_CRASH_CHILD_PATH";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let mut storage = Storage::open(&path).expect("child storage");
+            let reader = Connection::open(&path).expect("child reader");
+            reader
+                .execute_batch("BEGIN")
+                .expect("child reader transaction");
+            reader
+                .query_row("SELECT COUNT(*) FROM document_jobs", [], |row| {
+                    row.get::<_, u32>(0)
+                })
+                .expect("child reader snapshot");
+            let job = DocumentJob::from_text("notes.txt", DocumentFormat::Txt, "one\ntwo");
+            storage
+                .save_document_job("document-wal-crash", &job, DocumentJobState::Pending)
+                .expect("child document job");
+            storage
+                .update_document_segment("document-wal-crash", 0, "一")
+                .expect("child committed segment");
+            assert!(path.with_extension("sqlite3-wal").is_file());
+            std::process::abort();
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("document-job-wal-crash.sqlite3");
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::document_job_wal_replay_survives_process_termination_after_segment_commit",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .expect("spawn crash child");
+        assert!(!child.success(), "crash child unexpectedly completed");
+
+        let reopened = Storage::open(&path).expect("recovered storage");
+        let restored = reopened
+            .document_job("document-wal-crash")
+            .expect("recovered document job query")
+            .expect("recovered document job");
+        assert_eq!(restored.state, DocumentJobState::Running);
+        assert_eq!(restored.job.pending_count(), 1);
+        assert_eq!(
+            restored.job.segments[0].translated_text.as_deref(),
+            Some("一")
+        );
+        assert!(restored.job.segments[1].translated_text.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit() {
