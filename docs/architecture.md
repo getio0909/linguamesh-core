@@ -63,6 +63,10 @@ that registration. This exercises registration and callback wiring only; arbitra
 semantics and physical power-loss behavior remain unqualified. A separate Linux-only fault fixture
 temporarily makes the registered VFS reject database opens, verifies that Core fails closed, and
 then verifies that a previously committed profile remains intact after the VFS recovers.
+Another Linux-only fixture replaces the registered VFS synchronization callback, requires a typed
+persistence error at commit time, and verifies that the committed baseline survives while the
+transient profile is absent after reopen. These are bounded test-VFS fault probes, not claims for
+arbitrary third-party VFS implementations or physical power-loss recovery.
 The default Linux VFS also has a child-process rollback fixture: writes made inside an uncommitted
 transaction are discarded after abrupt termination, while the previously committed active profile
 remains intact on the next open. A companion parent-controlled SIGKILL fixture waits until the

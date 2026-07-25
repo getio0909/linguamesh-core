@@ -2493,7 +2493,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     use std::sync::OnceLock;
     #[cfg(target_os = "linux")]
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
@@ -2506,6 +2506,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     static REGISTERED_FAULT_VFS_REJECT_OPEN: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_METHODS: OnceLock<usize> = OnceLock::new();
 
     fn profile(id: &str, secret_ref: Option<&str>, model: Option<&str>) -> ProviderProfile {
         ProviderProfile::new(
@@ -3672,12 +3678,182 @@ trailer
     }
 
     #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_lines)]
+    fn registered_sync_fault_vfs_name() -> &'static str {
+        static VFS_NAME: OnceLock<&'static str> = OnceLock::new();
+
+        VFS_NAME.get_or_init(|| unsafe {
+            // 注册测试专用的 VFS 名称，并只替换底层文件的同步回调。
+            unsafe extern "C" fn close_with_sync_fault(
+                file: *mut rusqlite::ffi::sqlite3_file,
+            ) -> std::os::raw::c_int {
+                if file.is_null() {
+                    return rusqlite::ffi::SQLITE_IOERR_CLOSE;
+                }
+                let offset = REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET.load(Ordering::SeqCst);
+                if offset == 0 {
+                    return rusqlite::ffi::SQLITE_IOERR_CLOSE;
+                }
+                let mut original_address = 0usize;
+                // 从扩展的 sqlite3_file 尾部读取底层 VFS 的原始方法表地址。
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        file.cast::<u8>().add(offset),
+                        (&raw mut original_address).cast::<u8>(),
+                        std::mem::size_of::<usize>(),
+                    );
+                }
+                let original = original_address as *const rusqlite::ffi::sqlite3_io_methods;
+                let Some(close) = (unsafe { original.as_ref() }).and_then(|methods| methods.xClose)
+                else {
+                    return rusqlite::ffi::SQLITE_IOERR_CLOSE;
+                };
+                // 原始关闭实现可能依赖 file->pMethods 指向原始方法表。
+                unsafe {
+                    (*file).pMethods = original;
+                    close(file)
+                }
+            }
+
+            unsafe extern "C" fn fail_sync(
+                file: *mut rusqlite::ffi::sqlite3_file,
+                flags: std::os::raw::c_int,
+            ) -> std::os::raw::c_int {
+                if REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.load(Ordering::SeqCst) {
+                    return rusqlite::ffi::SQLITE_IOERR_FSYNC;
+                }
+                if file.is_null() {
+                    return rusqlite::ffi::SQLITE_IOERR_FSYNC;
+                }
+                let offset = REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET.load(Ordering::SeqCst);
+                if offset == 0 {
+                    return rusqlite::ffi::SQLITE_IOERR_FSYNC;
+                }
+                let mut original_address = 0usize;
+                // 从扩展的 sqlite3_file 尾部读取底层 VFS 的原始方法表地址。
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        file.cast::<u8>().add(offset),
+                        (&raw mut original_address).cast::<u8>(),
+                        std::mem::size_of::<usize>(),
+                    );
+                }
+                let original = original_address as *const rusqlite::ffi::sqlite3_io_methods;
+                if original.is_null() {
+                    return rusqlite::ffi::SQLITE_IOERR_FSYNC;
+                }
+                let Some(sync) = (unsafe { (*original).xSync }) else {
+                    return rusqlite::ffi::SQLITE_IOERR_FSYNC;
+                };
+                // 原始同步实现可能依赖 file->pMethods 指向原始方法表。
+                let custom = *REGISTERED_SYNC_FAULT_VFS_METHODS
+                    .get()
+                    .expect("sync fault methods initialized")
+                    as *const rusqlite::ffi::sqlite3_io_methods;
+                let result = unsafe {
+                    (*file).pMethods = original;
+                    sync(file, flags)
+                };
+                // 将未注入故障的调用转发后恢复测试方法表。
+                unsafe {
+                    (*file).pMethods = custom;
+                }
+                result
+            }
+
+            unsafe extern "C" fn open_with_sync_fault(
+                vfs: *mut rusqlite::ffi::sqlite3_vfs,
+                z_name: *const std::os::raw::c_char,
+                file: *mut rusqlite::ffi::sqlite3_file,
+                flags: std::os::raw::c_int,
+                out_flags: *mut std::os::raw::c_int,
+            ) -> std::os::raw::c_int {
+                if vfs.is_null() || file.is_null() {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                }
+                // 读取该测试 VFS 保存的 unix-excl 实现指针。
+                let source = unsafe { (*vfs).pAppData.cast::<rusqlite::ffi::sqlite3_vfs>() };
+                if source.is_null() {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                }
+                let Some(open) = (unsafe { (*source).xOpen }) else {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                };
+                let result = unsafe { open(source, z_name, file, flags, out_flags) };
+                if result != rusqlite::ffi::SQLITE_OK {
+                    return result;
+                }
+                let original = unsafe { (*file).pMethods };
+                if original.is_null() {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                }
+                let Ok(offset) = usize::try_from(unsafe { (*source).szOsFile }) else {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                };
+                REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET.store(offset, Ordering::SeqCst);
+                let original_address = original as usize;
+                // 在 SQLite 为该 VFS 分配的尾部空间保存原始方法表地址。
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        (&raw const original_address).cast::<u8>(),
+                        file.cast::<u8>().add(offset),
+                        std::mem::size_of::<usize>(),
+                    );
+                }
+                let methods = *REGISTERED_SYNC_FAULT_VFS_METHODS.get_or_init(|| {
+                    let mut methods = unsafe { Box::new(*original) };
+                    methods.xClose = Some(close_with_sync_fault);
+                    methods.xSync = Some(fail_sync);
+                    Box::into_raw(methods) as usize
+                });
+                // 让 SQLite 后续 I/O 走带有同步故障注入的测试方法表。
+                unsafe {
+                    (*file).pMethods = methods as *const rusqlite::ffi::sqlite3_io_methods;
+                }
+                rusqlite::ffi::SQLITE_OK
+            }
+
+            let source_name = std::ffi::CString::new("unix-excl").expect("source VFS name");
+            let source = rusqlite::ffi::sqlite3_vfs_find(source_name.as_ptr());
+            assert!(!source.is_null(), "bundled unix-excl VFS is unavailable");
+
+            let name = std::ffi::CString::new("linguamesh-sync-fault-test-vfs").expect("VFS name");
+            let name = Box::leak(name.into_boxed_c_str());
+            let mut custom = Box::new(*source);
+            custom.pNext = std::ptr::null_mut();
+            custom.zName = name.as_ptr();
+            custom.pAppData = source.cast();
+            let source_size = usize::try_from((*source).szOsFile).expect("VFS file size");
+            let extra_size = std::mem::size_of::<usize>();
+            custom.szOsFile = i32::try_from(source_size + extra_size).expect("VFS file size");
+            custom.xOpen = Some(open_with_sync_fault);
+            let custom = Box::into_raw(custom);
+            assert_eq!(
+                rusqlite::ffi::sqlite3_vfs_register(custom, 0),
+                rusqlite::ffi::SQLITE_OK,
+                "sync fault VFS registration failed"
+            );
+            name.to_str().expect("VFS name is UTF-8")
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     struct FaultVfsOpenGuard;
 
     #[cfg(target_os = "linux")]
     impl Drop for FaultVfsOpenGuard {
         fn drop(&mut self) {
             REGISTERED_FAULT_VFS_REJECT_OPEN.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct FaultVfsSyncGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for FaultVfsSyncGuard {
+        fn drop(&mut self) {
+            REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.store(false, Ordering::SeqCst);
         }
     }
 
@@ -3758,6 +3934,54 @@ trailer
                 .selected_model()
                 .map(str::to_owned),
             Some("registered-fault-vfs-model".to_owned())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_vfs_sync_failure_rejects_commit_without_false_success() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("registered-sync-fault-vfs.sqlite3");
+        let vfs = registered_sync_fault_vfs_name();
+        let baseline = profile(
+            "registered-sync-baseline-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-sync-baseline-model"),
+        );
+        let transient = profile(
+            "registered-sync-transient-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-sync-transient-model"),
+        );
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("sync fault VFS storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline profile");
+
+        REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.store(true, Ordering::SeqCst);
+        let guard = FaultVfsSyncGuard;
+        assert!(matches!(
+            storage.upsert_provider_profile(&transient),
+            Err(error) if error.kind == ErrorKind::Persistence
+        ));
+        drop(guard);
+        drop(storage);
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened sync fault storage");
+        assert_eq!(
+            reopened
+                .provider_profile(baseline.id())
+                .expect("baseline profile query")
+                .expect("baseline profile")
+                .selected_model(),
+            Some("registered-sync-baseline-model")
+        );
+        assert!(
+            reopened
+                .provider_profile(transient.id())
+                .expect("transient profile query")
+                .is_none(),
+            "sync-failed transaction was reported as success"
         );
     }
 

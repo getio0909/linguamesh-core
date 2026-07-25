@@ -247,6 +247,12 @@ physical power-loss recovery. The companion
 reject a later open, requires a typed persistence failure, restores the VFS, and verifies the
 previously committed profile remains intact. This is bounded open-failure evidence, not arbitrary
 third-party VFS or physical power-loss qualification.
+The companion
+`registered_vfs_sync_failure_rejects_commit_without_false_success` fixture replaces only the
+registered VFS's `xSync` callback, forces a transaction commit to return a typed persistence error,
+and verifies after reopen that the committed baseline remains while the transient profile is
+absent. This is bounded synchronization-failure evidence; arbitrary third-party VFS semantics and
+physical power-loss behavior remain unverified.
 
 The storage suite also migrates schema 31 through 34 and round-trips normalized usage records,
 glossary libraries, and provider-health metadata without retaining source/output text, endpoints,
