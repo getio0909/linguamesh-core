@@ -173,6 +173,33 @@ pub struct DocumentJob {
     pub package: Option<Vec<u8>>,
 }
 
+/// XLSX 工作表和 A1 单元格范围选择。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct XlsxSelection {
+    /// 工作表的显示名称。
+    pub sheet_name: String,
+    /// 包含起止单元格的 A1 范围，例如 `A1:B4`。
+    pub cell_range: String,
+}
+
+impl XlsxSelection {
+    /// 创建并校验一个 XLSX 工作表范围选择。
+    pub fn new(
+        sheet_name: impl Into<String>,
+        cell_range: impl Into<String>,
+    ) -> Result<Self, DocumentError> {
+        let sheet_name = sheet_name.into();
+        let cell_range = cell_range.into();
+        if sheet_name.is_empty() || sheet_name.len() > 128 || cell_range.is_empty() {
+            return Err(DocumentError::InvalidXlsxSelection);
+        }
+        Ok(Self {
+            sheet_name,
+            cell_range,
+        })
+    }
+}
+
 impl DocumentJob {
     /// 从受限 UTF-8 内容创建文档任务。
     pub fn from_utf8(
@@ -227,6 +254,51 @@ impl DocumentJob {
         contents: &[u8],
     ) -> Result<Self, DocumentError> {
         Self::from_ooxml_bytes(source_name, contents)
+    }
+
+    /// 从受限 XLSX 包创建任务，并只保留指定工作表范围内的字符串单元格为可翻译段。
+    pub fn from_xlsx_bytes_with_selection(
+        source_name: impl Into<String>,
+        contents: &[u8],
+        selection: &XlsxSelection,
+    ) -> Result<Self, DocumentError> {
+        let mut job = Self::from_xlsx_bytes(source_name, contents)?;
+        job.select_xlsx_range(&selection.sheet_name, &selection.cell_range)?;
+        Ok(job)
+    }
+
+    /// 将 XLSX 任务限制到一个工作表范围；未选中的字符串单元格会保持原样。
+    pub fn select_xlsx_range(
+        &mut self,
+        sheet_name: &str,
+        cell_range: &str,
+    ) -> Result<(), DocumentError> {
+        if self.format != DocumentFormat::Xlsx
+            || self
+                .segments
+                .iter()
+                .any(|segment| segment.translated_text.is_some())
+        {
+            return Err(DocumentError::InvalidXlsxSelection);
+        }
+        let selection = XlsxSelection::new(sheet_name, cell_range)?;
+        let package = self
+            .package
+            .as_deref()
+            .ok_or(DocumentError::InvalidXlsxSelection)?;
+        let selected = docx::inspect_xlsx_with_selection(package, &selection)?;
+        if selected.len() != self.segments.len()
+            || selected
+                .iter()
+                .zip(&self.segments)
+                .any(|(selected, current)| selected.source_text != current.source_text)
+        {
+            return Err(DocumentError::InvalidXlsxSelection);
+        }
+        for (current, selected) in self.segments.iter_mut().zip(selected) {
+            current.kind = selected.kind;
+        }
+        Ok(())
     }
 
     /// 从受限 EPUB 包创建可恢复文档任务。
@@ -617,6 +689,9 @@ pub enum DocumentError {
     /// 文档结构不完整或包含无效字段。
     #[error("The document structure is invalid.")]
     InvalidStructure,
+    /// XLSX 工作表或 A1 范围选择无效。
+    #[error("The XLSX sheet or cell range selection is invalid.")]
+    InvalidXlsxSelection,
     /// 译文导致输出超过上限。
     #[error("The reconstructed document exceeds the 4 MiB limit.")]
     OutputTooLarge,
@@ -1729,7 +1804,7 @@ fn validate_structure_with_delimiter(
 mod tests {
     use super::{
         DocumentError, DocumentFormat, DocumentJob, DocumentSegmentKind, DocumentWarning,
-        DocumentWarningKind, MAX_DOCUMENT_BYTES,
+        DocumentWarningKind, MAX_DOCUMENT_BYTES, XlsxSelection,
     };
     use std::io::{Cursor, Read, Write};
 
@@ -1855,6 +1930,49 @@ mod tests {
             .expect("image");
         writer.write_all(&[8, 9, 10]).expect("image bytes");
         writer.finish().expect("xlsx archive").into_inner()
+    }
+
+    fn xlsx_selection_fixture() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("content types");
+        writer.write_all(b"<Types/>").expect("content types bytes");
+        writer
+            .start_file("xl/workbook.xml", options)
+            .expect("workbook");
+        writer
+            .write_all(br#"<workbook xmlns:r="urn:r"><sheets><sheet name="First" sheetId="1" r:id="rId1"/><sheet name="Second" sheetId="2" r:id="rId2"/></sheets></workbook>"#)
+            .expect("workbook bytes");
+        writer
+            .start_file("xl/_rels/workbook.xml.rels", options)
+            .expect("workbook relationships");
+        writer
+            .write_all(br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#)
+            .expect("workbook relationship bytes");
+        writer
+            .start_file("xl/sharedStrings.xml", options)
+            .expect("shared strings");
+        writer
+            .write_all(br"<sst><si><t>Selected</t></si><si><t>Unselected</t></si><si><t>Shared by both</t></si></sst>")
+            .expect("shared strings bytes");
+        writer
+            .start_file("xl/worksheets/sheet1.xml", options)
+            .expect("first worksheet");
+        writer
+            .write_all(br#"<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c><c r="D1"><f>SUM(A1:A1)</f><v>7</v></c></row></sheetData></worksheet>"#)
+            .expect("first worksheet bytes");
+        writer
+            .start_file("xl/worksheets/sheet2.xml", options)
+            .expect("second worksheet");
+        writer
+            .write_all(br#"<worksheet><sheetData><row><c r="A1" t="s"><v>2</v></c><c r="B2" t="inlineStr"><is><t>Other sheet</t></is></c></row></sheetData></worksheet>"#)
+            .expect("second worksheet bytes");
+        writer
+            .finish()
+            .expect("xlsx selection archive")
+            .into_inner()
     }
 
     fn epub_fixture() -> Vec<u8> {
@@ -2506,6 +2624,49 @@ trailer
             .read_to_end(&mut image)
             .expect("image bytes");
         assert_eq!(image, [8, 9, 10]);
+    }
+
+    #[test]
+    fn xlsx_selection_translates_only_selected_sheet_range() {
+        let source = xlsx_selection_fixture();
+        let selection = XlsxSelection::new("First", "A1:A1").expect("selection");
+        let mut job =
+            DocumentJob::from_xlsx_bytes_with_selection("selected.xlsx", &source, &selection)
+                .expect("selected xlsx");
+        assert_eq!(job.pending_count(), 1);
+        let selected_index = job
+            .segments
+            .iter()
+            .position(|segment| segment.source_text == "Selected")
+            .expect("selected segment");
+        assert!(
+            job.segments
+                .iter()
+                .filter(|segment| segment.source_text != "Selected")
+                .all(|segment| segment.kind == DocumentSegmentKind::Verbatim)
+        );
+        job.apply_translation(selected_index, "译文")
+            .expect("translate");
+        let rebuilt = job.reconstruct_bytes().expect("rebuild selected xlsx");
+        let mut archive = ZipArchive::new(Cursor::new(rebuilt)).expect("rebuilt archive");
+        let mut shared_strings = String::new();
+        archive
+            .by_name("xl/sharedStrings.xml")
+            .expect("shared strings entry")
+            .read_to_string(&mut shared_strings)
+            .expect("shared strings xml");
+        assert!(shared_strings.contains("译文"));
+        assert!(shared_strings.contains("Unselected"));
+        assert!(shared_strings.contains("Shared by both"));
+        let mut first_sheet = String::new();
+        archive
+            .by_name("xl/worksheets/sheet1.xml")
+            .expect("first worksheet entry")
+            .read_to_string(&mut first_sheet)
+            .expect("first worksheet xml");
+        assert!(first_sheet.contains("<f>SUM(A1:A1)</f><v>7</v>"));
+        assert!(first_sheet.contains("r=\"B1\" t=\"s\"><v>1</v>"));
+        assert!(first_sheet.contains("r=\"C1\" t=\"s\"><v>2</v>"));
     }
 
     #[test]

@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-25 — XLSX sheet and range selection safety
+
+Assumption: a bounded Core selection API is the smallest complete Linux-first slice for Scenario
+11; it does not claim a GTK range-picker, visual workbook review, or cross-client parity.
+
+- Added `XlsxSelection` and `DocumentJob::from_xlsx_bytes_with_selection`/
+  `select_xlsx_range`, validating a display sheet name and A1 range before translation.
+- XLSX inspection resolves workbook relationships, marks only selected cells as prose, and keeps
+  unselected cells, formulas, numbers, dates, and formatting structural. Shared-string indices
+  referenced by both selected and unselected cells are conservatively left unchanged.
+- The focused Core selection regression passed (`28 passed; 0 failed`); Linux worker selection
+  export passed (`1 passed; 0 failed`). Full workspace validation remains required before push.
+- Release remains `unreleased`; GTK range-picker, visual/manual review, physical/VFS evidence,
+  other-client parity, signing, rollback, distributable promotion, and stable-release evidence
+  remain open.
+
 ## 2026-07-25 — Document-job WAL replay after abrupt process termination
 
 Assumption: a committed document segment that remains in SQLite's WAL must be recoverable after an

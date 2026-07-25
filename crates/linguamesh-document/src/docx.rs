@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
@@ -8,7 +8,10 @@ use quick_xml::events::Event;
 use zip::ZipArchive;
 use zip::write::ZipWriter;
 
-use crate::{DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, MAX_DOCUMENT_BYTES};
+use crate::{
+    DocumentError, DocumentJob, DocumentSegment, DocumentSegmentKind, MAX_DOCUMENT_BYTES,
+    XlsxSelection,
+};
 
 const MAX_OOXML_ENTRIES: usize = 512;
 const MAX_OOXML_COMPRESSION_RATIO: u64 = 200;
@@ -47,11 +50,28 @@ impl PackageKind {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TextSpan {
     content_start: usize,
     content_end: usize,
+    xlsx_cell_ref: Option<String>,
+    xlsx_shared_index: Option<usize>,
 }
+
+struct XlsxSelectionContext {
+    selected_cells_by_part: HashMap<String, HashSet<String>>,
+    selected_shared_indices: HashSet<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct XlsxCellRange {
+    start_column: u32,
+    start_row: u32,
+    end_column: u32,
+    end_row: u32,
+}
+
+type XlsxCellScan = (HashSet<String>, HashSet<usize>, HashSet<usize>);
 
 /// 检查 DOCX 包路径、条目数量和解压后的总大小，并返回排序后的条目名称。
 fn archive_names(package: &[u8], kind: PackageKind) -> Result<Vec<String>, DocumentError> {
@@ -192,6 +212,9 @@ fn text_spans(xml: &str, kind: PackageKind) -> Result<Vec<TextSpan>, DocumentErr
     let bytes = xml.as_bytes();
     let mut spans = Vec::new();
     let mut cursor = 0usize;
+    let mut xlsx_cell_ref = None;
+    let mut xlsx_shared_index = None;
+    let mut next_shared_index = 0usize;
     while let Some(relative) = xml[cursor..].find('<') {
         let start = cursor + relative;
         let end = tag_end(xml, start)?;
@@ -200,6 +223,23 @@ fn text_spans(xml: &str, kind: PackageKind) -> Result<Vec<TextSpan>, DocumentErr
             cursor = end;
             continue;
         };
+        let is_closing = raw.starts_with("</");
+        if matches!(kind, PackageKind::Xlsx) {
+            if name == "c" {
+                if is_closing {
+                    xlsx_cell_ref = None;
+                } else {
+                    xlsx_cell_ref = xml_attribute(raw, "r");
+                }
+            } else if name == "si" {
+                if is_closing {
+                    xlsx_shared_index = None;
+                } else {
+                    xlsx_shared_index = Some(next_shared_index);
+                    next_shared_index = next_shared_index.saturating_add(1);
+                }
+            }
+        }
         let is_text = match kind {
             PackageKind::Docx => name == "w:t",
             PackageKind::Pptx => name == "a:t",
@@ -221,6 +261,8 @@ fn text_spans(xml: &str, kind: PackageKind) -> Result<Vec<TextSpan>, DocumentErr
         spans.push(TextSpan {
             content_start,
             content_end,
+            xlsx_cell_ref: xlsx_cell_ref.clone(),
+            xlsx_shared_index,
         });
         cursor = content_end + close_marker.len();
     }
@@ -261,20 +303,242 @@ fn element_name(raw: &str) -> Option<&str> {
     (!body[..end].is_empty()).then_some(&body[..end])
 }
 
+// 读取 XML 标签中的简单属性值，不执行任何实体或外部引用。
+fn xml_attribute(raw: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let marker = format!("{name}={quote}");
+        if let Some(start) = raw.find(&marker) {
+            let rest = &raw[start + marker.len()..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_owned());
+            }
+        }
+    }
+    None
+}
+
+// 返回一个 XML 部件中的标签切片，供有界的 OOXML 选择扫描使用。
+fn xml_tag_slices(xml: &str) -> Result<Vec<&str>, DocumentError> {
+    validate_xml(xml)?;
+    let mut tags = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative) = xml[cursor..].find('<') {
+        let start = cursor + relative;
+        let end = tag_end(xml, start)?;
+        tags.push(&xml[start..end]);
+        cursor = end;
+    }
+    Ok(tags)
+}
+
+// 解析带有列字母和行号的 XLSX A1 单元格引用。
+fn parse_xlsx_cell_ref(value: &str) -> Option<(u32, u32)> {
+    let value = value.trim().replace('$', "");
+    let split = value
+        .find(|character: char| character.is_ascii_digit())
+        .filter(|index| *index > 0)?;
+    let (column, row) = value.split_at(split);
+    let mut column_number = 0u32;
+    for character in column.chars() {
+        if !character.is_ascii_alphabetic() {
+            return None;
+        }
+        column_number = column_number.checked_mul(26)?;
+        column_number = column_number
+            .checked_add(u32::from(character.to_ascii_uppercase() as u8 - b'A') + 1)?;
+    }
+    let row_number = row.parse::<u32>().ok()?;
+    (column_number > 0 && column_number <= 16_384 && row_number > 0 && row_number <= 1_048_576)
+        .then_some((column_number, row_number))
+}
+
+// 解析单个单元格或起止单元格范围。
+fn parse_xlsx_range(value: &str) -> Option<XlsxCellRange> {
+    let mut parts = value.split(':');
+    let start = parse_xlsx_cell_ref(parts.next()?)?;
+    let end = parts.next().map_or(Some(start), parse_xlsx_cell_ref)?;
+    if parts.next().is_some() || start.0 > end.0 || start.1 > end.1 {
+        return None;
+    }
+    Some(XlsxCellRange {
+        start_column: start.0,
+        start_row: start.1,
+        end_column: end.0,
+        end_row: end.1,
+    })
+}
+
+// 判断一个单元格引用是否位于有界选择范围内。
+fn xlsx_cell_in_range(cell: &str, range: XlsxCellRange) -> bool {
+    parse_xlsx_cell_ref(cell).is_some_and(|(column, row)| {
+        (range.start_column..=range.end_column).contains(&column)
+            && (range.start_row..=range.end_row).contains(&row)
+    })
+}
+
+// 规范化 workbook relationship 指向的内部 XLSX 部件路径。
+fn normalize_xlsx_part(target: &str) -> String {
+    let mut target = target.trim_start_matches('/');
+    while let Some(rest) = target.strip_prefix("../") {
+        target = rest;
+    }
+    if target.starts_with("xl/") {
+        target.to_owned()
+    } else {
+        format!("xl/{target}")
+    }
+}
+
+// 读取并校验一个 ZIP XML 部件。
+fn archive_xml(
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+) -> Result<String, DocumentError> {
+    let mut file = archive
+        .by_name(name)
+        .map_err(|_| DocumentError::InvalidXlsxSelection)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| DocumentError::InvalidXlsxSelection)?;
+    String::from_utf8(bytes).map_err(|_| DocumentError::InvalidXlsxSelection)
+}
+
+// 扫描 worksheet 中的单元格引用和 shared string 索引。
+fn scan_xlsx_cells(
+    xml: &str,
+    selected_sheet: bool,
+    range: XlsxCellRange,
+) -> Result<XlsxCellScan, DocumentError> {
+    let mut selected_cells = HashSet::new();
+    let mut selected_shared = HashSet::new();
+    let mut unselected_shared = HashSet::new();
+    validate_xml(xml)?;
+    let mut cursor = 0usize;
+    while let Some(relative) = xml[cursor..].find("<c") {
+        let start = cursor + relative;
+        let end = tag_end(xml, start)?;
+        let raw = &xml[start..end];
+        if element_name(raw) != Some("c") || raw.starts_with("</") {
+            cursor = end;
+            continue;
+        }
+        let cell_ref = xml_attribute(raw, "r");
+        let is_selected = selected_sheet
+            && cell_ref
+                .as_deref()
+                .is_some_and(|cell| xlsx_cell_in_range(cell, range));
+        if is_selected && let Some(cell_ref) = cell_ref.as_ref() {
+            selected_cells.insert(cell_ref.clone());
+        }
+        if xml_attribute(raw, "t").as_deref() == Some("s") {
+            let rest = &xml[end..];
+            let close = rest.find("</c>").ok_or(DocumentError::InvalidStructure)?;
+            let body = &rest[..close];
+            if let Some(v_start) = body.find("<v") {
+                let v_end = tag_end(body, v_start)?;
+                let value_end = body[v_end..]
+                    .find("</v>")
+                    .ok_or(DocumentError::InvalidStructure)?;
+                let index = body[v_end..v_end + value_end]
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| DocumentError::InvalidStructure)?;
+                if is_selected {
+                    selected_shared.insert(index);
+                } else {
+                    unselected_shared.insert(index);
+                }
+            }
+            cursor = end + close + 4;
+        } else {
+            cursor = end;
+        }
+    }
+    Ok((selected_cells, selected_shared, unselected_shared))
+}
+
+// 根据 workbook 显示名称和 A1 范围建立安全的 XLSX 选择上下文。
+fn xlsx_selection_context(
+    package: &[u8],
+    selection: &XlsxSelection,
+) -> Result<XlsxSelectionContext, DocumentError> {
+    let range =
+        parse_xlsx_range(&selection.cell_range).ok_or(DocumentError::InvalidXlsxSelection)?;
+    let mut archive =
+        ZipArchive::new(Cursor::new(package)).map_err(|_| DocumentError::InvalidXlsxSelection)?;
+    let workbook = archive_xml(&mut archive, "xl/workbook.xml")?;
+    let relationships = archive_xml(&mut archive, "xl/_rels/workbook.xml.rels")?;
+    let mut relationship_targets = HashMap::new();
+    for tag in xml_tag_slices(&relationships)? {
+        if element_name(tag) == Some("Relationship")
+            && let (Some(id), Some(target)) =
+                (xml_attribute(tag, "Id"), xml_attribute(tag, "Target"))
+        {
+            relationship_targets.insert(id, normalize_xlsx_part(&target));
+        }
+    }
+    let mut sheets = Vec::new();
+    for tag in xml_tag_slices(&workbook)? {
+        if element_name(tag) != Some("sheet") {
+            continue;
+        }
+        let name = xml_attribute(tag, "name").ok_or(DocumentError::InvalidStructure)?;
+        let relationship_id = xml_attribute(tag, "r:id").or_else(|| xml_attribute(tag, "id"));
+        let part = relationship_id
+            .and_then(|id| relationship_targets.get(&id).cloned())
+            .or_else(|| {
+                xml_attribute(tag, "sheetId").map(|id| format!("xl/worksheets/sheet{id}.xml"))
+            })
+            .ok_or(DocumentError::InvalidStructure)?;
+        sheets.push((name, part));
+    }
+    if !sheets.iter().any(|(name, _)| name == &selection.sheet_name) {
+        return Err(DocumentError::InvalidXlsxSelection);
+    }
+    let mut selected_cells_by_part = HashMap::new();
+    let mut selected_shared = HashSet::new();
+    let mut unselected_shared = HashSet::new();
+    for (name, part) in sheets {
+        let xml = archive_xml(&mut archive, &part)?;
+        let (selected_cells, selected, unselected) =
+            scan_xlsx_cells(&xml, name == selection.sheet_name, range)?;
+        selected_cells_by_part.insert(part, selected_cells);
+        selected_shared.extend(selected);
+        unselected_shared.extend(unselected);
+    }
+    selected_shared.retain(|index| !unselected_shared.contains(index));
+    Ok(XlsxSelectionContext {
+        selected_cells_by_part,
+        selected_shared_indices: selected_shared,
+    })
+}
+
 /// 将 XML 文本节点转为有序文档段，并为每个段保留段落换行提示。
 pub(crate) fn inspect(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
-    inspect_kind(package, PackageKind::Docx)
+    inspect_kind(package, PackageKind::Docx, None)
 }
 
 pub(crate) fn inspect_pptx(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
-    inspect_kind(package, PackageKind::Pptx)
+    inspect_kind(package, PackageKind::Pptx, None)
 }
 
 pub(crate) fn inspect_xlsx(package: &[u8]) -> Result<Vec<DocumentSegment>, DocumentError> {
-    inspect_kind(package, PackageKind::Xlsx)
+    inspect_kind(package, PackageKind::Xlsx, None)
 }
 
-fn inspect_kind(package: &[u8], kind: PackageKind) -> Result<Vec<DocumentSegment>, DocumentError> {
+pub(crate) fn inspect_xlsx_with_selection(
+    package: &[u8],
+    selection: &XlsxSelection,
+) -> Result<Vec<DocumentSegment>, DocumentError> {
+    let context = xlsx_selection_context(package, selection)?;
+    inspect_kind(package, PackageKind::Xlsx, Some(&context))
+}
+
+fn inspect_kind(
+    package: &[u8],
+    kind: PackageKind,
+    xlsx_selection: Option<&XlsxSelectionContext>,
+) -> Result<Vec<DocumentSegment>, DocumentError> {
     let names = archive_names(package, kind)?;
     let mut archive =
         ZipArchive::new(Cursor::new(package)).map_err(|_| DocumentError::InvalidStructure)?;
@@ -307,7 +571,21 @@ fn inspect_kind(package: &[u8], kind: PackageKind) -> Result<Vec<DocumentSegment
             } else {
                 ""
             };
-            let kind = if text.chars().any(|character| !character.is_whitespace()) {
+            let selected = match (kind, xlsx_selection) {
+                (PackageKind::Xlsx, Some(selection)) if name == "xl/sharedStrings.xml" => span
+                    .xlsx_shared_index
+                    .is_some_and(|index| selection.selected_shared_indices.contains(&index)),
+                (PackageKind::Xlsx, Some(selection)) => {
+                    span.xlsx_cell_ref.as_deref().is_some_and(|cell| {
+                        selection
+                            .selected_cells_by_part
+                            .get(name.as_str())
+                            .is_some_and(|cells| cells.contains(cell))
+                    })
+                }
+                _ => true,
+            };
+            let kind = if selected && text.chars().any(|character| !character.is_whitespace()) {
                 DocumentSegmentKind::Prose
             } else {
                 DocumentSegmentKind::Verbatim

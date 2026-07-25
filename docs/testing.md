@@ -6,6 +6,9 @@ OOXML document tests also reject encrypted, symlinked, duplicate, traversal, and
 compressed ZIP entries before XML inspection. DOCX, PPTX, and XLSX packages enforce the 4 MiB and
 512-entry limits plus a bounded 200:1 uncompressed-to-compressed ratio for entries at least 1 KiB;
 the compression-ratio fixture uses an in-memory deflated resource and never writes a filesystem path.
+The XLSX selection fixture resolves workbook relationships, translates only a selected `Sheet1`
+range, preserves unselected shared strings (including shared-string collisions across sheets), and
+keeps formula XML, numeric/date values, and style metadata unchanged.
 
 Protected-span tests scan URLs, email addresses, Markdown code, and placeholders, split opaque
 markers across streamed deltas, restore every original span exactly once, and reject missing,
