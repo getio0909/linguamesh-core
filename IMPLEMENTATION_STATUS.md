@@ -12,6 +12,10 @@ requires no commercial credentials or external network access.
 - The cancellation path also ran with `fake-slow-translator` and `--cancel-after-ms 20`; it
   emitted the cancellation terminal result without a credential or retry. This recheck does not
   claim native-client parity or stable-release evidence.
+- Documentation checkpoint `7b50ad6a6628126e8c47a5176c9384d6aa8f7188` passed Core CI
+  `30158763849`, Fuzz/Sanitizers `30158763845`, and Native SDK `30158763858` across Linux,
+  Windows, Android, and Apple jobs. The Windows Node.js 20 message was a deprecation annotation,
+  not a failed check.
 
 ## 2026-07-25 — Linux uncommitted transaction crash rollback
 
