@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-25 — Linux uncommitted transaction crash rollback
+
+Assumption: an abrupt Unix process termination during an uncommitted SQLite transaction must not
+expose partial provider state after restart; this is bounded process-crash evidence, not physical
+power-loss or arbitrary third-party VFS qualification.
+
+- Added the Linux-only `linux_default_vfs_rolls_back_uncommitted_transaction_after_process_termination`
+  fixture. A child writes a transient provider profile inside an uncommitted transaction and aborts;
+  the parent reopens the database and verifies the previously committed active profile is intact
+  while the transient profile is absent.
+- Focused storage validation passed (`1 passed; 0 failed`). Full Core validation passed with
+  `cargo +1.93.0 fmt --all -- --check`, strict all-target/all-feature Clippy, locked offline
+  workspace tests (`63` storage tests and all other workspace targets passed), and locked offline
+  workspace build.
+- This narrows simulated process-interruption evidence only; physical power-loss, arbitrary VFS,
+  cross-client, signing, rollback, and stable-release gates remain open.
+
 ## 2026-07-25 — Linux custom VFS open-failure hardening
 
 Assumption: a registered VFS that cannot open the database must fail closed without mutating a

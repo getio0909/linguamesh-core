@@ -63,6 +63,10 @@ that registration. This exercises registration and callback wiring only; arbitra
 semantics and physical power-loss behavior remain unqualified. A separate Linux-only fault fixture
 temporarily makes the registered VFS reject database opens, verifies that Core fails closed, and
 then verifies that a previously committed profile remains intact after the VFS recovers.
+The default Linux VFS also has a child-process rollback fixture: writes made inside an uncommitted
+transaction are discarded after abrupt termination, while the previously committed active profile
+remains intact on the next open. This simulates process interruption only; physical power-loss and
+arbitrary third-party VFS semantics remain outside the evidence.
 See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 

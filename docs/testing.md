@@ -198,6 +198,12 @@ two-segment job, terminates abruptly while the WAL is retained, and the parent r
 to verify that the job remains resumable with the committed segment intact. This is bounded
 process-crash evidence, not physical power-loss recovery or arbitrary-VFS compatibility.
 
+The Linux-only `linux_default_vfs_rolls_back_uncommitted_transaction_after_process_termination`
+regression starts from a committed active profile, writes a transient profile inside an
+uncommitted transaction, and aborts the child. The parent verifies that the baseline remains active
+and the transient row is absent after reopening. This is simulated process-interruption evidence,
+not physical power-loss recovery or arbitrary-VFS compatibility.
+
 On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
 contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
 migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery after close/reopen,

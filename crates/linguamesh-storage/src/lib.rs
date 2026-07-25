@@ -2466,7 +2466,10 @@ fn load_glossary_record(
 
 #[cfg(test)]
 mod tests {
-    use super::{DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, MIGRATIONS, Storage};
+    use super::{
+        DocumentJobOptions, INITIAL_MIGRATION, MAX_DOCUMENT_JOBS, MIGRATIONS, Storage,
+        upsert_profile,
+    };
     use linguamesh_document::{DocumentFormat, DocumentJob, DocumentJobState};
     use linguamesh_domain::{
         ErrorKind, Glossary, GlossaryEntry, ProviderProfile, ProviderProfileId, RoutingCandidate,
@@ -4174,6 +4177,80 @@ trailer
             Some("一")
         );
         assert!(restored.job.segments[1].translated_text.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_default_vfs_rolls_back_uncommitted_transaction_after_process_termination() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_UNCOMMITTED_TRANSACTION_CRASH_CHILD_PATH";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let transient = profile(
+                "uncommitted-crash-profile",
+                Some(PERSISTENT_SECRET_REF),
+                Some("uncommitted-crash-model"),
+            );
+            let mut storage = Storage::open(&path).expect("child storage");
+            let transaction = storage.connection.transaction().expect("child transaction");
+            upsert_profile(&transaction, &transient).expect("child uncommitted profile");
+            std::process::abort();
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory
+            .path()
+            .join("uncommitted-transaction-crash.sqlite3");
+        let baseline = profile(
+            "baseline-crash-profile",
+            Some(PERSISTENT_SECRET_REF),
+            Some("baseline-crash-model"),
+        );
+        let mut storage = Storage::open(&path).expect("storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline profile");
+        drop(storage);
+
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::linux_default_vfs_rolls_back_uncommitted_transaction_after_process_termination",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .expect("spawn crash child");
+        assert!(!child.success(), "crash child unexpectedly completed");
+
+        let reopened = Storage::open(&path).expect("recovered storage");
+        let baseline_id = ProviderProfileId::parse("baseline-crash-profile").expect("profile id");
+        let transient_id =
+            ProviderProfileId::parse("uncommitted-crash-profile").expect("profile id");
+        assert_eq!(
+            reopened
+                .active_provider_profile()
+                .expect("active profile query")
+                .expect("active profile")
+                .id()
+                .as_str(),
+            baseline_id.as_str()
+        );
+        assert_eq!(
+            reopened
+                .provider_profile(&baseline_id)
+                .expect("baseline profile query")
+                .expect("baseline profile")
+                .selected_model(),
+            Some("baseline-crash-model")
+        );
+        assert!(
+            reopened
+                .provider_profile(&transient_id)
+                .expect("transient profile query")
+                .is_none(),
+            "uncommitted profile survived process termination"
+        );
     }
 
     #[cfg(target_os = "linux")]
