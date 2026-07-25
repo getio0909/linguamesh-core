@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-25 — Linux registered VFS write-failure hardening
+
+Assumption: a registered VFS that fails during `xWrite` must reject the transaction rather than
+reporting a false commit; this bounded test does not qualify arbitrary third-party VFS behavior or
+physical power-loss recovery.
+
+- Added `registered_vfs_write_failure_rejects_commit_without_false_success`, a Linux-only fixture
+  that delegates to SQLite's reviewed `unix-excl` VFS while injecting an `xWrite` I/O failure.
+- The fixture verifies a typed persistence error, preserves the previously committed provider
+  profile, and confirms the transient profile is absent after reopening with the recovered VFS.
+- Focused test, the full 66-test `linguamesh-storage` suite, workspace tests, formatting, and
+  strict Clippy passed.
+- Arbitrary third-party VFS, physical power-loss, cross-client, signing, rollback, promotion, and
+  stable-release gates remain open; release status stays `unreleased`.
+
 ## 2026-07-25 — Linux registered VFS synchronization-failure hardening
 
 Assumption: a registered VFS that fails during `xSync` must reject the transaction rather than
@@ -10,7 +25,7 @@ physical power-loss recovery.
   that delegates to SQLite's reviewed `unix-excl` VFS while injecting an `xSync` I/O failure.
 - The fixture verifies a typed persistence error, preserves the previously committed provider
   profile, and confirms the transient profile is absent after reopening with the recovered VFS.
-- Focused test passed, and the full `linguamesh-storage` library suite passed: `65 passed; 0 failed`.
+- Focused test passed, and the full `linguamesh-storage` library suite passed: `66 passed; 0 failed`.
 - Arbitrary third-party VFS, physical power-loss, cross-client, signing, rollback, promotion, and
   stable-release gates remain open; release status stays `unreleased`.
 

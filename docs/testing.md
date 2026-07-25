@@ -253,6 +253,10 @@ registered VFS's `xSync` callback, forces a transaction commit to return a typed
 and verifies after reopen that the committed baseline remains while the transient profile is
 absent. This is bounded synchronization-failure evidence; arbitrary third-party VFS semantics and
 physical power-loss behavior remain unverified.
+The same registered VFS also injects an `xWrite` failure and repeats the fail-closed transaction
+assertions, covering write-callback rejection separately from synchronization failure. Both
+callbacks remain bounded fixtures over the reviewed `unix-excl` implementation, not qualification
+of arbitrary third-party VFS behavior or physical power-loss recovery.
 
 The storage suite also migrates schema 31 through 34 and round-trips normalized usage records,
 glossary libraries, and provider-health metadata without retaining source/output text, endpoints,
