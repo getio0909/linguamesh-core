@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-25 — Linux custom VFS open-failure hardening
+
+Assumption: a registered VFS that cannot open the database must fail closed without mutating a
+previously committed database; this test does not qualify arbitrary third-party VFS semantics or
+physical power-loss recovery.
+
+- Added the Linux-only `registered_fault_vfs_rejects_open_without_mutating_database` fixture. It
+  registers a VFS alias over `unix-excl`, persists a provider profile, rejects a subsequent open
+  through the VFS, then restores the VFS and verifies the profile remains intact.
+- Full Core validation passed after the change: `cargo +1.93.0 fmt --all -- --check`, strict
+  all-target/all-feature Clippy, locked offline workspace tests (`62` storage tests and all other
+  workspace targets passed), and locked offline workspace build.
+- This test-only hardening does not change the functional Linux Core pin or release manifest;
+  arbitrary third-party VFS, physical power-loss, signing, rollback, and stable-release gates
+  remain open.
+
 ## 2026-07-25 — XLSX sheet and range selection safety
 
 Assumption: a bounded Core selection API is the smallest complete Linux-first slice for Scenario

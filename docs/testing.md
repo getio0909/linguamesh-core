@@ -216,7 +216,11 @@ a distinct SQLite VFS name at runtime while delegating to the reviewed `unix-exc
 then opens the full storage contract through the registered name, verifies migrations and provider
 profile reopen, and retains no-follow symbolic-link rejection. This is evidence for custom VFS
 registration and callback wiring only; it does not qualify arbitrary third-party VFS behavior or
-physical power-loss recovery.
+physical power-loss recovery. The companion
+`registered_fault_vfs_rejects_open_without_mutating_database` fixture makes the registered VFS
+reject a later open, requires a typed persistence failure, restores the VFS, and verifies the
+previously committed profile remains intact. This is bounded open-failure evidence, not arbitrary
+third-party VFS or physical power-loss qualification.
 
 The storage suite also migrates schema 31 through 34 and round-trips normalized usage records,
 glossary libraries, and provider-health metadata without retaining source/output text, endpoints,

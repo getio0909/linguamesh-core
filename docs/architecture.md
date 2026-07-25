@@ -60,7 +60,9 @@ leaf-file metadata.
 The Linux storage tests also register a distinct custom VFS name that delegates to the reviewed
 `unix-excl` operations, then verify migration, profile reopen, and no-follow alias rejection through
 that registration. This exercises registration and callback wiring only; arbitrary third-party VFS
-semantics and physical power-loss behavior remain unqualified.
+semantics and physical power-loss behavior remain unqualified. A separate Linux-only fault fixture
+temporarily makes the registered VFS reject database opens, verifies that Core fails closed, and
+then verifies that a previously committed profile remains intact after the VFS recovers.
 See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 

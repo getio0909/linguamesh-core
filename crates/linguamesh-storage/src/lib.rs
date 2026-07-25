@@ -2489,6 +2489,8 @@ mod tests {
     use std::process::Command;
     #[cfg(target_os = "linux")]
     use std::sync::OnceLock;
+    #[cfg(target_os = "linux")]
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
     use zip::ZipArchive;
     use zip::write::{SimpleFileOptions, ZipWriter};
@@ -2496,6 +2498,9 @@ mod tests {
     const PERSISTENT_SECRET_REF: &str = "secret-service:88888888-8888-4888-8888-888888888888";
     const SESSION_SECRET_REF: &str = "session:99999999-9999-4999-8999-999999999999";
     const LEGACY_SECRET_CANARY: &str = concat!("s", "k", "-LM_LEGACY_DATABASE_SECRET_1234567890");
+
+    #[cfg(target_os = "linux")]
+    static REGISTERED_FAULT_VFS_REJECT_OPEN: AtomicBool = AtomicBool::new(false);
 
     fn profile(id: &str, secret_ref: Option<&str>, model: Option<&str>) -> ProviderProfile {
         ProviderProfile::new(
@@ -3612,6 +3617,66 @@ trailer
     }
 
     #[cfg(target_os = "linux")]
+    fn registered_fault_vfs_name() -> &'static str {
+        static VFS_NAME: OnceLock<&'static str> = OnceLock::new();
+
+        VFS_NAME.get_or_init(|| unsafe {
+            // 注册测试专用的 VFS 名称，并让其在故障开关开启时拒绝打开文件。
+            unsafe extern "C" fn rejectable_open(
+                vfs: *mut rusqlite::ffi::sqlite3_vfs,
+                z_name: *const std::os::raw::c_char,
+                file: *mut rusqlite::ffi::sqlite3_file,
+                flags: std::os::raw::c_int,
+                out_flags: *mut std::os::raw::c_int,
+            ) -> std::os::raw::c_int {
+                if REGISTERED_FAULT_VFS_REJECT_OPEN.load(Ordering::SeqCst) || vfs.is_null() {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                }
+                // 读取 SQLite 为该测试 VFS 保存的底层实现指针。
+                let source = unsafe { (*vfs).pAppData.cast::<rusqlite::ffi::sqlite3_vfs>() };
+                if source.is_null() {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                }
+                // 转发到经过验证的 unix-excl 打开回调。
+                let Some(open) = (unsafe { (*source).xOpen }) else {
+                    return rusqlite::ffi::SQLITE_CANTOPEN;
+                };
+                // 调用 SQLite 的 C ABI 回调完成底层文件打开。
+                unsafe { open(source, z_name, file, flags, out_flags) }
+            }
+
+            let source_name = std::ffi::CString::new("unix-excl").expect("source VFS name");
+            let source = rusqlite::ffi::sqlite3_vfs_find(source_name.as_ptr());
+            assert!(!source.is_null(), "bundled unix-excl VFS is unavailable");
+
+            let name = std::ffi::CString::new("linguamesh-fault-test-vfs").expect("fault VFS name");
+            let name = Box::leak(name.into_boxed_c_str());
+            let mut custom = Box::new(*source);
+            custom.pNext = std::ptr::null_mut();
+            custom.zName = name.as_ptr();
+            custom.pAppData = source.cast();
+            custom.xOpen = Some(rejectable_open);
+            let custom = Box::into_raw(custom);
+            assert_eq!(
+                rusqlite::ffi::sqlite3_vfs_register(custom, 0),
+                rusqlite::ffi::SQLITE_OK,
+                "fault VFS registration failed"
+            );
+            name.to_str().expect("fault VFS name is UTF-8")
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    struct FaultVfsOpenGuard;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for FaultVfsOpenGuard {
+        fn drop(&mut self) {
+            REGISTERED_FAULT_VFS_REJECT_OPEN.store(false, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn registered_custom_vfs_preserves_migrations_and_profile_reopen() {
         let directory = tempdir().expect("temp directory");
@@ -3651,6 +3716,44 @@ trailer
             Storage::open_with_vfs(&link, vfs),
             Err(error) if error.kind == ErrorKind::Persistence
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_fault_vfs_rejects_open_without_mutating_database() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("registered-fault-vfs.sqlite3");
+        let vfs = registered_fault_vfs_name();
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("fault VFS storage");
+        storage
+            .upsert_provider_profile(&profile(
+                "registered-fault-vfs-provider",
+                Some(PERSISTENT_SECRET_REF),
+                Some("registered-fault-vfs-model"),
+            ))
+            .expect("profile");
+        drop(storage);
+
+        REGISTERED_FAULT_VFS_REJECT_OPEN.store(true, Ordering::SeqCst);
+        let guard = FaultVfsOpenGuard;
+        assert!(matches!(
+            Storage::open_with_vfs(&path, vfs),
+            Err(error) if error.kind == ErrorKind::Persistence
+        ));
+        drop(guard);
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened fault VFS storage");
+        let profile_id =
+            ProviderProfileId::parse("registered-fault-vfs-provider").expect("profile id");
+        assert_eq!(
+            reopened
+                .provider_profile(&profile_id)
+                .expect("profile lookup")
+                .expect("saved profile")
+                .selected_model()
+                .map(str::to_owned),
+            Some("registered-fault-vfs-model".to_owned())
+        );
     }
 
     #[cfg(target_os = "linux")]
