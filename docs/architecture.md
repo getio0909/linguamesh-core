@@ -154,12 +154,15 @@ quality constraints, and fallback candidates are returned only when the profile 
 them. The planner carries no endpoints, credentials, or source text. Platform clients remain
 responsible for binding saved profiles and user-visible routing controls to this contract.
 
-The OpenAI-compatible translation path automatically protects common structured source spans before
-prompt construction. URLs, email addresses, Markdown code spans, fenced code, and common placeholder
-forms become collision-checked opaque markers; an incremental restorer validates marker identity and
-emits the original spans across split SSE deltas. Missing, duplicated, or unknown markers fail the
-operation as a typed malformed-response error. This is a safety boundary, not a user glossary or
-custom protected-term system; those require explicit translation options and additional validation.
+The provider translation paths automatically protect common structured source spans and validated
+request-level glossary terms before prompt construction. URLs, email addresses, Markdown code spans,
+fenced code, common placeholder forms, required glossary translations, and immutable user terms become
+collision-checked opaque markers; an incremental restorer validates marker identity and emits the
+original or required replacement across split SSE deltas. Missing, duplicated, or unknown markers
+fail the operation as a typed malformed-response error. `GlossaryEntry` bounds locale, domain,
+priority, notes, and matching policy, while CSV/TBX import rejects malformed, credential-shaped, or
+oversized input. Provider-neutral request options carry the validated glossary; native clients own
+presentation and any explicitly persisted glossary library.
 
 `TranslationQualityMode` is part of the provider-neutral request contract. `Fast` asks for one direct
 pass, `Balanced` keeps one pass and applies deterministic output validation, and `Best` asks the

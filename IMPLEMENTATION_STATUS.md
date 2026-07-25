@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-25 — Request-level glossary documentation reconciliation
+
+Assumption: this checkpoint corrects stale documentation only; the existing glossary implementation
+and prerelease release boundary remain unchanged.
+
+- `GlossaryEntry` and `Glossary` already provide bounded required translations and immutable
+  protected terms with locale, domain, priority, matching, and non-secret note fields.
+- `TranslationRequest` carries the validated glossary, and the OpenAI-compatible, native Ollama,
+  Anthropic, and Gemini adapters all apply it through the shared protected-span/restoration path.
+  CSV and TBX import paths are bounded and fail closed for malformed or credential-shaped data.
+- Existing domain/provider tests cover glossary replacement, immutable terms, CSV/TBX round trips,
+  conflicts, and streamed marker restoration. README and architecture wording now matches the
+  implementation; no runtime code, ABI, dependency, or release-manifest value changed.
+- Release remains `unreleased`; cross-client parity, physical/manual review, arbitrary-VFS/power-loss,
+  signing, rollback, promotion, and stable-release gates remain open.
+
 ## 2026-07-25 — Linux registered VFS read-failure hardening
 
 Assumption: a registered VFS that fails during `xRead` must fail closed with a typed persistence

@@ -24,10 +24,13 @@ cargo run -p linguamesh-cli -- demo --text "Hello, LinguaMesh" --target zh-CN
 
 The demo starts a loopback fake provider and requires no API key.
 
-The shared OpenAI-compatible and native Ollama paths protect common URLs, email addresses, Markdown
-code spans, fenced code, and placeholders while translating. Marker restoration is incremental and
-fails closed if a provider omits, duplicates, or changes a protected span. User glossaries and
-custom protected terms are not yet part of this prerelease slice.
+The shared provider paths protect common URLs, email addresses, Markdown code spans, fenced code,
+placeholders, and request-level glossary terms while translating. A `GlossaryEntry` can require a
+target term or mark a source term immutable, with bounded locale, domain, priority, and note fields.
+Marker restoration is incremental and fails closed if a provider omits, duplicates, or changes a
+protected span. The same validated `Glossary` request option is applied by the OpenAI-compatible,
+native Ollama, Anthropic, and Gemini adapters; native clients remain responsible for their own UI
+and optional library persistence.
 
 The shared domain also accepts a bounded, UTF-8 TBX glossary import. The restricted parser uses the
 first `langSet` as the source language, creates one rule for each subsequent target term, preserves
