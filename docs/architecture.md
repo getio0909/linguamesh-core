@@ -65,8 +65,10 @@ temporarily makes the registered VFS reject database opens, verifies that Core f
 then verifies that a previously committed profile remains intact after the VFS recovers.
 The default Linux VFS also has a child-process rollback fixture: writes made inside an uncommitted
 transaction are discarded after abrupt termination, while the previously committed active profile
-remains intact on the next open. This simulates process interruption only; physical power-loss and
-arbitrary third-party VFS semantics remain outside the evidence.
+remains intact on the next open. A companion parent-controlled SIGKILL fixture waits until the
+transaction is ready before hard-killing the child and repeats the same rollback assertion. These
+tests simulate process interruption only; physical power-loss and arbitrary third-party VFS
+semantics remain outside the evidence.
 See
 [`Storage schema 1 to 2`](migrations/storage-1-to-2.md).
 

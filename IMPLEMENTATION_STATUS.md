@@ -10,10 +10,14 @@ power-loss or arbitrary third-party VFS qualification.
   fixture. A child writes a transient provider profile inside an uncommitted transaction and aborts;
   the parent reopens the database and verifies the previously committed active profile is intact
   while the transient profile is absent.
+- Added the Linux-only `linux_default_vfs_rolls_back_uncommitted_transaction_after_sigkill` fixture.
+  The parent waits for a readiness marker after the child writes the same uncommitted profile, sends
+  the child a hard kill, and then verifies the committed baseline remains active while the transient
+  row is absent.
 - Focused storage validation passed (`1 passed; 0 failed`). Full Core validation passed with
   `cargo +1.93.0 fmt --all -- --check`, strict all-target/all-feature Clippy, locked offline
-  workspace tests (`63` storage tests and all other workspace targets passed), and locked offline
-  workspace build.
+  workspace tests (`64` storage tests and all other workspace targets passed), and locked offline
+  workspace build. The focused SIGKILL test passed (`1 passed; 0 failed`).
 - This narrows simulated process-interruption evidence only; physical power-loss, arbitrary VFS,
   cross-client, signing, rollback, and stable-release gates remain open.
 

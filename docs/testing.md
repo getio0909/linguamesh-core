@@ -203,6 +203,12 @@ regression starts from a committed active profile, writes a transient profile in
 uncommitted transaction, and aborts the child. The parent verifies that the baseline remains active
 and the transient row is absent after reopening. This is simulated process-interruption evidence,
 not physical power-loss recovery or arbitrary-VFS compatibility.
+The companion
+`linux_default_vfs_rolls_back_uncommitted_transaction_after_sigkill` regression uses a parent-owned
+readiness marker to ensure the transaction is open before the parent hard-kills the child. It then
+performs the same baseline and transient-row assertions. This strengthens abrupt process
+termination coverage but remains simulated crash evidence, not physical power-loss recovery or
+arbitrary-VFS compatibility.
 
 On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
 contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
