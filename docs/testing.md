@@ -257,6 +257,10 @@ The same registered VFS also injects an `xWrite` failure and repeats the fail-cl
 assertions, covering write-callback rejection separately from synchronization failure. Both
 callbacks remain bounded fixtures over the reviewed `unix-excl` implementation, not qualification
 of arbitrary third-party VFS behavior or physical power-loss recovery.
+The registered VFS also injects an `xRead` failure during reopen; Core returns a typed persistence
+error, then the recovered VFS reopens the previously committed profile. This is bounded read-callback
+evidence over the reviewed implementation and does not qualify arbitrary third-party VFS behavior
+or physical power-loss recovery.
 
 The storage suite also migrates schema 31 through 34 and round-trips normalized usage records,
 glossary libraries, and provider-health metadata without retaining source/output text, endpoints,

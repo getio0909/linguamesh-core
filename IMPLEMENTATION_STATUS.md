@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-25 — Linux registered VFS read-failure hardening
+
+Assumption: a registered VFS that fails during `xRead` must fail closed with a typed persistence
+error; this bounded fixture does not qualify arbitrary third-party VFS behavior or physical
+power-loss recovery.
+
+- Added `registered_vfs_read_failure_returns_typed_persistence_error`, a Linux-only fixture that
+  injects an `xRead` I/O failure through the registered `unix-excl` test VFS.
+- The fixture rejects the reopen with `ErrorKind::Persistence`, restores the VFS, and verifies the
+  previously committed provider profile remains readable.
+- The focused test passed (`1 passed; 0 failed`); the full storage suite passed (`67 passed; 0
+  failed`), workspace tests passed, strict all-feature Clippy passed, and `cargo fmt --all --check`
+  passed.
+- This strengthens registered-VFS fault coverage only; arbitrary third-party VFS, physical
+  power-loss, cross-client, signing, rollback, promotion, and stable-release gates remain open.
+
 ## 2026-07-25 — Linux registered VFS write-failure hardening
 
 Assumption: a registered VFS that fails during `xWrite` must reject the transaction rather than

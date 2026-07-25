@@ -2511,6 +2511,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_FAIL_READ: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET: AtomicUsize = AtomicUsize::new(0);
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_METHODS: OnceLock<usize> = OnceLock::new();
@@ -3812,6 +3814,55 @@ trailer
                 result
             }
 
+            unsafe extern "C" fn fail_read(
+                file: *mut rusqlite::ffi::sqlite3_file,
+                buffer: *mut std::os::raw::c_void,
+                amount: std::os::raw::c_int,
+                offset: rusqlite::ffi::sqlite3_int64,
+            ) -> std::os::raw::c_int {
+                if REGISTERED_SYNC_FAULT_VFS_FAIL_READ.load(Ordering::SeqCst) {
+                    return rusqlite::ffi::SQLITE_IOERR_READ;
+                }
+                if file.is_null() {
+                    return rusqlite::ffi::SQLITE_IOERR_READ;
+                }
+                let offset_in_file =
+                    REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET.load(Ordering::SeqCst);
+                if offset_in_file == 0 {
+                    return rusqlite::ffi::SQLITE_IOERR_READ;
+                }
+                let mut original_address = 0usize;
+                // 从扩展的 sqlite3_file 尾部读取底层 VFS 的原始方法表地址。
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        file.cast::<u8>().add(offset_in_file),
+                        (&raw mut original_address).cast::<u8>(),
+                        std::mem::size_of::<usize>(),
+                    );
+                }
+                let original = original_address as *const rusqlite::ffi::sqlite3_io_methods;
+                if original.is_null() {
+                    return rusqlite::ffi::SQLITE_IOERR_READ;
+                }
+                let Some(read) = (unsafe { (*original).xRead }) else {
+                    return rusqlite::ffi::SQLITE_IOERR_READ;
+                };
+                // 原始读取实现可能依赖 file->pMethods 指向原始方法表。
+                let custom = *REGISTERED_SYNC_FAULT_VFS_METHODS
+                    .get()
+                    .expect("sync fault methods initialized")
+                    as *const rusqlite::ffi::sqlite3_io_methods;
+                let result = unsafe {
+                    (*file).pMethods = original;
+                    read(file, buffer, amount, offset)
+                };
+                // 将未注入故障的调用转发后恢复测试方法表。
+                unsafe {
+                    (*file).pMethods = custom;
+                }
+                result
+            }
+
             unsafe extern "C" fn open_with_sync_fault(
                 vfs: *mut rusqlite::ffi::sqlite3_vfs,
                 z_name: *const std::os::raw::c_char,
@@ -3854,6 +3905,7 @@ trailer
                 let methods = *REGISTERED_SYNC_FAULT_VFS_METHODS.get_or_init(|| {
                     let mut methods = unsafe { Box::new(*original) };
                     methods.xClose = Some(close_with_sync_fault);
+                    methods.xRead = Some(fail_read);
                     methods.xSync = Some(fail_sync);
                     methods.xWrite = Some(fail_write);
                     Box::into_raw(methods) as usize
@@ -3907,6 +3959,7 @@ trailer
         fn drop(&mut self) {
             REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE.store(false, Ordering::SeqCst);
+            REGISTERED_SYNC_FAULT_VFS_FAIL_READ.store(false, Ordering::SeqCst);
         }
     }
 
@@ -4083,6 +4136,42 @@ trailer
                 .expect("transient profile query")
                 .is_none(),
             "write-failed transaction was reported as success"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_vfs_read_failure_returns_typed_persistence_error() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("registered-read-fault-vfs.sqlite3");
+        let vfs = registered_sync_fault_vfs_name();
+        let baseline = profile(
+            "registered-read-baseline-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-read-baseline-model"),
+        );
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("read fault VFS storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline profile");
+        drop(storage);
+
+        REGISTERED_SYNC_FAULT_VFS_FAIL_READ.store(true, Ordering::SeqCst);
+        let guard = FaultVfsSyncGuard;
+        assert!(matches!(
+            Storage::open_with_vfs(&path, vfs),
+            Err(error) if error.kind == ErrorKind::Persistence
+        ));
+        drop(guard);
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened read fault storage");
+        assert_eq!(
+            reopened
+                .provider_profile(baseline.id())
+                .expect("baseline profile query")
+                .expect("baseline profile")
+                .selected_model(),
+            Some("registered-read-baseline-model")
         );
     }
 
