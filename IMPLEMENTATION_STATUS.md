@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-26 — Current-head CLI acceptance recheck
+
+Assumption: the deterministic loopback fake-provider CLI remains authoritative for Scenario 1;
+this recheck requires no commercial credential or network and does not close native-client or
+stable-release gates.
+
+- Core head `a854fa2e6d3e5f341836b72f88bcc0ffc0135c73` passed
+  `cargo +1.93.0 run --locked --offline -p linguamesh-cli -- demo --text 'Hello, LinguaMesh!' --target zh-CN`.
+- The CLI discovered `fake-translator` and `fake-slow-translator`, manually selected
+  `fake-translator`, emitted streamed `你好，LinguaMesh！`, and printed `Translation completed.`.
+- The slow-model path with `--model fake-slow-translator --cancel-after-ms 20` printed
+  `Translation cancelled.` without a credential or retry.
+- No runtime, ABI, dependency, source-pin, manifest, tag, or promotion change occurred. Release
+  remains `unreleased`; cross-client, physical/manual, arbitrary-VFS/power-loss, rollback,
+  promotion, authorization, and stable-release gates remain open.
+
 ## 2026-07-25 — Request-level glossary documentation reconciliation
 
 Assumption: this checkpoint corrects stale documentation only; the existing glossary implementation
