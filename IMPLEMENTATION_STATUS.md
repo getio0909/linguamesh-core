@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-28 — Linux registered VFS lock-failure hardening
+
+Assumption: a registered VFS that fails while acquiring a SQLite lock must fail closed with a
+typed persistence error and must not mutate an already committed database; this remains bounded
+fault-injection evidence and does not qualify physical power-loss or arbitrary third-party VFS
+implementations.
+
+- Added `registered_vfs_lock_failure_rejects_open_without_mutating_database`, which injects
+  `SQLITE_IOERR_LOCK` through the registered `unix-excl` wrapper during reopen.
+- The focused fixture passed (`1 passed; 0 failed`); after the injected open failure, the original
+  provider profile reopened unchanged.
+- This strengthens Linux Scenario 3 storage/open-failure evidence only. Physical power-loss,
+  arbitrary third-party VFS, cross-client, manual/GPU, signing, rollback, promotion, and
+  stable-release gates remain open.
+
 ## 2026-07-28 — Linux registered VFS partial-write hardening
 
 Assumption: a registered VFS that writes only part of a SQLite page and then returns an I/O

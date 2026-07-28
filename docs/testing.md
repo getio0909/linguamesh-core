@@ -269,6 +269,11 @@ half of one requested buffer before returning `SQLITE_IOERR_WRITE`; it requires 
 error, preserves the committed baseline, and rejects the transient profile after reopen. This is
 deterministic partial-write evidence, not physical power-loss or arbitrary third-party VFS
 qualification.
+The `registered_vfs_lock_failure_rejects_open_without_mutating_database` companion injects
+`SQLITE_IOERR_LOCK` from the registered VFS during reopen, requires a typed persistence error, and
+then verifies that the previously committed profile remains intact after the VFS recovers. This
+is bounded lock-callback evidence, not physical power-loss or arbitrary third-party VFS
+qualification.
 The registered VFS also injects an `xRead` failure during reopen; Core returns a typed persistence
 error, then the recovered VFS reopens the previously committed profile. This is bounded read-callback
 evidence over the reviewed implementation and does not qualify arbitrary third-party VFS behavior
