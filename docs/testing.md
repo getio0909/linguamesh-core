@@ -224,6 +224,13 @@ performs the same baseline and transient-row assertions. This strengthens abrupt
 termination coverage but remains simulated crash evidence, not physical power-loss recovery or
 arbitrary-VFS compatibility.
 
+The Linux-only `unix_exclusive_vfs_rolls_back_uncommitted_transaction_after_sigkill` companion
+repeats the parent-controlled hard-kill boundary through SQLite's bundled `unix-excl` VFS. It
+requires the committed baseline profile to remain active and the transient row to be absent after
+reopen through the same VFS. This closes the tested alternate-VFS rollback path while remaining
+simulated crash evidence, not physical power-loss recovery or arbitrary third-party VFS
+compatibility.
+
 On Linux, `unix_exclusive_vfs_preserves_migrations_and_committed_profiles` opens the same storage
 contract through SQLite's bundled `unix-excl` VFS with `SQLITE_OPEN_NOFOLLOW`. It verifies schema
 migrations, `WAL`/`synchronous=FULL` setup, committed provider-profile recovery after close/reopen,

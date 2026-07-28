@@ -4771,6 +4771,108 @@ trailer
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn unix_exclusive_vfs_rolls_back_uncommitted_transaction_after_sigkill() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_UNIX_EXCLUSIVE_TRANSACTION_SIGKILL_CHILD_PATH";
+        const CHILD_READY_ENV: &str = "LINGUAMESH_UNIX_EXCLUSIVE_TRANSACTION_SIGKILL_CHILD_READY";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let ready_path =
+                PathBuf::from(env::var_os(CHILD_READY_ENV).expect("child readiness path"));
+            let transient = profile(
+                "unix-exclusive-sigkill-profile",
+                Some(PERSISTENT_SECRET_REF),
+                Some("unix-exclusive-sigkill-model"),
+            );
+            let mut storage = Storage::open_with_vfs(&path, "unix-excl").expect("child storage");
+            let transaction = storage.connection.transaction().expect("child transaction");
+            upsert_profile(&transaction, &transient).expect("child uncommitted profile");
+            fs::write(&ready_path, b"ready").expect("signal parent");
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory
+            .path()
+            .join("unix-exclusive-transaction-sigkill.sqlite3");
+        let ready_path = directory
+            .path()
+            .join("unix-exclusive-transaction-sigkill.ready");
+        let baseline = profile(
+            "unix-exclusive-baseline-profile",
+            Some(PERSISTENT_SECRET_REF),
+            Some("unix-exclusive-baseline-model"),
+        );
+        let mut storage = Storage::open_with_vfs(&path, "unix-excl").expect("storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline profile");
+        drop(storage);
+
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::unix_exclusive_vfs_rolls_back_uncommitted_transaction_after_sigkill",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .env(CHILD_READY_ENV, &ready_path)
+            .spawn()
+            .expect("spawn SIGKILL child");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if ready_path.is_file() {
+                break;
+            }
+            if let Some(status) = child.try_wait().expect("poll SIGKILL child") {
+                panic!("SIGKILL child exited before readiness: {status}");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("SIGKILL child did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().expect("kill SIGKILL child");
+        let status = child.wait().expect("wait SIGKILL child");
+        assert!(!status.success(), "SIGKILL child unexpectedly completed");
+
+        let reopened = Storage::open_with_vfs(&path, "unix-excl").expect("recovered storage");
+        let baseline_id =
+            ProviderProfileId::parse("unix-exclusive-baseline-profile").expect("profile id");
+        let transient_id =
+            ProviderProfileId::parse("unix-exclusive-sigkill-profile").expect("profile id");
+        assert_eq!(
+            reopened
+                .active_provider_profile()
+                .expect("active profile query")
+                .expect("active profile")
+                .id()
+                .as_str(),
+            baseline_id.as_str()
+        );
+        assert_eq!(
+            reopened
+                .provider_profile(&baseline_id)
+                .expect("baseline profile query")
+                .expect("baseline profile")
+                .selected_model(),
+            Some("unix-exclusive-baseline-model")
+        );
+        assert!(
+            reopened
+                .provider_profile(&transient_id)
+                .expect("transient profile query")
+                .is_none(),
+            "uncommitted profile survived unix-excl SIGKILL"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn unix_exclusive_vfs_wal_replay_survives_process_termination_after_commit() {
         const CHILD_PATH_ENV: &str = "LINGUAMESH_UNIX_EXCL_WAL_CRASH_CHILD_PATH";
 

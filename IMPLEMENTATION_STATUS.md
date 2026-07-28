@@ -1,5 +1,20 @@
 # Implementation Status
 
+## 2026-07-28 — Linux `unix-excl` SIGKILL rollback fixture
+
+Assumption: SQLite's bundled `unix-excl` VFS must preserve the same fail-closed rollback boundary
+as the default Linux VFS; this fixture does not claim physical power-loss recovery or arbitrary
+third-party VFS compatibility.
+
+- Added `unix_exclusive_vfs_rolls_back_uncommitted_transaction_after_sigkill`, which uses a
+  parent-owned readiness marker, opens the database through `unix-excl`, hard-kills a child with an
+  uncommitted provider profile, and verifies the committed baseline remains active while the
+  transient row is absent after reopen.
+- Focused validation passed. The serialized `linguamesh-storage` suite passed `68 passed; 0 failed`.
+- This strengthens Linux alternate-VFS interruption evidence only; cross-client parity,
+  physical/manual and GPU review, physical power-loss, arbitrary third-party VFS, signing,
+  rollback authorization, promotion, and stable-release gates remain open.
+
 ## 2026-07-26 — Current-head CLI acceptance recheck
 
 Assumption: the deterministic loopback fake-provider CLI remains authoritative for Scenario 1;
