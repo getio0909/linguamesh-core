@@ -67,6 +67,9 @@ Another Linux-only fixture replaces the registered VFS synchronization callback,
 persistence error at commit time, and verifies that the committed baseline survives while the
 transient profile is absent after reopen. These are bounded test-VFS fault probes, not claims for
 arbitrary third-party VFS implementations or physical power-loss recovery.
+The sync-crash companion terminates an isolated child from that callback during a profile commit
+and verifies the same baseline-preserving recovery after reopen. It is process-crash evidence only;
+physical power-loss and arbitrary third-party VFS behavior remain outside the claim.
 The registered fixture also injects an `xWrite` failure and repeats the same fail-closed transaction
 assertions, separating write-callback rejection from synchronization failure without expanding the
 claim to arbitrary third-party VFS behavior or physical power-loss recovery.

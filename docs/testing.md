@@ -224,6 +224,12 @@ performs the same baseline and transient-row assertions. This strengthens abrupt
 termination coverage but remains simulated crash evidence, not physical power-loss recovery or
 arbitrary-VFS compatibility.
 
+The `registered_vfs_sync_crash_rolls_back_without_false_success` fixture aborts an isolated child
+from the registered VFS `xSync` callback while a profile transaction is being persisted. Reopening
+through the recovered VFS verifies that the committed baseline remains and the interrupted profile
+is absent. This is a deterministic process-crash boundary, not physical power-loss recovery or
+arbitrary third-party VFS qualification.
+
 The Linux-only `unix_exclusive_vfs_rolls_back_uncommitted_transaction_after_sigkill` companion
 repeats the parent-controlled hard-kill boundary through SQLite's bundled `unix-excl` VFS. It
 requires the committed baseline profile to remain active and the transient row to be absent after

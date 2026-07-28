@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-28 — Linux registered VFS sync-crash rollback hardening
+
+Assumption: a process terminated during a registered VFS `xSync` callback must recover the last
+committed profile without reporting the interrupted transaction as successful; this is simulated
+process-crash evidence and does not qualify physical power-loss or arbitrary third-party VFS
+implementations.
+
+- Added `registered_vfs_sync_crash_rolls_back_without_false_success`, which aborts an isolated
+  child during the SQLite synchronization callback and verifies the baseline profile survives while
+  the transient profile is absent after reopen.
+- The focused fixture passed (`1 passed; 0 failed`); the serialized `linguamesh-storage` suite
+  passed `72 passed; 0 failed`; formatting passed.
+- This strengthens Linux Scenario 12 process-interruption evidence only. Physical power-loss,
+  arbitrary third-party VFS, cross-client, manual/GPU, signing, rollback, promotion, and
+  stable-release gates remain open.
+
 ## 2026-07-28 — Linux registered VFS truncate-failure hardening
 
 Assumption: the registered VFS `xTruncate` callback must fail closed during the WAL checkpoint
