@@ -274,6 +274,11 @@ The `registered_vfs_lock_failure_rejects_open_without_mutating_database` compani
 then verifies that the previously committed profile remains intact after the VFS recovers. This
 is bounded lock-callback evidence, not physical power-loss or arbitrary third-party VFS
 qualification.
+The `registered_vfs_truncate_failure_rejects_open_without_mutating_database` companion injects
+`SQLITE_IOERR_TRUNCATE` during the required WAL checkpoint on reopen, requires a typed persistence
+error, and verifies the committed profile remains unchanged after the VFS recovers. This is
+bounded truncate-callback evidence, not physical power-loss or arbitrary third-party VFS
+qualification.
 The registered VFS also injects an `xRead` failure during reopen; Core returns a typed persistence
 error, then the recovered VFS reopens the previously committed profile. This is bounded read-callback
 evidence over the reviewed implementation and does not qualify arbitrary third-party VFS behavior

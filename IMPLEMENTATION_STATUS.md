@@ -1,5 +1,21 @@
 # Implementation Status
 
+## 2026-07-28 — Linux registered VFS truncate-failure hardening
+
+Assumption: the registered VFS `xTruncate` callback must fail closed during the WAL checkpoint
+boundary, preserving committed data when a typed persistence error is returned; this remains
+bounded fault-injection evidence and does not qualify physical power-loss or arbitrary
+third-party VFS implementations.
+
+- Added `registered_vfs_truncate_failure_rejects_open_without_mutating_database`, which injects
+  `SQLITE_IOERR_TRUNCATE` during the required WAL checkpoint on reopen and verifies the committed
+  provider profile remains unchanged after the VFS recovers.
+- The focused fixture passed (`1 passed; 0 failed`), and the serialized `linguamesh-storage`
+  suite passed `71 passed; 0 failed`; formatting passed.
+- This strengthens Linux Scenario 3 storage/open-failure evidence only. Physical power-loss,
+  arbitrary third-party VFS, cross-client, manual/GPU, signing, rollback, promotion, and
+  stable-release gates remain open.
+
 ## 2026-07-28 — Linux registered VFS lock-failure hardening
 
 Assumption: a registered VFS that fails while acquiring a SQLite lock must fail closed with a
