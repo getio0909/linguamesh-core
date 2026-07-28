@@ -2509,6 +2509,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_ABORT_ON_SYNC: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE: AtomicBool = AtomicBool::new(false);
@@ -3729,6 +3731,10 @@ trailer
                 file: *mut rusqlite::ffi::sqlite3_file,
                 flags: std::os::raw::c_int,
             ) -> std::os::raw::c_int {
+                // 在独立子进程中模拟提交同步边界的突然进程终止。
+                if REGISTERED_SYNC_FAULT_VFS_ABORT_ON_SYNC.load(Ordering::SeqCst) {
+                    std::process::abort();
+                }
                 if REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.load(Ordering::SeqCst) {
                     return rusqlite::ffi::SQLITE_IOERR_FSYNC;
                 }
@@ -4070,6 +4076,7 @@ trailer
     impl Drop for FaultVfsSyncGuard {
         fn drop(&mut self) {
             REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.store(false, Ordering::SeqCst);
+            REGISTERED_SYNC_FAULT_VFS_ABORT_ON_SYNC.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_FAIL_LOCK.store(false, Ordering::SeqCst);
@@ -4203,6 +4210,72 @@ trailer
                 .expect("transient profile query")
                 .is_none(),
             "sync-failed transaction was reported as success"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_vfs_sync_crash_rolls_back_without_false_success() {
+        const CHILD_PATH_ENV: &str = "LINGUAMESH_REGISTERED_SYNC_CRASH_CHILD_PATH";
+
+        if let Some(child_path) = env::var_os(CHILD_PATH_ENV) {
+            let path = PathBuf::from(child_path);
+            let transient = profile(
+                "registered-sync-crash-transient-provider",
+                Some(PERSISTENT_SECRET_REF),
+                Some("registered-sync-crash-transient-model"),
+            );
+            let mut storage = Storage::open_with_vfs(&path, registered_sync_fault_vfs_name())
+                .expect("child sync crash storage");
+            REGISTERED_SYNC_FAULT_VFS_ABORT_ON_SYNC.store(true, Ordering::SeqCst);
+            storage
+                .save_and_activate_provider(&transient)
+                .expect("child sync crash transaction");
+            std::process::abort();
+        }
+
+        let directory = tempdir().expect("temp directory");
+        let path = directory.path().join("registered-sync-crash.sqlite3");
+        let vfs = registered_sync_fault_vfs_name();
+        let baseline = profile(
+            "registered-sync-crash-baseline-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-sync-crash-baseline-model"),
+        );
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("sync crash storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline sync crash profile");
+        drop(storage);
+
+        let child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "tests::registered_vfs_sync_crash_rolls_back_without_false_success",
+                "--nocapture",
+            ])
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .expect("spawn sync crash child");
+        assert!(!child.success(), "sync crash child unexpectedly completed");
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened sync crash storage");
+        assert_eq!(
+            reopened
+                .provider_profile(baseline.id())
+                .expect("baseline sync crash profile query")
+                .expect("baseline sync crash profile")
+                .selected_model(),
+            Some("registered-sync-crash-baseline-model")
+        );
+        let transient_id = ProviderProfileId::parse("registered-sync-crash-transient-provider")
+            .expect("transient sync crash profile id");
+        assert!(
+            reopened
+                .provider_profile(&transient_id)
+                .expect("transient sync crash profile query")
+                .is_none(),
+            "sync crash transaction was reported as success"
         );
     }
 
