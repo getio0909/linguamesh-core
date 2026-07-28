@@ -1,5 +1,22 @@
 # Implementation Status
 
+## 2026-07-28 — Linux registered VFS partial-write hardening
+
+Assumption: a registered VFS that writes only part of a SQLite page and then returns an I/O
+error must reject the transaction without reporting a false commit; this remains deterministic
+fault-injection evidence and does not qualify physical power-loss or arbitrary third-party VFS
+implementations.
+
+- Added `registered_vfs_partial_write_rejects_commit_without_false_success`, which delegates to
+  SQLite's bundled `unix-excl` implementation, writes only half of one requested buffer, returns
+  `SQLITE_IOERR_WRITE`, and verifies the committed baseline survives while the transient profile
+  is absent after reopen.
+- Focused validation passed (`1 passed; 0 failed`); the serialized `linguamesh-storage` suite
+  passed `69 passed; 0 failed`; `cargo fmt` passed.
+- This strengthens Linux Scenario 12 and registered-VFS failure evidence only. Physical
+  power-loss, arbitrary third-party VFS, cross-client, manual/GPU, signing, rollback, promotion,
+  and stable-release gates remain open.
+
 ## 2026-07-28 — Linux `unix-excl` SIGKILL rollback fixture
 
 Assumption: SQLite's bundled `unix-excl` VFS must preserve the same fail-closed rollback boundary

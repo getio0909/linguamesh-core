@@ -2511,6 +2511,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
+    static REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE: AtomicBool = AtomicBool::new(false);
+    #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_FAIL_READ: AtomicBool = AtomicBool::new(false);
     #[cfg(target_os = "linux")]
     static REGISTERED_SYNC_FAULT_VFS_ORIGINAL_OFFSET: AtomicUsize = AtomicUsize::new(0);
@@ -3771,9 +3773,6 @@ trailer
                 amount: std::os::raw::c_int,
                 offset: rusqlite::ffi::sqlite3_int64,
             ) -> std::os::raw::c_int {
-                if REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE.load(Ordering::SeqCst) {
-                    return rusqlite::ffi::SQLITE_IOERR_WRITE;
-                }
                 if file.is_null() {
                     return rusqlite::ffi::SQLITE_IOERR_WRITE;
                 }
@@ -3803,9 +3802,22 @@ trailer
                     .get()
                     .expect("sync fault methods initialized")
                     as *const rusqlite::ffi::sqlite3_io_methods;
+                let partial_write = REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE.load(Ordering::SeqCst);
                 let result = unsafe {
                     (*file).pMethods = original;
-                    write(file, buffer, amount, offset)
+                    if partial_write && amount > 1 {
+                        let partial_amount = amount / 2;
+                        let partial_result = write(file, buffer, partial_amount, offset);
+                        if partial_result == rusqlite::ffi::SQLITE_OK {
+                            rusqlite::ffi::SQLITE_IOERR_WRITE
+                        } else {
+                            partial_result
+                        }
+                    } else if REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE.load(Ordering::SeqCst) {
+                        rusqlite::ffi::SQLITE_IOERR_WRITE
+                    } else {
+                        write(file, buffer, amount, offset)
+                    }
                 };
                 // 将未注入故障的调用转发后恢复测试方法表。
                 unsafe {
@@ -3959,6 +3971,7 @@ trailer
         fn drop(&mut self) {
             REGISTERED_SYNC_FAULT_VFS_FAIL_SYNC.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_FAIL_WRITE.store(false, Ordering::SeqCst);
+            REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE.store(false, Ordering::SeqCst);
             REGISTERED_SYNC_FAULT_VFS_FAIL_READ.store(false, Ordering::SeqCst);
         }
     }
@@ -4136,6 +4149,56 @@ trailer
                 .expect("transient profile query")
                 .is_none(),
             "write-failed transaction was reported as success"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registered_vfs_partial_write_rejects_commit_without_false_success() {
+        let directory = tempdir().expect("temp directory");
+        let path = directory
+            .path()
+            .join("registered-partial-write-vfs.sqlite3");
+        let vfs = registered_sync_fault_vfs_name();
+        let baseline = profile(
+            "registered-partial-baseline-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-partial-baseline-model"),
+        );
+        let transient = profile(
+            "registered-partial-transient-provider",
+            Some(PERSISTENT_SECRET_REF),
+            Some("registered-partial-transient-model"),
+        );
+        let mut storage = Storage::open_with_vfs(&path, vfs).expect("partial write VFS storage");
+        storage
+            .save_and_activate_provider(&baseline)
+            .expect("baseline profile");
+
+        REGISTERED_SYNC_FAULT_VFS_PARTIAL_WRITE.store(true, Ordering::SeqCst);
+        let guard = FaultVfsSyncGuard;
+        assert!(matches!(
+            storage.upsert_provider_profile(&transient),
+            Err(error) if error.kind == ErrorKind::Persistence
+        ));
+        drop(guard);
+        drop(storage);
+
+        let reopened = Storage::open_with_vfs(&path, vfs).expect("reopened partial write storage");
+        assert_eq!(
+            reopened
+                .provider_profile(baseline.id())
+                .expect("baseline profile query")
+                .expect("baseline profile")
+                .selected_model(),
+            Some("registered-partial-baseline-model")
+        );
+        assert!(
+            reopened
+                .provider_profile(transient.id())
+                .expect("transient profile query")
+                .is_none(),
+            "partial write transaction was reported as success"
         );
     }
 
